@@ -2158,12 +2158,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const { event, otherCopies, addressedByUrl, brokenCollections } = await davClient.getCalendarEventById(eventId);
+        const { event, otherCopies, addressedByUrl, addressCollision, brokenCollections } = await davClient.getCalendarEventById(eventId);
         // The `otherCopies` merge lives in calendarEventBody rather than here: it is a branch,
         // and a branch in this switch has no test harness (#101).
         const body = calendarEventBody(event, otherCopies);
         return {
-          content: [{ type: 'text', text: `${toolJson(body)}${buildAmbiguousEventNote(otherCopies, addressedByUrl)}${buildEtcGmtZoneNote([event])}${buildBrokenCollectionNote(brokenCollections, 'read')}` }],
+          content: [{ type: 'text', text: `${toolJson(body)}${buildAmbiguousEventNote(otherCopies, addressedByUrl, addressCollision)}${buildEtcGmtZoneNote([event])}${buildBrokenCollectionNote(brokenCollections, 'read')}` }],
         };
       }
 

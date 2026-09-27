@@ -139,6 +139,8 @@ export interface CalendarEventResult {
    * note must not tell the caller to pick a url. See `CalendarObjectLookup`.
    */
   addressedByUrl?: boolean;
+  /** Set when the writes would refuse the addressed id (`CalendarObjectLookup.collision`). */
+  addressCollision?: true;
   brokenCollections?: BrokenCollections;
 }
 
@@ -3504,7 +3506,7 @@ export class CalDAVCalendarClient {
   }
 
   async getCalendarEventById(eventId: string): Promise<CalendarEventResult> {
-    const { matches, addressed, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, collision, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     const obj = matches[0]?.object;
     if (!obj) {
       throw eventNotFoundError(eventId, brokenCollections);
@@ -3516,6 +3518,7 @@ export class CalDAVCalendarClient {
       // the tool that hands over each copy's url. Disclosed even when a copy was addressed.
       otherCopies: matches.length > 1 ? matchesToCopies(matches.slice(1)) : undefined,
       addressedByUrl: addressed,
+      addressCollision: collision ? true : undefined,
       brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }

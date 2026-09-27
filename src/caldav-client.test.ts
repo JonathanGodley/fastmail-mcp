@@ -1986,6 +1986,21 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.deepEqual(otherCopies, [{ calendar: 'Work', url: WORK_URL + 'decoy.ics' }]);
   });
 
+  it('tells the read whether the writes would refuse the addressed id', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const decoy = makeLookupClient(decoyCalendars, decoyCarryingAnAddress(realUrl));
+    assert.equal((await decoy.client.getCalendarEventById(realUrl)).addressCollision, true);
+    // A record whose UID is its own url, duplicated elsewhere: addressed, and the writes act.
+    const selfUrl = PERSONAL_URL + 'self.ics';
+    const self = makeLookupClient(decoyCalendars, {
+      [WORK_URL]: [{ data: eventIcal(selfUrl, 'Copy'), url: WORK_URL + 'copy.ics', etag: '"e-copy"' }],
+      [PERSONAL_URL]: [{ data: eventIcal(selfUrl, 'Self'), url: selfUrl, etag: '"e-self"' }],
+    });
+    const read = await self.client.getCalendarEventById(selfUrl);
+    assert.equal(read.addressedByUrl, true);
+    assert.equal(read.addressCollision, undefined);
+  });
+
   // But the listing shows the decoy's id AS that url, so a caller who passes it back may mean
   // the decoy. A write that went to the addressed record would patch or destroy an event the
   // caller never saw under that id, so the writes refuse and name the handle that reaches each.

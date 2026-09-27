@@ -2171,6 +2171,19 @@ describe('buildAmbiguousEventNote', () => {
     assert.doesNotMatch(two, /records in this account carries/);
   });
 
+  // The usual way an addressed id names more records: another record's UID IS that url, so the
+  // listing shows it under this very id, and the writes refuse rather than guess.
+  it('says the writes refuse when the url is another record\'s UID, and names the handle for each', () => {
+    const note = buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }], true, true);
+    assert.ok(note.startsWith('\n\n'), JSON.stringify(note.slice(0, 8)));
+    assert.match(note, /the record AT that url, not one picked from the set/);
+    assert.doesNotMatch(note, /act on that same record/);
+    assert.match(note, /update_calendar_event and delete_calendar_event REFUSE this id/);
+    assert.match(note, /pass the event's own `id` \(its UID\) to act on the event above/);
+    assert.match(note, /pass its own `url` to act on one of the others\.$/);
+    assert.ok(note.includes(`"Work" ("${WORK}")`), note);
+  });
+
   it('stays silent on an addressed id that named exactly one record', () => {
     // The flag is about which note to write, never about whether there is one to write: an
     // ordinary read by url is the commonest call this tool takes and says nothing.
