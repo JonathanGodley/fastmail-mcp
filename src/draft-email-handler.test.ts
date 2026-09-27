@@ -300,6 +300,19 @@ describe('draft_email — token refusals, decided before anything is built', () 
     assert.match(message, /To write braces as text, escape them/);
   });
 
+  it('says how to write the braces as text when refusing {{forward}} with asAttachment', async () => {
+    const { client } = spyClient();
+    const message = await messageFrom(() => compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], asAttachment: true,
+        textBody: 'type {{forward}} to forward',
+      },
+      client,
+    ));
+    assert.match(message, /does not apply to an asAttachment forward/);
+    assert.match(message, /To write braces as text, escape them/);
+  });
+
   it('refuses {{forward}} alongside asAttachment: the original already rides whole', async () => {
     const { client } = spyClient();
     await assert.rejects(

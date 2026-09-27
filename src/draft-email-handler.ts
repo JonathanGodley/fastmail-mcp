@@ -307,7 +307,7 @@ function assertTokensAcceptable(
     throw bad(
       '{{forward}} does not apply to an asAttachment forward: the original rides whole ' +
       'as a .eml attachment, so there is no block to place. Drop the token, or drop ' +
-      'asAttachment to forward inline.',
+      'asAttachment to forward inline. ' + ESCAPE_HINT,
     );
   }
 
