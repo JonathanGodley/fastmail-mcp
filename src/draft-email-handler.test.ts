@@ -2586,7 +2586,7 @@ describe("draft_email — mode:'forward' subject, recipients and the recorded so
   // send_draft finds the original to mark through the recorded Message-ID; with none recorded
   // the forward still sends, but the original is never marked, and the caller is told now.
   it('says the original will not be marked forwarded when it has no usable Message-ID', async () => {
-    const NOTE = /no usable Message-ID, so send_draft will not mark it forwarded/;
+    const NOTE = /^The original has no usable Message-ID, so send_draft will not mark it forwarded when this draft is sent; the forward itself is unaffected\.$/;
     for (const messageId of [undefined, ['has space@example.com']]) {
       for (const asAttachment of [false, true]) {
         const { client } = plainClient(makeOriginal({ messageId }));
@@ -2601,7 +2601,7 @@ describe("draft_email — mode:'forward' subject, recipients and the recorded so
     }
     const { client } = plainClient();
     const r = await compose({ mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], textBody: 'FYI\n{{forward}}' }, client);
-    assert.equal((r.notes ?? []).some((n) => NOTE.test(n)), false);
+    assert.equal((r.notes ?? []).some((n) => /no usable Message-ID/.test(n)), false);
   });
 
   it('records both the Message-ID and the source id on an asAttachment forward too', async () => {

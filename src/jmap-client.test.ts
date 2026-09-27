@@ -722,6 +722,37 @@ describe('updateDraft', () => {
     assert.equal(makeReq.mock.calls.length, 1);
   });
 
+  it('lists every mailbox a trashed draft is filed in, naming the unnamed and the unknown by id', async () => {
+    mock.method(client, 'getMailboxes', async () => [
+      null,
+      DRAFTS_MAILBOX,
+      { id: 'mb-trash', name: 'Trash', role: 'trash' },
+      { id: 'mb-blank', name: '' },
+      { id: 'mb-space', name: '  ' },
+    ]);
+    const trashed = {
+      ...EXISTING_DRAFT,
+      mailboxIds: { 'mb-trash': true, 'mb-blank': true, 'mb-space': true, 'mb-gone': true, 'mb-drafts': false },
+    };
+    stubRequests(client, async () => ({ methodResponses: [['Email/get', { list: [trashed] }, 'getEmail']] }));
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { subject: 'X' }),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError, err.message);
+        assert.ok(err.message.includes(
+          '(it is in: "Trash", unnamed mailbox (id: "mb-blank"), unnamed mailbox (id: "mb-space"), ' +
+          'unknown mailbox (id: "mb-gone")).',
+        ), err.message);
+        return true;
+      },
+    );
+  });
+
+  it('edits a draft whose mailboxIds carry the Trash id with a value other than true', async () => {
+    mockUpdate(client, { ...EXISTING_DRAFT, mailboxIds: { 'mb-drafts': true, 'mb-trash': false } });
+    assert.equal((await client.updateDraft('draft-1', { subject: 'X' })).id, 'draft-2');
+  });
+
   it('edits a draft filed in a mailbox that is neither Drafts nor Trash', async () => {
     const parked = { ...EXISTING_DRAFT, mailboxIds: { 'mb-parked': true } };
     const makeReq = mockUpdate(client, parked);
@@ -4100,6 +4131,15 @@ describe('an exact-address identity beats a wildcard listed before it', () => {
     assert.equal(makeReq.mock.calls.length, 0);
   });
 
+  it('updateDraft refuses when no identity has an address, even for a draft that has a from', async () => {
+    mock.method(client, 'getIdentities', async () => [{ id: 'id-x', name: 'No Address', mayDelete: false }]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [{ ...EXISTING_DRAFT, from: [{ email: 'ops@example.com' }] }] }, 'getEmail']],
+    }));
+    await assert.rejects(() => client.updateDraft('draft-1', { subject: 'Changed' }), /No sending identities found/);
+    assert.equal(makeReq.mock.calls.length, 1);
+  });
+
   it('createDraft writes the exact identity\'s name', async () => {
     const makeReq = stubRequests(client, async () => ({
       methodResponses: [['Email/set', { created: { draft: { id: 'email-x' } } }, 'createDraft']],
@@ -4534,6 +4574,8 @@ describe('uploadAttachments', () => {
     return {
       handle: {
         read: async (buf: Buffer, off: number, len: number, pos: number) => {
+          // FileHandle.read refuses a length that runs past the end of the buffer.
+          if (off + len > buf.length) throw new RangeError(`length ${len} at offset ${off} exceeds ${buf.length}`);
           const n = Math.max(0, Math.min(chunk, len, content.length - pos));
           content.copy(buf, off, pos, pos + n);
           return { bytesRead: n, buffer: buf };
@@ -4581,8 +4623,7 @@ describe('uploadAttachments', () => {
     await assert.rejects(
       () => client.uploadAttachments([{ path: 'grown.txt' }], 'unused-root', false),
       (err: Error) => {
-        assert.match(err.message, /"grown\.txt"/);
-        assert.match(err.message, /changed while being read/);
+        assert.match(err.message, /"grown\.txt" is now longer than the 4 bytes it had when checked; it changed while being read/);
         return true;
       },
     );
@@ -5630,6 +5671,12 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
       assert.equal(draftFromCall(makeReq)[SRC_PROP], undefined, JSON.stringify(stored));
       makeReq.mock.restore();
     }
+  });
+
+  it('updateDraft carries a stored header with surrounding whitespace, trimmed', async () => {
+    const makeReq = mockSrcUpdate(client, { ...REPLY_QUOTED, [SRC_PROP]: '  orig-1 \t' });
+    await client.updateDraft('rdraft-1', { subject: 'Re: Hello (edited)' });
+    assert.equal(draftFromCall(makeReq)[SRC_PROP], 'orig-1');
   });
 
   it('a draft that never had the header stays without it', async () => {

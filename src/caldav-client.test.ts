@@ -217,6 +217,14 @@ describe('extractVEvent', () => {
     assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`);
   });
 
+  it('reads a BEGIN/END:VEVENT line with trailing spaces, tabs or a stray CR as the marker', () => {
+    for (const tail of [' ', '\t', '\r', ' \t\r']) {
+      const ical = `BEGIN:VCALENDAR\r\nBEGIN:VEVENT${tail}\r\nUID:u1\r\nEND:VEVENT${tail}\r\nEND:VCALENDAR\r\n`;
+      const block = extractVEvent(ical);
+      assert.ok(block?.includes('UID:u1'), JSON.stringify(tail));
+    }
+  });
+
   it('extracts VEVENT block from iCalendar data', () => {
     const ical = [
       'BEGIN:VCALENDAR',

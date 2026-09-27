@@ -245,6 +245,49 @@ describe('coerceRecipients', () => {
     );
   });
 
+  it('says how to fix each recipient refusal', () => {
+    const refusal = (args: Record<string, unknown>) => {
+      try { coerceRecipients(args); } catch (e: any) { return e.message as string; }
+      assert.fail(`no refusal for ${JSON.stringify(args)}`);
+    };
+    assert.match(
+      refusal({ to: 'Smith, John <john@example.com>' }),
+      / A comma separates recipients unless it is inside double quotes or <…>, so quote a display name that carries one \("Smith, John" <john@example\.com>\), or pass an array\.$/,
+    );
+    assert.match(
+      refusal({ to: '"Smith, John <john@example.com>, bob@example.com' }),
+      /^to has an unclosed double quote, so the recipients after it cannot be told apart and none were read\. Close it, or pass an array\.$/,
+    );
+    assert.match(refusal({ to: 'Ops <ops@example.com, bob@example.com' }), /^to has an unclosed "<", so /);
+    assert.match(
+      refusal({ cc: ['Bob <bob@example.com> carol@example.com'] }),
+      /, which would be dropped\. Give each recipient its own entry \(or separate them with a comma\)\.$/,
+    );
+  });
+
+  it('refuses text after a ">" that opens no address, and not an entry whose last "<" follows it', () => {
+    assert.throws(
+      () => coerceRecipients({ to: ['a>b@example.com'] }),
+      (e: any) => e instanceof InvalidInputError && e.message.startsWith('to[0] "a>b@example.com" has text after its closing ">"'),
+    );
+    // parseAddress reads the whole of this as the address, so nothing after the ">" is dropped.
+    assert.deepEqual(coerceRecipients({ to: ['a>b <c@example.com'] }).to, ['a>b <c@example.com']);
+  });
+
+  it('reads a JSON array string with surrounding whitespace as the array', () => {
+    assert.deepEqual(
+      coerceRecipients({ to: ' ["a@example.com", "Bob <bob@example.com>"] ' }).to,
+      ['a@example.com', 'Bob <bob@example.com>'],
+    );
+  });
+
+  it('reads a bracketed value that is not JSON as the comma form, so each piece is checked', () => {
+    assert.throws(
+      () => coerceRecipients({ to: '[a@example.com, Smith]' }),
+      (e: any) => e instanceof InvalidInputError && e.message.startsWith('to "Smith]" names no email address.'),
+    );
+  });
+
   it('coerces empty string to empty array for each field (the accepted edit-clear path)', () => {
     assert.deepEqual(coerceRecipients({ to: '', cc: '', bcc: '', replyTo: '' }), {
       to: [],
@@ -887,6 +930,11 @@ describe('validateClearFields', () => {
 });
 
 describe('parseAddress', () => {
+  it('trims the whitespace inside a quoted display name, and a blank one is no name', () => {
+    assert.deepEqual(parseAddress('"  Smith  " <s@example.com>'), { name: 'Smith', email: 's@example.com' });
+    assert.deepEqual(parseAddress('"   " <s@example.com>'), { email: 's@example.com' });
+  });
+
   it('unescapes a backslash-escaped character inside a quoted display name', () => {
     assert.deepEqual(parseAddress('"Sm\\"ith, J" <j@example.com>'), { name: 'Sm"ith, J', email: 'j@example.com' });
     assert.deepEqual(parseAddress('"a\\\\b" <j@example.com>'), { name: 'a\\b', email: 'j@example.com' });
@@ -949,6 +997,17 @@ describe('assertKnownParams (#11)', () => {
       () => assertKnownParams('list_emails', { mailbox: 'x', folder: 'y', limit: 5 }, allowed, false),
       /Unknown parameter\(s\): "mailbox", "folder"/,
     );
+  });
+
+  it('names at most ten unknown keys and counts the rest', () => {
+    const keys = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, 1]));
+    const message = (n: number) => {
+      try { assertKnownParams('list_emails', keys(n), allowed, false); } catch (e: any) { return e.message as string; }
+      assert.fail('expected throw');
+    };
+    const shown = Array.from({ length: 10 }, (_, i) => `"k${i}"`).join(', ');
+    assert.ok(message(12).endsWith(`Unknown parameter(s): ${shown}, …and 2 more. Valid: mailboxId, limit, raw`), message(12));
+    assert.ok(message(10).endsWith(`Unknown parameter(s): ${shown}. Valid: mailboxId, limit, raw`), message(10));
   });
 
   it('quotes and neutralises an unknown key that would forge a line', () => {
@@ -1346,6 +1405,7 @@ describe('contact entry coercion', () => {
     assert.throws(() => coerceContactEmails([{ address: 'a@b.example', type: 'work' }]), isInvalidInput(/emails\[0\].*unknown key\(s\): "type"/));
     assert.throws(() => coerceContactPhones([{ number: '1' }, { number: '2', pref: 1 }]), isInvalidInput(/phones\[1\].*unknown key\(s\): "pref"/));
     assert.throws(() => coerceContactAddresses([{ full: '1 Road', country: 'GB' }]), isInvalidInput(/addresses\[0\].*unknown key\(s\): "country"/));
+    assert.throws(() => coerceContactEmails([{ address: 'a@b.example', type: 'work' }]), isInvalidInput(/ Valid: address, label$/));
   });
 
   it('rejects a WRONG-TYPED value, naming the index', () => {
