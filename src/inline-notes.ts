@@ -52,7 +52,8 @@ const MAX_NAMED_PARTS = 3;
  *    and `buildReceipt` in draft-email-handler.ts. A member is a DISTINCT SPELLING, and
  *    `total` counts EVERY distinct spelling, the ones past the display cap included. The same
  *    typo written into two supplied bodies is ONE member here, not two, because it is one
- *    thing for the caller to fix.
+ *    thing for the caller to fix. `rejectBrokenDraft` is one too: its values are distinct
+ *    identifiers.
  *
  * Mixing them renders wrongly in a way that reads as fact: a "…and N more" for members that
  * do not exist, or the display cap spent quoting one member twice.
@@ -409,7 +410,7 @@ export function rejectBrokenDraft(
   values: string[],
   availability: AttachmentAvailability,
 ): string {
-  const listed = values.map((v) => `"${describePart(v)}"`).join(', ');
+  const listed = describePartNames(values);
   const base =
     `This draft's stored body references image identifier(s) with no matching attachment ` +
     `(${listed}). This server won't edit its body in that state unless the edit resolves ` +
@@ -423,7 +424,7 @@ export function rejectBrokenDraft(
   // identifier would bury the recipe above it.
   return values.length === 1
     ? `${base} Or add an attachments item with cid "${values[0]}" to supply the missing image.`
-    : `${base} Or add attachments items with cid ${values.map((v) => `"${v}"`).join(', ')} ` +
+    : `${base} Or add attachments items with cid ${describePartNames(values)} ` +
       'to supply the missing images.';
 }
 
