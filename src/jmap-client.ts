@@ -1631,9 +1631,6 @@ export class JmapClient {
     return data as JmapResponse;
   }
 
-  // Find a mailbox by EXACT role (case-insensitive). A USABLE id is part of the match:
-  // every caller reads `.id` straight away, and a missing one becomes the literal
-  // "undefined" in a silently corrupt write.
   /**
    * edit_draft refuses a draft filed in Trash. A superseded copy keeps `$draft` there, and the
    * recreate carries the old copy's mailboxIds, so an edit would write the replacement into
@@ -1658,6 +1655,9 @@ export class JmapClient {
     );
   }
 
+  // Find a mailbox by EXACT role (case-insensitive). A USABLE id is part of the match:
+  // every caller reads `.id` straight away, and a missing one becomes the literal
+  // "undefined" in a silently corrupt write.
   private findByExactRole(mailboxes: any[], role: string): any | undefined {
     const target = role.toLowerCase();
     return (mailboxes || []).find(mb =>
