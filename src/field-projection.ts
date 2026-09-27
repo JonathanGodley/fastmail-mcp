@@ -1,6 +1,5 @@
-import { InvalidInputError, coerceStringArray, describeUntrustedAt } from './coerce.js';
+import { InvalidInputError, coerceStringArray, describeUntrustedAt, joinCapped } from './coerce.js';
 import type { SimplifiedEmail } from './email-formatter.js';
-import { joinCapped } from './jmap-client.js';
 
 // Caller-directed output projection for the email read tools (#69, #79). A 66-message
 // sweep measured 84KB, of which the five fields the caller wanted were 18%.

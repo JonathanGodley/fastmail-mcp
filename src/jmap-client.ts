@@ -1,6 +1,6 @@
 import { FastmailAuth } from './auth.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, PathAccessError, InvalidInputError } from './coerce.js';
+import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, joinCapped, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from './reply-quote.js';
@@ -1034,13 +1034,6 @@ function formatMailboxUnwalkable(input: string, id: string): string {
 // The multi-input messages for the label arrays name EVERY failed value in one message, in
 // separate buckets because each calls for a different correction.
 
-// Join a capped list and SAY when it was capped: a truncated list with no tail reads as a
-// complete one.
-export function joinCapped(items: string[], separator = ', '): string {
-  const shown = items.slice(0, MAILBOX_LIST_CAP);
-  const listed = shown.join(separator);
-  return items.length > shown.length ? `${listed}${separator}…and ${items.length - shown.length} more` : listed;
-}
 
 function formatMailboxesNotFound(unresolved: string[], mailboxes: any[]): string {
   const listed = joinCapped(unresolved.map(v => `"${describeUntrusted(v)}"`));

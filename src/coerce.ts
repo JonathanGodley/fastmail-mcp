@@ -99,6 +99,19 @@ export function describeUntrusted(value: unknown): string {
   return describeUntrustedAt(value, DESCRIBE_PART_MAX);
 }
 
+// How many items a refusal lists before it counts the rest.
+const LIST_ECHO_CAP = 30;
+
+/**
+ * Join a capped list and SAY when it was capped: a truncated list with no tail reads as a
+ * complete one. The items arrive already rendered (quoted, described); this only bounds them.
+ */
+export function joinCapped(items: string[], separator = ', '): string {
+  const shown = items.slice(0, LIST_ECHO_CAP);
+  const listed = shown.join(separator);
+  return items.length > shown.length ? `${listed}${separator}…and ${items.length - shown.length} more` : listed;
+}
+
 /**
  * `describeUntrusted` at a bound named by the caller, for a value the 64-code-point default
  * renders useless — the same two steps in the same order, at a width that value can survive.
