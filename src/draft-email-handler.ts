@@ -389,12 +389,12 @@ const POOLED_REMEDY_DROP_TOKEN =
   'drop {{forward}} and pass asAttachment: true to forward the original whole, then delete ' +
   'this draft.';
 
-/** A reply that placed no {{quote}}: a forgotten token would otherwise be silent. */
 /** A forward whose original has no Message-ID this server can record (see isSettableMessageId). */
 const NOTE_FORWARD_UNMARKABLE =
   'The original has no usable Message-ID, so send_draft will not mark it forwarded when this ' +
   'draft is sent; the forward itself is unaffected.';
 
+/** A reply that placed no {{quote}}: a forgotten token would otherwise be silent. */
 const NOTE_REPLY_UNQUOTED =
   'This reply was stored without the original: place {{quote}} in the body to include it.';
 
