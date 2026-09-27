@@ -23,11 +23,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const LOOKBACK_MS = 366 * DAY_MS;
 
 // The earliest lookback start allowed, one day INTO year 1 so that rendering it as local wall
-// time in a zone behind UTC cannot land in year 0: `pad`'s 4-digit year prints a NEGATIVE
-// number (e.g. `pad(-1, 4)` is "00-1", not "-0001") the moment the lookback window reaches
-// back before year 1, since RFC 5545 has no year-0 or negative-year DATE-TIME form to fall
-// back on. Refused outright rather than clamped to year 1: a clamped lookback would misreport
-// which observance was "in force" at a window start that never really existed.
+// time in a zone behind UTC cannot land in year 0, where `pad`'s 4-digit year prints a
+// negative number (`pad(-1, 4)` is "00-1"); RFC 5545 has no year-0 or negative-year DATE-TIME.
+// Refused rather than clamped: a clamped lookback would misreport which observance was "in
+// force" at a window start that never really existed.
 const MIN_LOOKBACK_START_MS = utcMsFromComponents(1, 1, 2, 0, 0, 0);
 
 // The longest span this generator will compute. Both findTransitions (one sample per day) and
@@ -79,10 +78,8 @@ interface Observance {
  * day-stepping loop below never samples inside a sub-day span, so the tail check's one last
  * comparison against `toMs` is what catches a transition in it.
  *
- * `fromMs` and `toMs` are each floored to a whole second up front, and every sample in between
- * stays on that grid too (`DAY_MS` is itself a whole number of seconds) — so every instant this
- * passes to `zoneOffsetMsAt`, and every bound handed to `bisectTransition`, is a whole second,
- * which is that function's own precondition (see its comment).
+ * `fromMs` and `toMs` are floored to a whole second, and every sample stays on that grid
+ * (`DAY_MS` is a whole number of seconds), which is `bisectTransition`'s precondition.
  *
  * Requires `fromMs <= toMs`, unchecked: an inverted span silently returns no transitions, and
  * cannot occur because `generateVTimezone`'s two callers pass `Math.min`/`Math.max` of their instants.
@@ -116,15 +113,12 @@ export function findTransitions(zone: string, fromMs: number, toMs: number): Tra
  * there is exactly one transition between them — so ordinary bisection on the step function
  * `zoneOffsetMsAt` finds the boundary exactly.
  *
- * Bisection stays on WHOLE-SECOND instants throughout (both inputs are already whole-second —
- * see `findTransitions` — and every midpoint computed here is too), never probing a sub-second
- * instant: `zoneOffsetMsAt` resolves to whole seconds internally regardless of what it is given,
- * so a finer probe here buys nothing, and every real IANA transition lands on a whole second
- * anyway. Precondition: both bounds must be whole-second, checked at entry rather than trusted —
- * a fractional bound otherwise either returns a silent sub-second result or, for a gap strictly
- * between 1 and 2 seconds, stalls the loop outright, and neither failure is visible to a caller
- * until it happens. Whole-second bounds guarantee `highSec - lowSec` strictly decreases each pass,
- * so the loop itself needs no iteration bound once the precondition holds.
+ * Bisection stays on WHOLE-SECOND instants: `zoneOffsetMsAt` resolves to whole seconds
+ * internally, and every real IANA transition lands on one, so a finer probe buys nothing.
+ * Precondition: both bounds must be whole-second, checked at entry rather than trusted, since a
+ * fractional bound either returns a silent sub-second result or, for a gap strictly between 1
+ * and 2 seconds, stalls the loop. Whole-second bounds make `highSec - lowSec` strictly decrease
+ * each pass, so the loop needs no iteration bound.
  */
 // Exported for its own test coverage; every real caller goes through generateVTimezone -> findTransitions.
 export function bisectTransition(zone: string, lowMs: number, highMs: number, lowOffsetMs: number): number {
@@ -146,8 +140,7 @@ function pad(n: number, width = 2): string {
 }
 
 /** A UTC offset as RFC 5545's `utc-offset` (§3.3.14): `+HHMM`, seconds appended only when the
- * offset itself carries them (real for some pre-modern zones, and the ABNF allows it, so there is
- * no reason to lose the precision when it occurs). */
+ * offset itself carries them (real for some pre-modern zones; the ABNF allows it). */
 function formatOffset(offsetMs: number): string {
   const sign = offsetMs < 0 ? '-' : '+';
   const totalSeconds = Math.round(Math.abs(offsetMs) / 1000);
@@ -227,10 +220,9 @@ export function generateVTimezone(
   spanEndUtcMsInput: number,
   lineEnding: string = '\r\n',
 ): string {
-  // Floored to a whole second: `zoneOffsetMsAt` floors internally too, but `spanDays` below and
-  // the initial observance's lookback boundary are plain arithmetic on `spanStartUtcMs`/
-  // `spanEndUtcMs` directly, bypassing that floor — so this keeps `DTSTART`/`TZUNTIL` and the
-  // lookback boundary on the same whole-second grid `findTransitions` samples.
+  // Floored to a whole second: `spanDays` and the lookback boundary are plain arithmetic on
+  // these, bypassing `zoneOffsetMsAt`'s own floor, so this keeps `DTSTART`/`TZUNTIL` and the
+  // lookback boundary on the whole-second grid `findTransitions` samples.
   const spanStartUtcMs = Math.floor(spanStartUtcMsInput / SECOND_MS) * SECOND_MS;
   const spanEndUtcMs = Math.floor(spanEndUtcMsInput / SECOND_MS) * SECOND_MS;
   const lookbackStartMs = spanStartUtcMs - LOOKBACK_MS;

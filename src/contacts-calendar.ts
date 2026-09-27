@@ -91,7 +91,6 @@ export class ContactsCalendarClient extends JmapClient {
   }
 
   async getContacts(limit: number = 50): Promise<QueryResult> {
-    // Check permissions first
     const hasPermission = await this.checkContactsPermission();
     if (!hasPermission) {
       throw new Error('Contacts access not available. This account may not have JMAP contacts permissions enabled. Please check your Fastmail account settings or contact support to enable contacts API access.');
@@ -99,7 +98,6 @@ export class ContactsCalendarClient extends JmapClient {
 
     const accountId = await this.contactsAccountId();
 
-    // Try CardDAV namespace first, then Fastmail specific
     const request: JmapRequest = {
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:contacts'],
       methodCalls: [
@@ -120,17 +118,14 @@ export class ContactsCalendarClient extends JmapClient {
       const response = await this.makeRequest(request);
       return this.getQueryResult(response, 0, 1);
     } catch (error) {
-      // No AddressBook/get fallback: that used to swallow the real ContactCard/query error
-      // and return address books dressed up as contacts, discarding the one thing the caller
-      // needed to see. Same never-silent rule the mailbox resolver follows for
-      // unresolvedMailboxIds, applied in the right direction here — a failed contacts query
-      // must surface as a failure, never as a different kind of record.
+      // No AddressBook/get fallback: it would hide the real ContactCard/query error behind
+      // address books dressed up as contacts. A failed contacts query surfaces as a failure,
+      // never as a different kind of record.
       throw new Error(`Contacts not supported or accessible: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling contacts API access in Fastmail settings.`);
     }
   }
 
   async getContactById(id: string): Promise<any> {
-    // Check permissions first
     const hasPermission = await this.checkContactsPermission();
     if (!hasPermission) {
       throw new Error('Contacts access not available. This account may not have JMAP contacts permissions enabled. Please check your Fastmail account settings or contact support to enable contacts API access.');
@@ -155,11 +150,9 @@ export class ContactsCalendarClient extends JmapClient {
     } catch (error) {
       throw new Error(`Contact access not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling contacts API access in Fastmail settings.`);
     }
-    // ContactCard/get reports unknown ids via notFound, leaving list empty — a
-    // bare undefined here used to serialize as a successful empty tool response.
-    // InvalidInputError (not a plain Error) because a wrong id is the caller's
-    // to fix: it maps to InvalidParams at the MCP boundary rather than the
-    // InternalError that reads as a server bug.
+    // ContactCard/get reports an unknown id via notFound with an empty list; a bare undefined
+    // would serialize as a successful empty tool response. InvalidInputError because a wrong
+    // id is the caller's to fix (InvalidParams, not InternalError).
     if (!contact) {
       throw new InvalidInputError(`Contact not found: ${id}`);
     }
@@ -167,7 +160,6 @@ export class ContactsCalendarClient extends JmapClient {
   }
 
   async searchContacts(query: string, limit: number = 20): Promise<QueryResult> {
-    // Check permissions first
     const hasPermission = await this.checkContactsPermission();
     if (!hasPermission) {
       throw new Error('Contacts access not available. This account may not have JMAP contacts permissions enabled. Please check your Fastmail account settings or contact support to enable contacts API access.');
@@ -200,18 +192,15 @@ export class ContactsCalendarClient extends JmapClient {
     }
   }
 
-  // There are deliberately no JMAP calendar methods in this class: the calendar
-  // tools run over CalDAV (CalDAVCalendarClient in caldav-client.ts), which is the
-  // only calendar path index.ts routes to. The JMAP Calendar/CalendarEvent methods
-  // that used to sit here had no callers, so they are removed rather than kept as a
-  // second, untested implementation a reader could mistake for the live one.
+  // There are deliberately no JMAP calendar methods in this class: the calendar tools run
+  // over CalDAV (CalDAVCalendarClient in caldav-client.ts), the only calendar path index.ts
+  // routes to.
 
   // ---------- contacts write (JMAP ContactCard/set, RFC 9610) ----------
   //
-  // A live probe confirmed Fastmail accepts ContactCard/set with an RFC 9610
-  // Card shape; the server assigns the default address book, uid, and prodId.
-  // Note: creation-id references ("#id") are NOT resolved in destroy arrays by
-  // Fastmail's backend — always destroy by real id.
+  // Fastmail accepts ContactCard/set with an RFC 9610 Card shape (live probe) and assigns
+  // the default address book, uid, and prodId. Creation-id references ("#id") are NOT
+  // resolved in destroy arrays by Fastmail's backend: always destroy by real id.
 
   /** Map the flat tool-facing input onto an RFC 9610 Card (arrays -> Id-maps). */
   private buildCardProperties(input: {
@@ -257,12 +246,9 @@ export class ContactsCalendarClient extends JmapClient {
     notes?: string;
     addressBookId?: string;
   }): Promise<string> {
-    // An empty array is refused here for the same reason update_contact refuses one: it is
-    // indistinguishable from a mapping bug that produced no entries, and `buildCardProperties`
-    // would silently omit the field rather than say so. There is nothing to clear on a create,
-    // so the route out is simply to omit the parameter. Keeping both tools on one rule is
-    // what makes "[] is never accepted on a contact entry array" a rule rather than a
-    // per-tool detail.
+    // An empty array is refused for the same reason updateContact refuses one, and
+    // `buildCardProperties` would silently omit the field rather than say so. There is nothing
+    // to clear on a create, so the route out is to omit the parameter.
     for (const field of ['emails', 'phones', 'addresses'] as const) {
       const value = input[field];
       if (value && value.length === 0) {
@@ -298,9 +284,6 @@ export class ContactsCalendarClient extends JmapClient {
     const response = await this.makeRequest(request);
     const result = this.getMethodResult(response, 0);
     if (result.notCreated?.newContact) {
-      // Same SetError classification the mail writes use: a `notFound` is a bad id the
-      // caller can fix (InvalidParams), anything else is an operational failure
-      // (InternalError). The rendered message is unchanged.
       this.throwSingleSetError(result.notCreated.newContact, 'create contact');
     }
     const id = result.created?.newContact?.id;
@@ -358,9 +341,8 @@ export class ContactsCalendarClient extends JmapClient {
     // ambiguous. `allowEntryReplace` is scoped to the field that could not be resolved, not
     // to the whole call: a caller that hits the rejection on `emails` and resends the same
     // call with the flag would otherwise silently lose the contexts/pref on a `phones` array
-    // that had nothing ambiguous about it — the flag would then destroy data on a field the
-    // caller was never warned about, which is precisely the failure the merge exists to
-    // prevent. The rejection text already promises this scoping ("to REPLACE the <field>").
+    // it was never warned about. The rejection text already promises this scoping ("to
+    // REPLACE the <field>").
     const outcome = mergeEntryMap(existing, fresh, keyField);
     if (!isAmbiguousEntryEdit(outcome)) return outcome.map;
 
@@ -420,7 +402,6 @@ export class ContactsCalendarClient extends JmapClient {
     }
 
     if (provided.size === 0 && !clearFields?.length) {
-      // An empty patch is caller-fixable input, not a server fault.
       throw new InvalidInputError('At least one field to update must be provided (name, emails, phones, addresses, notes, or clearFields)');
     }
 
@@ -428,18 +409,14 @@ export class ContactsCalendarClient extends JmapClient {
 
     const previousCard = await this.fetchCardOrUndefined(accountId, id);
     if (!previousCard) {
-      // A wrong id is the caller's to fix, so this maps to InvalidParams — matching
-      // getContactById and the not-found convention across the client.
       throw new InvalidInputError(`Contact not found: ${id}`);
     }
 
     // A group card holds a `members` map and no emails/phones at all. None of this tool's
     // parameters describe a group, and there is no members surface here to edit one through,
     // so an update aimed at a group is refused rather than half-applied to a record whose
-    // shape it does not fit. (The group's membership is untouched either way — a PatchObject
-    // only replaces the properties named in it — but a call that reads as "set this group's
-    // phone number" has no correct outcome.) deleteContact refuses the same card kind from
-    // the same rule; both raise it through contactGroupRefusal so they read as one.
+    // shape it does not fit. deleteContact refuses the same card kind; both raise it through
+    // contactGroupRefusal so they read as one.
     if (isContactGroupCard(previousCard)) {
       throw new InvalidInputError(contactGroupRefusal({
         id,
@@ -493,10 +470,9 @@ export class ContactsCalendarClient extends JmapClient {
       this.throwSingleSetError(result.notUpdated[id], 'update contact');
     }
     // RFC 8620 section 5.3 requires the id in exactly one of `updated`/`notUpdated`. A
-    // response carrying it in neither is not a success this client may report as one — the
-    // difference between "the write landed" and "we assumed it did" is the whole value of
-    // saying so. Note `updated[id]` is legitimately `null` (the server changed nothing extra),
-    // so this asks whether the KEY is present, never whether the value is truthy.
+    // response carrying it in neither is not a success this client may report as one. Note
+    // `updated[id]` is legitimately `null` (the server changed nothing extra), so this asks
+    // whether the KEY is present, never whether the value is truthy.
     if (!result.updated || !Object.prototype.hasOwnProperty.call(result.updated, id)) {
       throw new Error(
         `The server neither confirmed nor refused the update of contact ${id}: it reported the id in ` +
@@ -534,25 +510,18 @@ export class ContactsCalendarClient extends JmapClient {
   async deleteContact(id: string, expectState?: string): Promise<DeleteContactResult> {
     const accountId = await this.contactsAccountId();
 
-    // A destroy must not remove a record this server has no way to recreate, and a group is
-    // exactly that: `create_contact` has no `kind` and no `members` parameter, so the echoed
-    // card — the whole safety net on this irreversible call — could not rebuild a membership
-    // list that on a real card runs to a hundred-odd uids. `update_contact` already refuses a
-    // group; this is the same rule from the other side.
-    //
-    // The check is scoped to the record KIND, not to fields create_contact cannot set. Almost
-    // every real card carries titles, organizations or photos that this server cannot write,
-    // and refusing to delete all of those would break the tool. What makes a group different
-    // is that there is no way to make one at all. Keep it that way as create_contact grows.
+    // A group is refused because `create_contact` has no `kind` and no `members` parameter, so
+    // the echoed card could not rebuild a membership list that on a real card runs to a
+    // hundred-odd uids (CONTRIBUTING.md, "A destroy must not remove what the
+    // server cannot recreate"; the test is the record KIND, not its fields).
     //
     // It costs its own round trip: a JMAP batch cannot make one method conditional on
     // another's result, so the card has to be read in a request that completes before the
     // destroy is sent. The echo still comes from the read inside the destroy batch, so it
     // remains the card as it stood at the moment it was destroyed. A card that cannot be read
-    // at ALL fails here, before anything is destroyed — the safe direction on an irreversible
-    // call, and unlike the post-destroy read there is nothing yet to lose by throwing. A card
-    // the account simply does not hold reads as undefined and falls through to the destroy,
-    // whose own `notFound` is the authoritative answer for a bad id.
+    // at ALL fails here, before anything is destroyed, where there is nothing yet to lose by
+    // throwing. A card the account simply does not hold reads as undefined and falls through
+    // to the destroy, whose own `notFound` is the authoritative answer for a bad id.
     const doomedCard = await this.fetchCardOrUndefined(accountId, id);
     if (isContactGroupCard(doomedCard)) {
       throw new InvalidInputError(contactGroupRefusal({
@@ -582,9 +551,7 @@ export class ContactsCalendarClient extends JmapClient {
     if (result.notDestroyed?.[id]) {
       const err = result.notDestroyed[id];
       if (err.type === 'notFound') {
-        // Caller-fixable bad id: InvalidParams, not the InternalError a plain Error
-        // would map to. The wording matches the other not-found paths. A genuinely unknown
-        // id lands HERE (RFC 8620 section 5.3 puts it in notDestroyed), which is why an
+        // Caller-fixable bad id: InvalidParams. A genuinely unknown id lands HERE (RFC 8620 section 5.3 puts it in notDestroyed), which is why an
         // unreadable card below is never reported as not-found: by then the destroy has
         // succeeded, so the id was real.
         throw new InvalidInputError(`Contact not found: ${id}`);
@@ -600,10 +567,8 @@ export class ContactsCalendarClient extends JmapClient {
       );
     }
 
-    // Tolerant read, and deliberately NOT a throw when it comes back empty. The destroy has
-    // already happened and cannot be undone, so an unreadable echo is a degraded result, not a
-    // failed call — and it is certainly not "not found", which would tell the caller its id
-    // was wrong about a card that was found and destroyed.
+    // Tolerant read, never a throw (see the doc comment). Nor is an empty echo "not found":
+    // that would call the id wrong for a card that was found and destroyed.
     const deletedCard = this.readListResultIfPresent(response, 0)[0];
     return { deletedCard };
   }
