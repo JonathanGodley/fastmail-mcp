@@ -1,8 +1,7 @@
 // The per-series occurrence cap (#142), apart from caldav-client.test.ts because of its cost.
 // Each case parses a payload of 5,000 or more occurrences, which under Stryker's instrumentation
 // took about three quarters of that file's run. Stryker's tap runner runs a whole test file per
-// mutant, so while they lived there they ran for every mutant that file covers; here they run
-// only for the fifth or so of caldav-client.ts they reach.
+// mutant, so here they run only for the fifth or so of caldav-client.ts they reach.
 
 import { after, before, describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';

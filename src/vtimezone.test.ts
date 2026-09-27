@@ -110,10 +110,9 @@ describe('generateVTimezone', () => {
 
   it('adds no extra observance for a sub-day span with no transition — the day-loop never runs, only the tail check does', () => {
     // Unlike the exact-24h Hong Kong span above (whose single day-loop iteration lands exactly
-    // on toMs, so the tail check's own guard skips it), this 3-hour span leaves the day-loop with
-    // nothing to do at all — every offset comparison here happens in the tail check itself. A
-    // zone with no DST ever guarantees the two offsets it compares are equal, so this is the one
-    // case that shows the tail check adding nothing when there is truly nothing to add.
+    // on toMs, so the tail check's own guard skips it), every offset comparison in this 3-hour
+    // span happens in the tail check, and a zone with no DST guarantees the two it compares are
+    // equal.
     const block = generateVTimezone('Asia/Hong_Kong', utc('2026-06-01T00:00:00+08:00'), utc('2026-06-01T03:00:00+08:00'));
     assert.equal(observances(block).length, 1, block);
   });
