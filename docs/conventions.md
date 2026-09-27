@@ -2162,8 +2162,10 @@ for free from `new Date()` refusing `25:00:00`, and the calendar pair reads the 
 itself with a shape-only pattern and hands them to `Date.UTC`, which **rolls** rather than
 refusing: `2026-08-12T99:99:99` would silently become a window starting three and a half days
 later, while `create_calendar_event` refused the same value on a write.
-`isWallClockInRange` keeps the parity (`24:00:00` is deliberately allowed, because the
-ECMAScript date format allows it and the UTC coercion takes it). When you add a value the two
+`isWallClockInRange` keeps the parity, except that `24:00:00` is deliberately allowed on the
+window, because the ECMAScript date format allows it and the UTC coercion takes it; the window
+reads it as midnight starting the next day. The writes refuse it (`validateAndFormatICalDate`),
+because RFC 5545 §3.3.12 has no hour 24 and the floating form would be written verbatim. When you add a value the two
 sides read differently, check the divergence rather than assuming the shared function covers
 it.
 

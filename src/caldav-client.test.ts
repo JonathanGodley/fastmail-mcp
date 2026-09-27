@@ -1011,6 +1011,22 @@ describe('validateAndFormatICalDate', () => {
     assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00', 'start'), '20260418T100000');
   });
 
+  it('accepts a colon-less offset', () => {
+    assert.equal(validateAndFormatICalDate('2026-04-18T10:00:00+0200', 'start'), '20260418T080000Z');
+  });
+
+  // RFC 5545 §3.3.12: hour 00-23. V8 reads T24:00:00 as next-day midnight, and the floating
+  // form would be written verbatim as T240000.
+  it('refuses an hour, minute or second out of range in every form', () => {
+    for (const value of [
+      '2026-03-20T24:00:00', '2026-03-20T24:00:00Z', '2026-03-20T24:00:00+10:00',
+      '2026-03-20T10:60:00', '2026-03-20T10:00:60', '2026-03-20T99:00:00',
+    ]) {
+      assert.throws(() => validateAndFormatICalDate(value, 'start'), /start has a time out of range/, value);
+    }
+    assert.equal(validateAndFormatICalDate('2026-03-20T23:59:59', 'start'), '20260320T235959');
+  });
+
   it('rejects CRLF injection attempt', () => {
     assert.throws(
       () => validateAndFormatICalDate('2026-04-18T10:00:00Z\r\nATTENDEE:mailto:attacker@example.com', 'start'),

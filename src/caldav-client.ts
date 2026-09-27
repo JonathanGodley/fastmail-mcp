@@ -1264,7 +1264,7 @@ export function escapeICalText(value: string): string {
  *   - YYYY-MM-DD                       (date-only)
  *   - YYYY-MM-DDTHH:MM:SS              (floating local)
  *   - YYYY-MM-DDTHH:MM:SSZ             (UTC)
- *   - YYYY-MM-DDTHH:MM:SS+HH:MM        (with offset, normalized to UTC)
+ *   - YYYY-MM-DDTHH:MM:SS+HH:MM        (with offset, normalized to UTC; +HHMM also parses)
  * Returns the ICS form (`YYYYMMDD`, or a datetime with `Z` for instants).
  *
  * The ONLY thing that turns a caller-supplied start/end into an iCal value;
@@ -1285,7 +1285,7 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
     assertRealCalendarDate(trimmed, trimmed, fieldName);
     return trimmed.replace(/-/g, '');
   }
-  // Offset forms: +/-HH:MM, +/-HHMM, +/-HH.
+  // The pattern admits any 2-4 digit offset; V8 then parses only +/-HH:MM and +/-HHMM.
   const dtMatch = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(Z|[+-]\d{2}:?\d{0,2})?$/.exec(trimmed);
   if (!dtMatch) {
     // The only rejection here quoting an unconstrained value (U+2028 passes the control guard),
@@ -1295,6 +1295,12 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
   const [, datePart, timePart, tz] = dtMatch;
   // The date part alone: an offset legitimately moves the UTC date.
   assertRealCalendarDate(datePart, trimmed, fieldName);
+  // RFC 5545 §3.3.12 hours run 00-23. V8 reads T24:00:00 as next-day midnight, and the floating
+  // form would be written verbatim; a leap second (60) has no instant to normalise to.
+  const [hh, mm, ss] = timePart.split(':').map(Number);
+  if (hh > 23 || mm > 59 || ss > 59) {
+    throw new InvalidInputError(`${fieldName} has a time out of range; hours run 00-23 and minutes and seconds 00-59 (got: ${trimmed.slice(0, 60)})`);
+  }
   const isoForParse = `${datePart}T${timePart}${tz || ''}`;
   const d = new Date(isoForParse);
   if (Number.isNaN(d.getTime())) {

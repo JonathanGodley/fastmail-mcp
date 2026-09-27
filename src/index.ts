@@ -1410,7 +1410,7 @@ const TOOLS = [
             },
             start: {
               type: 'string',
-              description: 'Start time in ISO 8601 format (e.g. 2026-04-07T14:00:00Z) or date-only for all-day events (e.g. 2026-04-07). Must be in the same form as end. Only these spellings are accepted — 2026-04-07, 2026-04-07T14:00:00, ...Z, or ...+HH:MM — and the date must be a real day in its month.',
+              description: 'Start time in ISO 8601 format (e.g. 2026-04-07T14:00:00Z) or date-only for all-day events (e.g. 2026-04-07). Must be in the same form as end. Only these spellings are accepted — 2026-04-07, 2026-04-07T14:00:00, ...Z, or ...+HH:MM (or ...+HHMM) — and the date must be a real day in its month and the time a real time of day: hours 00-23, so 24:00:00 is rejected (pass 00:00:00 on the next day).',
             },
             end: {
               type: 'string',
@@ -1462,7 +1462,7 @@ const TOOLS = [
             },
             start: {
               type: 'string',
-              description: 'New start time in ISO 8601 format (2026-04-07, 2026-04-07T14:00:00, ...Z, or ...+HH:MM; the date must be a real day in its month). Floating times (no Z/offset) preserve the original timezone. Must end up in the same form as the end it sits beside (the one you pass, or the stored one) and before it — pass both start and end when moving the event.',
+              description: 'New start time in ISO 8601 format (2026-04-07, 2026-04-07T14:00:00, ...Z, or ...+HH:MM or ...+HHMM; the date must be a real day in its month and the time a real time of day, hours 00-23, so 24:00:00 is rejected). Floating times (no Z/offset) preserve the original timezone. Must end up in the same form as the end it sits beside (the one you pass, or the stored one) and before it — pass both start and end when moving the event.',
             },
             end: {
               type: 'string',
