@@ -1263,13 +1263,25 @@ export function resolveMailbox(mailboxes: any[], input: string): any {
   throw new InvalidInputError(formatMailboxNotFound(raw, mailboxes || []));
 }
 
-// Narrow a mailbox list to the DIRECT children of one parent. A blank parent means no
-// filter. A pure operation rather than a getMailboxes option, because list_mailboxes needs
-// the WHOLE tree for paths before narrowing.
+/**
+ * Whether a mailbox argument that SCOPES a read was supplied. Absent (undefined/null) means
+ * every mailbox; a blank value is refused, naming the parameter, because reading it as absent
+ * would silently widen the read to the whole account.
+ */
+function scopingMailboxGiven(input: unknown, paramName: string, omitMeans: string): boolean {
+  if (input === undefined || input === null) return false;
+  if (String(input).trim() === '') {
+    throw new InvalidInputError(`${paramName} cannot be blank; omit it to ${omitMeans}.`);
+  }
+  return true;
+}
+
+// Narrow a mailbox list to the DIRECT children of one parent. A pure operation rather than a
+// getMailboxes option, because list_mailboxes needs the WHOLE tree for paths before narrowing.
 export function filterMailboxesByParent(mailboxes: any[], parent?: string): any[] {
   const list = mailboxes || [];
-  if (parent === undefined || parent === null || String(parent).trim() === '') return list;
-  const parentId = resolveMailbox(list, parent).id;
+  if (!scopingMailboxGiven(parent, 'parent', 'list every mailbox')) return list;
+  const parentId = resolveMailbox(list, parent!).id;
   return list.filter(mb => mb && mb.parentId === parentId);
 }
 
@@ -1683,12 +1695,12 @@ export class JmapClient {
     return Object.prototype.hasOwnProperty.call(notUpdated, id) ? (notUpdated[id] ?? {}) : undefined;
   }
 
-  // Resolve an optional mailbox input to an id; blank means no filter. Pass `mailboxes` to
-  // avoid a second fetch.
+  // Resolve an optional mailbox input to an id; absent means no filter, blank is refused. Pass
+  // `mailboxes` to avoid a second fetch.
   private async resolveMailboxId(input?: string, mailboxes?: any[]): Promise<string | undefined> {
-    if (input === undefined || input === null || String(input).trim() === '') return undefined;
+    if (!scopingMailboxGiven(input, 'mailbox', 'read every mailbox')) return undefined;
     const list = mailboxes ?? await this.getMailboxes();
-    return resolveMailbox(list, input).id;
+    return resolveMailbox(list, input!).id;
   }
 
   // Fetch the account's mailboxes, whole and unprojected. Narrowing to one parent is
@@ -4699,10 +4711,10 @@ export class JmapClient {
       unreadThreads: mb.unreadThreads || 0,
     });
 
-    if (mailbox !== undefined && String(mailbox).trim() !== '') {
+    if (scopingMailboxGiven(mailbox, 'mailbox', 'get the stats of every mailbox')) {
       // A real id absent from the fetched list throws: accepted residual
       // (docs/security-model.md).
-      const mb = resolveMailbox(mailboxes, mailbox);
+      const mb = resolveMailbox(mailboxes, mailbox!);
       return toStats(mb);
     }
     return mailboxes.map(toStats);

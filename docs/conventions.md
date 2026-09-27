@@ -105,7 +105,10 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   PRESENCE, so `''` and `'   '` both raise the shared not-found error; a bare
   `if (calendarId)` truthiness test would let `''` through to query **every** calendar in the
   account. A narrowing argument's failure mode is always this shape: the caller reads a wider
-  answer as though it were the narrow one it asked for.
+  answer as though it were the narrow one it asked for. The mailbox scopes follow the same rule:
+  `mailbox` on `list_emails`, `search_emails` and `get_mailbox_stats`, and `parent` on
+  `list_mailboxes`, read an absent value as every mailbox and refuse a blank one, naming the
+  parameter (`scopingMailboxGiven`, `src/jmap-client.ts`).
 
   The four recipient fields — `to` / `cc` / `bcc` / `replyTo` on **both** `draft_email` and
   `edit_draft`, fanned out by `coerceRecipients` — are the widest user of it, and the

@@ -117,6 +117,29 @@ describe('getEmails', () => {
     client = makeClient();
   });
 
+  it('refuses a blank mailbox before any query, rather than listing the whole account', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0 }));
+    for (const blank of ['', '   ']) {
+      await assert.rejects(
+        () => client.getEmails({ mailbox: blank, limit: 5 }),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /^mailbox cannot be blank/);
+          return true;
+        },
+      );
+    }
+    assert.equal(makeReq.mock.callCount(), 0);
+  });
+
+  it('refuses a blank mailbox on search too', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0 }));
+    await assert.rejects(() => client.searchEmails({ mailbox: ' ', limit: 5 }), /mailbox cannot be blank/);
+    assert.equal(makeReq.mock.callCount(), 0);
+  });
+
   it('returns emails scoped to an explicit mailbox (no exclusion, no count query)', async () => {
     stubMailboxes(client);
     const makeReq = stubRequests(client, async () =>
@@ -3170,6 +3193,20 @@ describe('getMailboxStats resolution', () => {
     );
   });
 
+  it('refuses a blank mailbox rather than returning every mailbox', async () => {
+    mock.method(client, 'getMailboxes', async () => DEFAULT_MAILBOXES);
+    for (const blank of ['', '  ']) {
+      await assert.rejects(
+        () => client.getMailboxStats(blank),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /^mailbox cannot be blank/);
+          return true;
+        },
+      );
+    }
+  });
+
   it('returns all mailboxes when no argument is given', async () => {
     mock.method(client, 'getMailboxes', async () => DEFAULT_MAILBOXES);
     const stats = await client.getMailboxStats();
@@ -4860,7 +4897,20 @@ describe('filterMailboxesByParent', () => {
 
   it('returns the whole list when no parent is given', () => {
     assert.equal(filterMailboxesByParent(TREE).length, 4);
-    assert.equal(filterMailboxesByParent(TREE, '   ').length, 4);
+    assert.equal(filterMailboxesByParent(TREE, null as any).length, 4);
+  });
+
+  it('refuses a blank parent rather than reading it as no filter', () => {
+    for (const blank of ['', '   ']) {
+      assert.throws(
+        () => filterMailboxesByParent(TREE, blank),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.match(err.message, /^parent cannot be blank/);
+          return true;
+        },
+      );
+    }
   });
 
   it('narrows to DIRECT children only, by any accepted parent form', () => {

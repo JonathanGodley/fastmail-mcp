@@ -456,7 +456,7 @@ const MAILBOX_REF_FORMS =
 // Anything specific to the multi-mailbox arrays belongs in SEARCH_MAILBOX_PARAM_DESC.
 const MAILBOX_PARAM_DESC =
   'Mailbox to scope to. ' + MAILBOX_REF_FORMS +
-  ' Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion.';
+  ' Setting it searches exactly that mailbox (incl. Trash/Spam) and ignores the default Trash/Spam exclusion. A blank value is rejected rather than read as every mailbox; omit the parameter for that.';
 
 // search_emails' `mailbox`, which is the one-element case of requiredMailboxes.
 const SEARCH_MAILBOX_PARAM_DESC =
@@ -492,10 +492,10 @@ const DRAFT_MAILBOX_PARAM_DESC =
   'draft you are parking, not one you are about to send. ' + MAILBOX_REF_FORMS;
 
 const STATS_MAILBOX_PARAM_DESC =
-  'Mailbox to report on (optional, defaults to all mailboxes). ' + MAILBOX_REF_FORMS;
+  'Mailbox to report on (optional, defaults to all mailboxes; a blank value is rejected, so omit it for all). ' + MAILBOX_REF_FORMS;
 
 const LIST_PARENT_PARAM_DESC =
-  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox. ' + MAILBOX_REF_FORMS;
+  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox; a blank value is rejected rather than read as every mailbox. ' + MAILBOX_REF_FORMS;
 
 const CREATE_PARENT_PARAM_DESC =
   'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
