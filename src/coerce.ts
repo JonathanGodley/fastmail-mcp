@@ -452,6 +452,10 @@ export function zoneCanonicalizationCacheSize(): number {
   return zoneCanonicalizationCache.size;
 }
 
+export function zoneCanonicalizationCacheHas(zone: string): boolean {
+  return zoneCanonicalizationCache.has(zone);
+}
+
 /**
  * ICU's canonical spelling for a zone name — `Intl.DateTimeFormat`'s own name for whatever the
  * string resolves to, or the string unchanged when ICU cannot resolve it. The one seam every

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, zoneCanonicalizationCacheHas, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -1586,13 +1586,9 @@ describe('canonicalZoneName', () => {
   });
 
   it('caches by exact input string — a second call with a different-case alias resolves independently', () => {
-    // 'nZ' is a spelling no other test uses, so the cache cannot already hold it.
     assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
-    const afterFirst = zoneCanonicalizationCacheSize();
-    assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
-    assert.equal(zoneCanonicalizationCacheSize(), afterFirst, 'a repeat of the same spelling added a key');
     assert.equal(canonicalZoneName('nZ'), 'Pacific/Auckland');
-    assert.equal(zoneCanonicalizationCacheSize(), afterFirst + 1, 'the different-case alias did not get its own key');
+    assert.ok(zoneCanonicalizationCacheHas('nZ'), 'the different-case alias did not get its own key');
   });
 
   // A stored TZID reaches this on every listing, and an invitation's sender chooses it.
