@@ -81,6 +81,16 @@ describe('formatDraftEmailResult', () => {
     assert.ok(text.length < 700, `the name is still bounded: ${text.length}`);
   });
 
+  it('prints a longest-valid (254-character) address whole, and bounds a longer one', () => {
+    const longest = `${'a'.repeat(64)}@${'d'.repeat(177)}.example.com`;
+    assert.equal(longest.length, 254);
+    const text = formatDraftEmailResult({ ...SAVED, to: [`Ann <${longest}>`], cc: [longest] });
+    assert.ok(text.includes(`To: Ann <${longest}> `), text);
+    assert.ok(text.includes(`CC: ${longest}`), text);
+    const hostile = formatDraftEmailResult({ ...SAVED, to: ['x'.repeat(5000)] });
+    assert.ok(hostile.length < 1000, `the address is bounded: ${hostile.length}`);
+  });
+
   it('omits a recipient line the draft has nothing for, including an empty one', () => {
     const text = formatDraftEmailResult({
       ...SAVED, mode: 'new', to: ['a@b.example'], cc: [], bcc: [],

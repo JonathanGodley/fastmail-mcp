@@ -88,13 +88,15 @@ export function formatInlineNotes(notes?: string[]): string {
 // verbatim, so it cannot claim an expansion that did not happen.
 //
 // A reply's display names come out of the original, and its sender wrote them. The name and
-// the address are neutralised apart, and only the name is bounded: the address is where the
-// draft goes, so it is never cut off however long the name in front of it.
+// the address are neutralised and bounded apart, so however long the name, the address the
+// draft goes to still prints.
 const RECIPIENT_NAME_ECHO_LIMIT = 128;
+// Above RFC 5321's 254-character address maximum, so no valid address is ever cut.
+const RECIPIENT_ADDRESS_ECHO_LIMIT = 320;
 const echoRecipients = (list: string[]): string =>
   list.map((r) => {
     const { name, email } = parseAddress(r);
-    const address = describeUntrustedAt(email, Number.POSITIVE_INFINITY);
+    const address = describeUntrustedAt(email, RECIPIENT_ADDRESS_ECHO_LIMIT);
     return name
       ? `${describeUntrustedAt(name, RECIPIENT_NAME_ECHO_LIMIT)} <${address}>`
       : address;
