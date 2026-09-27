@@ -446,6 +446,15 @@ export function echoPath(value: unknown): string {
 }
 
 const zoneCanonicalizationCache = new Map<string, string>();
+export const ZONE_CANONICALIZATION_CACHE_LIMIT = 512;
+
+export function zoneCanonicalizationCacheSize(): number {
+  return zoneCanonicalizationCache.size;
+}
+
+export function zoneCanonicalizationCacheHas(zone: string): boolean {
+  return zoneCanonicalizationCache.has(zone);
+}
 
 /**
  * ICU's canonical spelling for a zone name — `Intl.DateTimeFormat`'s own name for whatever the
@@ -453,16 +462,19 @@ const zoneCanonicalizationCache = new Map<string, string>();
  * zone comparison and every written zone routes through (write side #157, read-side
  * `zoneNamesEqual` #139), so an alias canonicalises identically on write and on read.
  *
- * Cached because `zoneNamesEqual` runs per event on every list read. Deliberately unbounded:
- * the keys are the handful of zones the account itself uses, with no path for an untrusted
- * party to feed it distinct strings.
+ * Cached because `zoneNamesEqual` runs per event on every list read. The keys are untrusted:
+ * every stored TZID reaches here, and an invitation's sender chooses it. So only names ICU
+ * resolves are kept, and at most `ZONE_CANONICALIZATION_CACHE_LIMIT` of them, oldest dropped
+ * first, since ICU matches case-insensitively and each case variant is a distinct key.
  */
 export function canonicalZoneName(zone: string): string {
   const cached = zoneCanonicalizationCache.get(zone);
   if (cached !== undefined) return cached;
-  const resolved = isUsableTimezone(zone)
-    ? new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone
-    : zone;
+  if (!isUsableTimezone(zone)) return zone;
+  const resolved = new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone;
+  if (zoneCanonicalizationCache.size >= ZONE_CANONICALIZATION_CACHE_LIMIT) {
+    zoneCanonicalizationCache.delete(zoneCanonicalizationCache.keys().next().value!);
+  }
   zoneCanonicalizationCache.set(zone, resolved);
   return resolved;
 }
@@ -666,14 +678,19 @@ export function describeTimezone(zone: string | undefined): string {
  * The formatter is cached per zone because `src/vtimezone.ts` (#166) makes hundreds of these
  * calls per `generateVTimezone`.
  */
-// Keyed on `zone` itself, not `zone ?? ''`: a cached `null` for `''` would otherwise make every
-// later host-zone call throw.
-const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat | null>();
+// Keyed on the canonical name (`undefined` for the host zone), and only for a zone that
+// resolves, so stored TZID spellings cannot grow it past the set of real zones.
+const zoneOffsetFormatterCache = new Map<string | undefined, Intl.DateTimeFormat>();
+
+export function zoneOffsetFormatterCacheSize(): number {
+  return zoneOffsetFormatterCache.size;
+}
 
 function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat | null {
-  const cached = zoneOffsetFormatterCache.get(zone);
+  const key = zone === undefined ? undefined : canonicalZoneName(zone);
+  const cached = zoneOffsetFormatterCache.get(key);
   if (cached !== undefined) return cached;
-  let formatter: Intl.DateTimeFormat | null;
+  let formatter: Intl.DateTimeFormat;
   try {
     formatter = new Intl.DateTimeFormat('en-US', {
       timeZone: zone,
@@ -686,9 +703,9 @@ function zoneOffsetFormatterFor(zone: string | undefined): Intl.DateTimeFormat |
       hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
   } catch {
-    formatter = null;
+    return null;
   }
-  zoneOffsetFormatterCache.set(zone, formatter);
+  zoneOffsetFormatterCache.set(key, formatter);
   return formatter;
 }
 

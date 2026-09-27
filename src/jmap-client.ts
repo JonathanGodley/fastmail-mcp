@@ -2934,10 +2934,15 @@ export class JmapClient {
     if (!inMailbox(draftsMailbox.id)) {
       const filedIn = Object.keys(filing)
         .filter(id => filing[id] === true)
-        .map(id => mailboxes.find(mb => mb?.id === id)?.name || id);
+        .map(id => {
+          const mailbox = mailboxes.find(mb => mb?.id === id);
+          const name = describeUntrusted(mailbox?.name);
+          if (mailbox && name.trim() !== '') return `"${name}"`;
+          return `${mailbox ? 'unnamed' : 'unknown'} mailbox (id: "${describeUntrusted(id)}")`;
+        });
       throw new InvalidInputError(
         'This draft is not in the Drafts folder, so it will not be sent' +
-        (filedIn.length > 0 ? ` (it is in: ${filedIn.join(', ')})` : '') +
+        (filedIn.length > 0 ? ` (it is in: ${joinCapped(filedIn)})` : '') +
         '. Move it back to Drafts with move_email and send it again.',
       );
     }

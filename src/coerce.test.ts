@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, resolveCalendarInstantMs, zoneOffsetMsAt, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, zoneCanonicalizationCacheHas, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -1586,10 +1586,34 @@ describe('canonicalZoneName', () => {
   });
 
   it('caches by exact input string — a second call with a different-case alias resolves independently', () => {
-    // Not a correctness assertion on the cache's internals (there is nothing to observe from
-    // outside it); this just exercises the same input twice, which is the path the cache is for.
     assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
-    assert.equal(canonicalZoneName('NZ'), 'Pacific/Auckland');
+    assert.equal(canonicalZoneName('nZ'), 'Pacific/Auckland');
+    assert.ok(zoneCanonicalizationCacheHas('nZ'), 'the different-case alias did not get its own key');
+  });
+
+  it('retains nothing for a name ICU cannot resolve', () => {
+    const before = zoneCanonicalizationCacheSize();
+    assert.equal(typeof before, 'number');
+    for (let i = 0; i < 50; i++) canonicalZoneName(`Vendor/Zone-${i}-${'x'.repeat(1000)}`);
+    assert.equal(zoneCanonicalizationCacheSize(), before, 'unresolvable names were cached');
+  });
+
+  it('keeps what it holds while below its limit', () => {
+    canonicalZoneName('Asia/Kathmandu');
+    canonicalZoneName('Atlantic/Faroe');
+    assert.ok(zoneCanonicalizationCacheHas('Asia/Kathmandu'), 'the second insert evicted the first');
+    assert.ok(zoneCanonicalizationCacheHas('Atlantic/Faroe'));
+  });
+
+  it('never holds more than its limit, even for distinct spellings ICU does resolve', () => {
+    const base = 'america/argentina/comodrivadavia';
+    const letters = [...base].map((c, i) => (/[a-z]/.test(c) ? i : -1)).filter(i => i >= 0);
+    for (let n = 0; n < ZONE_CANONICALIZATION_CACHE_LIMIT + 50; n++) {
+      const chars = [...base];
+      letters.forEach((pos, bit) => { if ((n >> bit) & 1) chars[pos] = chars[pos].toUpperCase(); });
+      canonicalZoneName(chars.join(''));
+    }
+    assert.ok(zoneCanonicalizationCacheSize() <= ZONE_CANONICALIZATION_CACHE_LIMIT, `cache grew to ${zoneCanonicalizationCacheSize()}`);
   });
 });
 
@@ -2043,6 +2067,15 @@ describe('startOfLocalDayUtcIso', () => {
 });
 
 describe('zoneOffsetMsAt', () => {
+  it('holds one formatter per zone, not one per spelling of it', () => {
+    const variants = ['America/Argentina/Salta', 'america/argentina/salta', 'AMERICA/ARGENTINA/SALTA', 'America/ARGENTINA/salta'];
+    const before = zoneOffsetFormatterCacheSize();
+    zoneOffsetMsAt(0, variants[0]);
+    assert.equal(zoneOffsetFormatterCacheSize(), before + 1, 'the first spelling was not cached');
+    for (const zone of variants) zoneOffsetMsAt(0, zone);
+    assert.equal(zoneOffsetFormatterCacheSize(), before + 1, 'a case variant of a cached zone added a formatter');
+  });
+
   it('floors a sub-second instant to its own whole second, at a Sydney transition boundary', () => {
     // See zoneOffsetMsAt's own floor comment (src/coerce.ts) for the corruption this pins against
     // — a flat zone would fail on that leak too. 2026-10-03T16:00:00Z is Sydney's spring-forward
