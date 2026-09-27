@@ -315,6 +315,17 @@ export class ContactsCalendarClient extends JmapClient {
     return { card, state: typeof state === 'string' ? state : undefined };
   }
 
+  /** Refuse before an unguarded write: without the read's state, a stale merge would go through. */
+  private requireReadState(state: string | undefined, id: string, outcome: string): string {
+    if (state === undefined) {
+      throw new Error(
+        `The server returned no ContactCard state with contact ${id}, so the write could not be guarded ` +
+          `against a change made since the read; nothing was ${outcome}.`,
+      );
+    }
+    return state;
+  }
+
   /** Throw the retry refusal when a write's `ifInState` no longer matched (RFC 8620 section 5.3). */
   private assertStateStillMatched(response: any, index: number, id: string, tool: string, outcome: string): void {
     const entry = response.methodResponses?.[index];
@@ -444,6 +455,7 @@ export class ContactsCalendarClient extends JmapClient {
         recovery: 'Edit it in the Fastmail web interface instead.',
       }));
     }
+    const guardState = this.requireReadState(readState, id, 'written');
 
     const patchObject: Record<string, any> = {};
     if (name) patchObject.name = mergeContactName(previousCard.name, name);
@@ -477,7 +489,7 @@ export class ContactsCalendarClient extends JmapClient {
         ['ContactCard/set', {
           accountId,
           update: { [id]: patchObject },
-          ...(readState && { ifInState: readState }),
+          ifInState: guardState,
         }, 'updateContact'],
         ['ContactCard/get', { accountId, ids: [id] }, 'updatedCard'],
       ],
@@ -555,6 +567,7 @@ export class ContactsCalendarClient extends JmapClient {
         recovery: 'Delete it in the Fastmail web interface instead.',
       }));
     }
+    const guardState = this.requireReadState(readState, id, 'deleted');
 
     const response = await this.makeRequest({
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:contacts'],
@@ -563,7 +576,7 @@ export class ContactsCalendarClient extends JmapClient {
         ['ContactCard/set', {
           accountId,
           destroy: [id],
-          ...(readState && { ifInState: readState }),
+          ifInState: guardState,
         }, 'deleteContact'],
       ],
     });

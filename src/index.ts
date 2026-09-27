@@ -703,7 +703,7 @@ const CONTACT_STATE_GUARD_DESC =
   ' The write goes through only if the address book is unchanged since the tool read the card; ' +
   'otherwise it is refused with "changed since it was read" and nothing is written. Fastmail ' +
   'tracks that state per account, not per card, so a change to ANY contact in between also ' +
-  'refuses; retrying the same call re-reads and succeeds.';
+  'refuses; retrying the same call re-reads and succeeds. If the read reports no state, the write is refused rather than sent unguarded.';
 
 // The tool catalog, at module scope so the CallTool handler can derive each tool's
 // declared parameter set for the unknown-parameter guard (#11).

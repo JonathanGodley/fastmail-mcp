@@ -294,7 +294,7 @@ describe('updateContact', () => {
   it('checks existence then sends a top-level patch', async () => {
     const makeReq = mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'g']] };
       }
       return { methodResponses: [['ContactCard/set', { updated: { C1: null } }, 'u']] };
     });
@@ -324,6 +324,17 @@ describe('updateContact', () => {
       'issuing ContactCard/set',
     );
     assert.equal(setRequest.methodCalls[0][1].ifInState, 'state-42');
+  });
+
+  it('refuses, writing nothing, when the read reports no state to guard the write with', async () => {
+    const makeReq = mock.method(client, 'makeRequest', async () => (
+      { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] }
+    ));
+    await assert.rejects(
+      () => client.updateContact('C1', { notes: 'x' }),
+      /no ContactCard state.*nothing was written/,
+    );
+    assert.equal(makeReq.mock.calls.length, 1);
   });
 
   it('refuses with a retry hint when the card changed between the read and the write', async () => {
@@ -369,7 +380,7 @@ describe('updateContact', () => {
   it('surfaces notUpdated errors', async () => {
     mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'g']] };
       }
       return { methodResponses: [['ContactCard/set', { notUpdated: { C1: { type: 'stateMismatch' } } }, 'u']] };
     });
@@ -381,7 +392,7 @@ describe('updateContact', () => {
     // arguments, so it must NOT be tagged as caller-fixable input.
     mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'g']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'g']] };
       }
       return { methodResponses: [['ContactCard/set', { notUpdated: { C1: { type: 'stateMismatch' } } }, 'u']] };
     });
@@ -457,7 +468,7 @@ describe('updateContact merge', () => {
   ) {
     return mock.method(target, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: card ? [card] : [] }, 'card']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: card ? [card] : [] }, 'card']] };
       }
       const responses: any[] = [
         ['ContactCard/set', opts.setResult ?? { updated: { C1: null } }, 'updateContact'],
@@ -798,7 +809,7 @@ describe('updateContact merge', () => {
     // failure that did not happen and destroying `previousCard` on the way out.
     mock.method(client, 'makeRequest', async (req: any) => {
       if (req.methodCalls[0][0] === 'ContactCard/get') {
-        return { methodResponses: [['ContactCard/get', { list: [storedCard()] }, 'card']] };
+        return { methodResponses: [['ContactCard/get', { state: 's0', list: [storedCard()] }, 'card']] };
       }
       return {
         methodResponses: [
@@ -865,7 +876,7 @@ describe('deleteContact', () => {
   function destroyResponse(card: any, setResult: any) {
     return {
       methodResponses: [
-        ['ContactCard/get', { list: card ? [card] : [], ...(card ? {} : { notFound: ['ghost'] }) }, 'doomedCard'],
+        ['ContactCard/get', { state: 's0', list: card ? [card] : [], ...(card ? {} : { notFound: ['ghost'] }) }, 'doomedCard'],
         ['ContactCard/set', setResult, 'deleteContact'],
       ],
     };
@@ -965,7 +976,7 @@ describe('deleteContact', () => {
     let call = 0;
     mock.method(client, 'makeRequest', async (_request: JmapRequest) => {
       call += 1;
-      if (call === 1) return { methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'card']] };
+      if (call === 1) return { methodResponses: [['ContactCard/get', { state: 's0', list: [{ id: 'C1' }] }, 'card']] };
       return {
         methodResponses: [
           ['error', { type: 'invalidArguments' }, 'doomedCard'],
@@ -1101,6 +1112,14 @@ describe('deleteContact', () => {
     const makeReq = stubMakeRequest(client, response);
     await client.deleteContact('C1');
     assert.equal(destroyRequest(makeReq).methodCalls[1][1].ifInState, 'state-7');
+  });
+
+  it('refuses, deleting nothing, when the read reports no state to guard the destroy with', async () => {
+    const response: any = destroyResponse({ id: 'C1' }, { destroyed: ['C1'] });
+    delete response.methodResponses[0][1].state;
+    const makeReq = stubMakeRequest(client, response);
+    await assert.rejects(() => client.deleteContact('C1'), /no ContactCard state.*nothing was deleted/);
+    assert.equal(makeReq.mock.calls.length, 1);
   });
 
   it('refuses with a retry hint when the card changed between the kind check and the destroy', async () => {
