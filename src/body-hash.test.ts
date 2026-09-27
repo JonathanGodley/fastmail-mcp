@@ -160,8 +160,7 @@ describe('collectDraftBodyParts', () => {
     const parts = collectDraftBodyParts(TEXT_ONLY);
     assert.equal(parts.length, 1);
     assert.equal(parts[0].value, 'the body');
-    // It is displayed by the text read, and the html read shows it too — a text/plain part in
-    // the htmlBody list is not carriable there, so only showsInText is set.
+    // A text/plain part in the htmlBody list is not carriable there, so only showsInText is set.
     assert.equal(parts[0].showsInText, true);
     assert.equal(parts[0].showsInHtml, false);
   });
@@ -242,8 +241,6 @@ describe('bodyHash', () => {
   });
 
   it('counts a length in BYTES, not characters', () => {
-    // Two values of equal character length but different byte length must not collide with
-    // each other through the prefix; the prefix is what the multi-byte case is about.
     const one = [{ key: 'p:1', value: 'é', degraded: false, showsInText: true, showsInHtml: false }];
     const two = [{ key: 'p:1', value: 'ee', degraded: false, showsInText: true, showsInHtml: false }];
     assert.notEqual(bodyHash(one), bodyHash(two));
@@ -318,9 +315,7 @@ describe('resolveDraftBodyHash', () => {
       bodyHash(collectDraftBodyParts(typeless)));
   });
 
-  // Order: reported ahead of stripQuoted for the reason the degraded case is — a second read
-  // without stripQuoted would issue no hash either, so naming one would send the caller
-  // nowhere.
+  // Order: reported ahead of stripQuoted for the same reason as the degraded case below.
   it('reports the uneditable body ahead of the stripQuoted read', () => {
     const interleaved = draft({
       textBody: [{ partId: 'a', type: 'text/plain' }, { partId: 'b', type: 'text/plain' }],

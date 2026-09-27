@@ -284,7 +284,6 @@ describe('body tokens — the security rule: a block is never rescanned', () => 
         const out = expandBodyTokens(`note {{${outer}}} end`, blocks);
         assert.equal(out.text, `note ${hostile} end`);
         assert.ok(out.text.includes(`{{${inner}}}`), 'the literal token text survives in the output');
-        // Only the outer token was ever a token; the block's own text was never a site.
         assert.deepEqual(out.tokens.map((t) => t.name), [outer]);
         assert.equal(out.counts[inner], inner === outer ? 1 : 0);
       });
@@ -340,10 +339,9 @@ describe('body tokens — a long run of braces is scanned in linear time', () =>
     // SECONDS for the 100,000 below — off one authored body. It is now under a millisecond.
     //
     // Wall-clock is the only thing that observes this: the classification is identical either
-    // way, which is exactly why the defect could sit here unnoticed. So the budget is
-    // deliberately enormous — a thousand times the measured cost, and still an order of
-    // magnitude below the defect, so a slow or loaded machine cannot make it flaky while a
-    // reintroduced quadratic cannot slip under it.
+    // way. So the budget is deliberately enormous — a thousand times the measured cost, and
+    // still an order of magnitude below the defect, so a slow or loaded machine cannot make it
+    // flaky while a reintroduced quadratic cannot slip under it.
     const part = '{'.repeat(100_000);
     const started = Date.now();
     const scan = scanBodyTokens(part);
@@ -377,7 +375,6 @@ describe('body tokens — escapes are reported as facts, not defects', () => {
     const part = String.raw`a \{{signature}} and a \{{quote}} here`;
     const scan = scanBodyTokens(part);
     assert.deepEqual(scan.escapes.map((e) => e.text), [String.raw`\{{signature}}`, String.raw`\{{quote}}`]);
-    // An escape is neither a token nor a near-miss nor an unexpanded spelling.
     assert.deepEqual(scan.tokens, []);
     assert.deepEqual(scan.nearMisses, []);
     assert.deepEqual(scan.otherSpellings, []);

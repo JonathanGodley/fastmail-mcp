@@ -9,18 +9,10 @@
  * THE WHOLE FUNCTION, so a change that fixes one branch by quietly capturing traffic from
  * another shows up as a moved count rather than passing unnoticed.
  *
- * RECONSTRUCTION. An earlier sweep of this function, reported as 260 combinations, was not
- * preserved and cannot be reproduced. This enumeration is built fresh rather than restored,
- * and the counts below are its own honest figures, measured by running it — 4,922 draft
- * shapes against 8 read-option combinations, 39,376 evaluations. They are not the earlier
- * number and are not reconciled to it.
- *
- * WHY A TALLY IS ASSERTED RATHER THAN DESCRIBED. A count written into a comment is prose,
- * and prose cannot fail. Asserted, the same count is checked on every `npm test`, so the
- * rule "re-run this when the function changes" costs nobody anything to remember. The
- * counts are not sacred: a deliberate change to the function is expected to move them, and
- * updating them is part of making that change — but it has to be done knowingly, which is
- * the whole point.
+ * The counts below are this enumeration's own, measured by running it; they are not
+ * reconciled to the 260 combinations an earlier, unpreserved sweep reported. A deliberate
+ * change to the function is expected to move them, and updating them is part of making that
+ * change knowingly.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -101,9 +93,8 @@ const READS = [false, true].flatMap((bodyText) =>
 // The outcome type carries no reason CODE — a withheld read is `{ bodyHashWithheld }` and
 // the reason is the message itself — so a reason is keyed by its message IN FULL, matched
 // exactly. Not a substring: two reasons that happened to share a phrase would merge into
-// one bucket and the tally would stay green through a real regression. The cost of the
-// exact match is that rewording a message fails this test, which is correct — the wording
-// is what the tool promises its caller, and changing it is a change worth being told about.
+// one bucket and the tally would stay green through a real regression. Rewording a message
+// therefore fails this test, deliberately: the wording is what the tool promises its caller.
 const REASONS: Record<string, string> = {
   degraded:
     'the server flagged part of this draft\'s stored body as truncated or as having '
@@ -158,8 +149,6 @@ function tally(): Map<string, number> {
   }
   return counts;
 }
-
-// ---------------------------------------------------------------------------
 
 describe('resolveDraftBodyHash sweep', () => {
   it('enumerates the shapes this sweep exists to cover', () => {

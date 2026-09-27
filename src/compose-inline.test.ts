@@ -11,10 +11,8 @@ import {
 } from './inline-notes.js';
 import type { QuoteImageOutcome } from './reply-quote.js';
 
-// The three exported functions here are shared by every compose path, so they are pinned
-// directly rather than through whichever tool happens to call them. The wordings themselves
-// belong to inline-notes.ts and are imported rather than transcribed: what these assert is
-// that compose-inline routes each outcome to the right one.
+// The wordings belong to inline-notes.ts and are imported rather than transcribed: what these
+// assert is that compose-inline routes each outcome to the right one.
 
 // ---------------------------------------------------------------------------
 // planAuthoredInlineImages — what the caller's own html may reference

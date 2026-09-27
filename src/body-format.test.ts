@@ -9,7 +9,7 @@ describe('isBlank', () => {
     assert.equal(isBlank('   '), true);
     assert.equal(isBlank(undefined), true);
     assert.equal(isBlank(null), true);
-    assert.equal(isBlank('\u200B\u200C\uFEFF\u00AD'), true); // zero-width only
+    assert.equal(isBlank('\u200B\u200C\uFEFF\u00AD'), true);
     assert.equal(isBlank(' \u200B \n '), true);
   });
   it('treats real content as non-blank', () => {
@@ -278,8 +278,7 @@ describe('assertBodyInputs — CDATA (#78)', () => {
   });
 
   it('rejects a CDATA section anywhere in htmlBody, not just at the start', () => {
-    // A mid-body section swallows its contents just as completely: html-to-text renders
-    // '<p>Before</p><![CDATA[<p>gone</p>]]><p>After</p>' as "Before\n\nAfter".
+    // A mid-body section swallows its contents just as completely (pinned in the last suite).
     assert.throws(() => assertBodyInputs({ htmlBody: '<p>Before</p><![CDATA[<p>gone</p>]]><p>After</p>' }), /contains a CDATA section/);
     assert.throws(() => assertBodyInputs({ htmlBody: '<p>Before</p><![cdata[<p>gone</p>' }), /contains a CDATA section/);
   });

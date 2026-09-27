@@ -2,11 +2,6 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildForwardBlocks, buildQuoteBlocks } from './reply-quote.js';
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-// A raw-JMAP-shaped original carrying whichever formats the test asks for.
 function makeOriginal(opts: {
   text?: string; html?: string; name?: string; email?: string;
   sentAt?: string; receivedAt?: string; aliasType?: string;
@@ -26,7 +21,6 @@ function makeOriginal(opts: {
 
 const TZ = 'Australia/Sydney';
 
-// A raw-JMAP-shaped original with both bodies, Cc, and a sent date.
 function fwdOriginal(over: any = {}) {
   return {
     from: [{ name: 'Ada Lovelace', email: 'ada@example.com' }],
@@ -83,10 +77,8 @@ describe('buildForwardBlocks — a block starts at its header line', () => {
 // Block CONTENT, pinned on the block builders themselves
 // ---------------------------------------------------------------------------
 //
-// What a quoted or forwarded block SAYS — the attribution line, the "> " prefixing, the
-// header block, the html shapes it wraps the original in — is produced by buildQuoteBlocks /
-// buildForwardBlocks and is a property of the block alone. Whatever joins the block to a body
-// cannot change any of it, so these read the builder's return value directly.
+// What a block SAYS is a property of the block alone, which no join can change, so these read
+// the builder's return value directly.
 //
 // Deliberately NOT here, even though the same builders produce it: anything whose subject is
 // what the STORED message contains. The quote sanitiser and the forward header's escaping of
@@ -95,7 +87,7 @@ describe('buildForwardBlocks — a block starts at its header line', () => {
 // clean and the join still ship the construct. Those live over the stored parts, in
 // draft-email-handler.test.ts.
 
-// Late import, beside the suites that use it (same convention as the suites above).
+// Late import, beside the suites that use it.
 import { signatureBlock, signatureHtmlBlock, signatureTextBlock } from './reply-quote.js';
 
 // A signature as signatureOf hands it over: either form may be absent.
@@ -129,8 +121,8 @@ describe('buildQuoteBlocks — the attribution line', () => {
   });
 
   it('omits the date entirely (never "Invalid Date") when no timestamp is present', () => {
-    const block = textBlockFor({ text: 'orig', name: 'Alex' }); // no sentAt/receivedAt
-    assert.match(block, /^Alex wrote:\n/);          // exactly "Alex wrote:", no "On "
+    const block = textBlockFor({ text: 'orig', name: 'Alex' });
+    assert.match(block, /^Alex wrote:\n/);
     assert.doesNotMatch(block, /Invalid Date/);
     assert.doesNotMatch(block, /On .*wrote:/);
   });
@@ -174,14 +166,14 @@ describe('buildQuoteBlocks — the html form of the quote', () => {
     const original = makeOriginal({ html: '<p>original <b>body</b></p>', name: 'Alex & Co', sentAt: '2026-06-15T03:29:02Z' });
     const { htmlBlock } = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
     assert.match(htmlBlock!, /<blockquote type="cite" style="margin:0 0 0 \.8ex;border-left:1px solid #ccc;padding-left:1ex">/);
-    assert.match(htmlBlock!, /Alex &amp; Co wrote:/);           // attribution html-escaped
-    assert.match(htmlBlock!, /<p>original <b>body<\/b><\/p>/); // formatting preserved
+    assert.match(htmlBlock!, /Alex &amp; Co wrote:/);
+    assert.match(htmlBlock!, /<p>original <b>body<\/b><\/p>/);
   });
 
   it('quotes a text-only original via an escaped html block', () => {
     const original = makeOriginal({ text: 'plain <b>not bold</b>\nsecond', name: 'Alex', sentAt: '2026-06-15T03:29:02Z' });
     const { htmlBlock } = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
-    assert.match(htmlBlock!, /plain &lt;b&gt;not bold&lt;\/b&gt;<br>second/); // escaped + <br>
+    assert.match(htmlBlock!, /plain &lt;b&gt;not bold&lt;\/b&gt;<br>second/);
   });
 
   it('quotes each format from its matching original part', () => {
@@ -194,7 +186,6 @@ describe('buildQuoteBlocks — the html form of the quote', () => {
 
 describe('buildQuoteBlocks — what it will and will not read', () => {
   it('quotes an original body part that has no type (matching extractBody leniency)', () => {
-    // A single-format original whose part is untyped; the reader must still read it.
     const original = {
       from: [{ name: 'Alex' }], sentAt: '2026-06-15T03:29:02Z',
       textBody: [{ partId: 't' }], htmlBody: [{ partId: 't' }],
@@ -297,8 +288,7 @@ const MARKUP_ONLY_SIG = { html: '<div><br></div>' };
 
 describe('signatureHtmlBlock — the form a sign-off takes in an html part', () => {
   it('escapes a text-only identity into html rather than dropping it', () => {
-    // No html form was configured, but the WORDS are the user's sign-off. They are escaped
-    // and line-broken into html, never emitted raw and never silently skipped.
+    // No html form was configured, but the WORDS are the user's sign-off.
     const block = signatureHtmlBlock({ text: 'Regards,\nTest & User' });
     assert.equal(block, '<div>Regards,<br>Test &amp; User</div>');
   });

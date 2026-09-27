@@ -1,20 +1,11 @@
-// The sending identity, and the sign-off read off it (#33).
+// The sending identity, and the sign-off read off it (#33): identities plus an optional
+// `from` in, the two configured sign-off forms (or nothing) out. The block a sign-off
+// becomes is pinned in `reply-quote.test.ts`; where `draft_email` places it, in
+// `draft-email-handler.test.ts`.
 //
-// This file covers ONE step of the signature story: turning a list of identities and an
-// optional `from` address into the two configured sign-off forms, or into nothing. That is
-// all `identity.ts` does, and it is the step every compose path starts from.
-//
-// The rest of the story lives where the code does. Which FORM a part gets, and what a
-// sign-off looks like once it is a block, are `signatureTextBlock` / `signatureHtmlBlock` /
-// `signatureBlock` in `reply-quote.ts`, pinned in `reply-quote.test.ts`. WHERE the block
-// lands is the caller's — `{{signature}}` is placed by whoever writes the body — and what
-// `draft_email` does with it is pinned in `draft-email-handler.test.ts`.
-//
-// The one thing worth stating here, because it is the trap in this step rather than in
-// either of the others: a `from` that names nothing verified resolves to NO SIGNATURE and
-// not to an error. `createDraft` raises the real "not verified for sending" refusal a moment
-// later, and a signature lookup that threw its own version first would replace an accurate
-// message with an oblique one.
+// A `from` that names nothing verified resolves to NO SIGNATURE, not an error. `createDraft`
+// raises the real "not verified for sending" refusal a moment later, and a signature lookup
+// that threw its own version first would replace an accurate message with an oblique one.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -34,9 +25,7 @@ const SIGNED_IDENTITY = {
 };
 const UNSIGNED_IDENTITY = { id: 'id-2', name: 'Test User', email: 'me@example.com', mayDelete: false };
 
-// What every compose path does: pick the identity, then read its sign-off. Written out
-// rather than wrapped in a helper because that is the shape production uses — the caller
-// needs the identity OBJECT too, for the address the "nothing was appended" note names.
+// What every compose path does: pick the identity, then read its sign-off.
 const sigFor = (identities: any[], from?: string) => signatureOf(selectIdentity(identities, from));
 
 describe('reading the sign-off off an identity', () => {

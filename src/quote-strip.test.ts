@@ -277,11 +277,10 @@ describe('stripQuotedText — no-marker passthrough and signal semantics', () =>
   });
 });
 
-// A quoted line whose wrap lost its ">" prefix used to end the run one line early, leaking
-// the fragment into the kept output and repeating it once per quote depth (#181). The run
-// now continues across such a line, but ONLY where it cannot be an inline reply: indented
-// (not written at the left margin) and glued to quote lines above and below with no blank
-// line either side. These tests hold that boundary from both directions.
+// The run continues across a quoted line whose wrap lost its ">" prefix (#181), but ONLY
+// where it cannot be an inline reply: indented (not written at the left margin) and glued to
+// quote lines above and below with no blank line either side. These tests hold that boundary
+// from both directions.
 describe('stripQuotedText — unprefixed continuations inside a quote run', () => {
   it('removes an unprefixed continuation at every quote depth it appears at', () => {
     const body = [
@@ -375,7 +374,7 @@ describe('stripQuotedText — unprefixed continuations inside a quote run', () =
 // These pin the OVER-strip direction: content that is not quoted correspondence but wears
 // a quote marker. All are documented in docs/email-bodies.md and the README as accepted
 // residuals — the caller's tell is quotedBytesStripped, and the remedy is re-reading
-// without the flag. They are here so the behaviour is a pinned decision, not a surprise.
+// without the flag.
 describe('stripQuotedText — documented over-strip residuals', () => {
   it('strips a markdown blockquote in the sender\'s own writing', () => {
     const body = ['The spec says:', '', '> the value MUST be a string', '', 'which we do not honour.'].join('\n');
