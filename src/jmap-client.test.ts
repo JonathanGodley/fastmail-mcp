@@ -654,7 +654,7 @@ describe('updateDraft', () => {
   // ---- echo-back of the replaced draft (staleness detection, #65) ----
 
   it('echoes back what the replaced draft contained', async () => {
-    mockUpdate(client, RICH_DRAFT);
+    mockUpdate(client, { ...RICH_DRAFT, bcc: [{ email: 'dan@example.com' }] });
 
     const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
     assert.deepEqual(result.replacedDraft, {
@@ -662,6 +662,8 @@ describe('updateDraft', () => {
       subject: 'Old Subject',              // the PRE-edit subject, not the new one
       to: ['bob@example.com'],
       cc: ['carol@example.com'],
+      bcc: ['dan@example.com'],
+      replyTo: ['reply@example.com'],
       textBodySize: 'The text'.length,
       htmlBodySize: '<p>The html</p>'.length,
     });

@@ -158,6 +158,15 @@ describe('formatEditDraftResult', () => {
     assert.match(text, /subject "Lunch plans"/);
   });
 
+  it('names every recipient field the replaced draft carried, bcc and replyTo included', () => {
+    const text = formatEditDraftResult({
+      id: 'draft-2',
+      replacedDraft: { ...REPLACED, bcc: ['dan@example.com'], replyTo: ['desk@example.com'] },
+      trashedOldDraftId: 'draft-1',
+    });
+    assert.match(text, /cc carol@example\.com, bcc dan@example\.com, replyTo desk@example\.com,/);
+  });
+
   it('caps a long recipient list rather than dumping every address', () => {
     const many = Array.from({ length: 9 }, (_, i) => `p${i}@example.com`);
     const text = formatEditDraftResult({

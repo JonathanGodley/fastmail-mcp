@@ -70,6 +70,8 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
     replaced.subject ? `subject "${replaced.subject}"` : null,
     formatReplacedRecipients('to', replaced.to),
     formatReplacedRecipients('cc', replaced.cc),
+    formatReplacedRecipients('bcc', replaced.bcc),
+    formatReplacedRecipients('replyTo', replaced.replyTo),
     replaced.htmlBodySize != null ? `htmlBody ${replaced.htmlBodySize} chars` : null,
     replaced.textBodySize != null ? `textBody ${replaced.textBodySize} chars` : null,
   ].filter(Boolean);

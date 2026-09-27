@@ -648,6 +648,8 @@ export interface ReplacedDraftInfo {
   subject?: string;
   to?: string[];
   cc?: string[];
+  bcc?: string[];
+  replyTo?: string[];
   textBodySize?: number;
   htmlBodySize?: number;
 }
@@ -2658,11 +2660,15 @@ export class JmapClient {
       (addrs || []).map((a: any) => a?.email).filter((e: any): e is string => typeof e === 'string' && e !== '');
     const replacedTo = addressList(existingEmail.to);
     const replacedCc = addressList(existingEmail.cc);
+    const replacedBcc = addressList(existingEmail.bcc);
+    const replacedReplyTo = addressList(existingEmail.replyTo);
     const replacedDraft: ReplacedDraftInfo = {
       id: emailId,
       ...(existingEmail.subject && { subject: existingEmail.subject }),
       ...(replacedTo.length && { to: replacedTo }),
       ...(replacedCc.length && { cc: replacedCc }),
+      ...(replacedBcc.length && { bcc: replacedBcc }),
+      ...(replacedReplyTo.length && { replyTo: replacedReplyTo }),
       ...(existingTextValue !== undefined && { textBodySize: existingTextValue.length }),
       ...(existingHtmlValue !== undefined && { htmlBodySize: existingHtmlValue.length }),
     };
