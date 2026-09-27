@@ -93,6 +93,7 @@ export interface BodyTokenScan {
  * Why a block has nothing to expand to; each is a distinct sentence a handler owes the caller.
  *
  *  - `no-signature`                the identity has no signature at all.
+ *  - `no-identity`                   the address the message sends as is no verified identity.
  *  - `no-text-form`                  the signature exists but has no form this part can carry
  *                                    (an images-only html signature, in a text part).
  *  - `nothing-quotable`              the original has nothing quotable in ANY form —
@@ -101,6 +102,7 @@ export interface BodyTokenScan {
  */
 export type BlockUnavailableCause =
   | 'no-signature'
+  | 'no-identity'
   | 'no-text-form'
   | 'nothing-quotable'
   | 'nothing-quotable-in-this-form';
@@ -247,8 +249,11 @@ export function expandBodyTokens(authored: string, blocks: BodyBlocks): BodyToke
     ): string => {
       const c = classify(whole, escapedLeft, escapedRight, left, name, right);
       switch (c.kind) {
-        case 'escape':
-          return c.literal;
+        case 'escape': {
+          // An as-written token's escape is as-written too; it may be someone else's text.
+          const escaped = whole.replace(/[\\{}\s]/g, '').toLowerCase() as BodyTokenName;
+          return blocks[escaped]?.available === 'as-written' ? whole : c.literal;
+        }
         case 'near-miss':
           nearMisses.push({ name: c.name, index, text: whole });
           return whole;

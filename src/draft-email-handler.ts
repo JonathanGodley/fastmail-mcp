@@ -1,10 +1,11 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted, parseAddress } from './coerce.js';
+import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted, InvalidInputError, parseAddress } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank, htmlHasVisibleContent } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
 import {
-  buildQuoteBlocks, buildForwardBlocks, emptyQuoteImages, signatureBlock,
+  buildQuoteBlocks, buildForwardBlocks, emptyQuoteImages, rejectSignatureEmbeddedImage,
+  signatureBlock, signatureCidRefs,
 } from './reply-quote.js';
 import type { QuoteImageOutcome } from './reply-quote.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
@@ -23,6 +24,7 @@ import {
 } from './inline-images.js';
 import type { CidPart } from './inline-images.js';
 import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
+import { rejectFromAddress } from './jmap-client.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 import { matchSubjectPrefix, noteComposeSubjectPrefix } from './subject-prefix.js';
 
@@ -248,7 +250,8 @@ function assertTokensAcceptable(
       if (site.name === 'signature' || site.name === history) continue;
       throw bad(
         `{{${site.name}}} does not apply to mode:'${mode}'` +
-        (history ? `; use {{${history}}} instead.` : ' (a new message has no history to place).'),
+        (history ? `; use {{${history}}} instead. ` : ' (a new message has no history to place). ') +
+        ESCAPE_HINT,
       );
     }
   }
@@ -304,7 +307,7 @@ function assertTokensAcceptable(
     throw bad(
       '{{forward}} does not apply to an asAttachment forward: the original rides whole ' +
       'as a .eml attachment, so there is no block to place. Drop the token, or drop ' +
-      'asAttachment to forward inline.',
+      'asAttachment to forward inline. ' + ESCAPE_HINT,
     );
   }
 
@@ -665,6 +668,10 @@ export async function composeDraftEmail(
   // consumer); what the test beside it pins is that a client returning no list does not throw
   // the compose away.
   const identities = (await client.getIdentities()) ?? [];
+  // createDraft would refuse it too, but only after step 9 had blamed an empty {{signature}}
+  // on the identity having none, and after the upload.
+  const fromRefusal = fromAddress ? rejectFromAddress(identities, fromAddress) : undefined;
+  if (fromRefusal) throw new InvalidInputError(fromRefusal);
   const identity = selectIdentity(identities, fromAddress);
   const signature = signatureOf(identity);
 
@@ -750,9 +757,23 @@ export async function composeDraftEmail(
     throw bad(
       `${partWord(part)} is empty after expansion: it was nothing but tokens, and ` +
       `${causes.length ? causes.join('; ') : 'the block had no content for this part'}. ` +
-      'Write prose beside the token — the block skips and the result says so — or, on a ' +
-      'forward, drop {{forward}} and pass asAttachment:true.',
+      'Write prose beside the token — the block skips and the result says so' +
+      (mode === 'forward' && !asAttachment
+        ? ' — or drop {{forward}} and pass asAttachment:true.'
+        : '.'),
     );
+  }
+
+  // Tested on the EXPANDED html, so a token the markup hides displays nothing to refuse, and
+  // an attachments item supplying the identifier resolves the reference like any other.
+  const suppliedCids = new Set((specs ?? []).map((s) => s.cid).filter((c) => !!c));
+  const liveAfterExpansion = new Set(expandedHtml ? extractLiveCidRefs(expandedHtml) : []);
+  if (htmlBlocks.signature?.available === true) {
+    for (const ref of signatureCidRefs(signature)) {
+      if (liveAfterExpansion.has(ref) && !suppliedCids.has(ref)) {
+        throw bad(rejectSignatureEmbeddedImage(ref));
+      }
+    }
   }
 
   // --- 10. Assemble ---------------------------------------------------------

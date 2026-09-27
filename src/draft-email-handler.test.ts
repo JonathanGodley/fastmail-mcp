@@ -290,6 +290,28 @@ describe('draft_email — token refusals, decided before anything is built', () 
     );
   });
 
+  it('says how to write the braces as text when refusing a wrong-mode token', async () => {
+    const { client } = spyClient();
+    const message = await messageFrom(() => compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'type {{quote}} to quote' }, client,
+    ));
+    assert.match(message, /does not apply to mode:'new'/);
+    assert.match(message, /To write braces as text, escape them/);
+  });
+
+  it('says how to write the braces as text when refusing {{forward}} with asAttachment', async () => {
+    const { client } = spyClient();
+    const message = await messageFrom(() => compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], asAttachment: true,
+        textBody: 'type {{forward}} to forward',
+      },
+      client,
+    ));
+    assert.match(message, /does not apply to an asAttachment forward/);
+    assert.match(message, /drop asAttachment to forward inline\. To write braces as text, escape them/);
+  });
+
   it('refuses {{forward}} alongside asAttachment: the original already rides whole', async () => {
     const { client } = spyClient();
     await assert.rejects(
@@ -810,6 +832,21 @@ describe("draft_email — mode:'forward' with asAttachment", () => {
     assert.equal(calls.draft.textBody, 'see attached');
     assert.equal(r.tokens, undefined); // no token written at all, so no receipt
   });
+
+  it('attaches only the .eml whatever includeOriginalAttachments says', async () => {
+    const pdf = { partId: '5', blobId: 'blob-pdf', type: 'application/pdf', name: 'r.pdf', disposition: 'attachment' };
+    for (const includeOriginalAttachments of [true, false]) {
+      const { client, calls } = spyClient(makeOriginal({ attachments: [pdf] }));
+      await compose(
+        {
+          mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], asAttachment: true,
+          includeOriginalAttachments,
+        },
+        client,
+      );
+      assert.deepEqual(calls.draft.attachments.map((p: any) => p.blobId), ['blob-orig']);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -979,22 +1016,59 @@ describe('draft_email — {{signature}} expands the FROM identity, not the first
     assert.equal(r.notes!.some((n) => n.includes('Alias User')), false);
   });
 
-  it('says nothing about identities when the named `from` matches none', async () => {
-    // The note's `?? fromAddress` fallback is defensive, not a reachable branch here: the
-    // note only fires when an identity WITH a signature was resolved, and an unverified
-    // `from` resolves none — createDraft raises the real "not verified" refusal a moment
-    // later.
-    const { client } = spyClient(makeOriginal(), {
+  it('refuses a `from` that matches no identity as unverified, before anything is built', async () => {
+    const { client, calls } = spyClient(makeOriginal(), {
       getIdentities: async () => [{ id: 'a', email: 'first@example.com', textSignature: 'S' }],
     });
-    const r = await compose(
+    const message = await messageFrom(() => compose(
       {
         mode: 'new', from: 'Nobody <nobody@example.com>', to: ['sam@example.com'],
-        textBody: 'hi',
+        textBody: '{{signature}}', attachments: [{ path: 'a.pdf' }],
       },
       client,
+      '/tmp/attach',
+    ));
+    assert.equal(
+      message,
+      'From address is not verified for sending. Choose one of your verified identities.',
     );
-    assert.equal(r.notes?.some((n) => n.includes('has a signature')) ?? false, false);
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('refuses the wildcard pattern as `from` before uploading, even with that identity present', async () => {
+    // The pattern equals the wildcard identity's own email, so an identity lookup finds it.
+    for (const from of ['*@example.com', 'Me <*@example.com>']) {
+      const { client, calls } = spyClient(makeOriginal(), {
+        getIdentities: async () => [{ id: 'w', email: '*@example.com', textSignature: 'S' }],
+      });
+      const message = await messageFrom(() => compose(
+        { mode: 'new', from, to: ['sam@example.com'], textBody: 'hi', attachments: [{ path: 'a.pdf' }] },
+        client,
+        '/tmp/attach',
+      ));
+      assert.match(message, /is a wildcard identity's pattern, not an address/);
+      assert.equal(calls.upload, undefined);
+      assert.equal(calls.draft, undefined);
+    }
+  });
+
+  it('skips identity entries with no email when checking a `from`', async () => {
+    const { client, calls } = spyClient(makeOriginal(), {
+      getIdentities: async () => [null, { id: 'x' }, SIGNED_IDENTITY] as any,
+    });
+    await compose({ mode: 'new', from: 'me@example.com', to: ['sam@example.com'], textBody: 'hi' }, client);
+    assert.equal(calls.draft.from, 'me@example.com');
+  });
+
+  it('keeps the wildcard-pattern refusal for a `from` that IS the pattern', async () => {
+    const { client } = spyClient(makeOriginal(), {
+      getIdentities: async () => [{ id: 'a', email: 'first@example.com' }],
+    });
+    const message = await messageFrom(() => compose(
+      { mode: 'new', from: '*@example.com', to: ['sam@example.com'], textBody: 'hi' }, client,
+    ));
+    assert.match(message, /is a wildcard identity's pattern, not an address/);
   });
 });
 
@@ -3163,6 +3237,90 @@ describe('draft_email — {{signature}} does not depend on the history landing',
       client,
     );
     assert.equal(calls.draft.textBody, 'FYI\nKind regards,\nTest User');
+  });
+
+  it('refuses, naming the cause, when the html signature displays an embedded image', async () => {
+    const logoIdentity = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' };
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => [logoIdentity] });
+    const message = await messageFrom(() => compose(
+      {
+        mode: 'new', to: ['sam@example.com'], htmlBody: '<p>hi</p>{{signature}}',
+        attachments: [{ path: 'a.pdf' }],
+      },
+      client,
+      '/tmp/attach',
+    ));
+    assert.equal(
+      message,
+      "MCP error -32602: The sending identity's signature displays an embedded image \"logo\", " +
+      "and nothing in this call supplies it: the identity holds the signature's html but not " +
+      'the image. Write the sign-off into htmlBody yourself in place of {{signature}}, or remove ' +
+      "the embedded image from the identity's signature in Fastmail's settings.",
+    );
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('places that signature when an attachments item supplies its cid', async () => {
+    const logoIdentity = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' };
+    const { client, calls } = spyClient(makeOriginal(), {
+      getIdentities: async () => [logoIdentity],
+      uploadAttachments: async (specs) => {
+        calls.upload = { specs };
+        return [{ blobId: 'b-logo', type: 'image/png', name: 'logo.png', cid: 'logo' }];
+      },
+    });
+    await compose(
+      {
+        mode: 'new', to: ['sam@example.com'], htmlBody: '<p>hi</p>{{signature}}',
+        attachments: [{ path: 'logo.png', cid: 'logo' }, { path: 'a.pdf' }],
+      },
+      client,
+      '/tmp/attach',
+    );
+    assert.match(calls.draft.htmlBody, /<img src="cid:logo">/);
+  });
+
+  it('still signs a text-only message from that identity, which ships no image', async () => {
+    const logoIdentity = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' };
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => [logoIdentity] });
+    await compose({ mode: 'new', to: ['sam@example.com'], textBody: 'hi\n{{signature}}' }, client);
+    assert.equal(calls.draft.textBody, 'hi\nKind regards,\nTest User');
+  });
+
+  it('offers the forward remedy only where it applies', async () => {
+    // An unsigned identity turns a body of nothing but {{signature}} empty.
+    const unsigned = { getIdentities: async () => [UNSIGNED_IDENTITY] };
+    const onNew = await messageFrom(() => compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: '{{signature}}' },
+      spyClient(makeOriginal(), unsigned).client,
+    ));
+    const onReply = await messageFrom(() => compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: '{{signature}}' },
+      spyClient(makeOriginal(), unsigned).client,
+    ));
+    const onAttachmentForward = await messageFrom(() => compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        asAttachment: true, textBody: '{{signature}}',
+      },
+      spyClient(makeOriginal(), unsigned).client,
+    ));
+    const onForward = await messageFrom(() => compose(
+      {
+        mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'],
+        // The forward block always has a header, so only markup that hides it leaves the
+        // part empty.
+        htmlBody: '<!-- {{forward}} -->{{signature}}',
+      },
+      spyClient(makeOriginal(), unsigned).client,
+    ));
+    for (const message of [onNew, onReply, onAttachmentForward]) {
+      assert.match(message, /empty after expansion/);
+      assert.match(message, /the result says so\.$/);
+      assert.doesNotMatch(message, /asAttachment|\{\{forward\}\}/);
+    }
+    assert.match(onForward, /drop \{\{forward\}\} and pass asAttachment:true/);
   });
 
   it('resolves the identity BEFORE any attachment is uploaded', async () => {

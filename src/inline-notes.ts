@@ -482,6 +482,7 @@ export function rejectInterleavedTextParts(): string {
 /** Why a block had nothing to put at a token's position, as one clause of a sentence. */
 export const CAUSE_SENTENCE: Record<BlockUnavailableCause, string> = {
   'no-signature': 'the sending identity has no signature configured',
+  'no-identity': "the draft's From address is not one of your verified identities, so there is no signature to use",
   'no-text-form': 'the signature has no plain-text form (it is images only)',
   'nothing-quotable': 'the original has nothing quotable in any format',
   'nothing-quotable-in-this-form': 'the original has nothing quotable in this part\'s format',

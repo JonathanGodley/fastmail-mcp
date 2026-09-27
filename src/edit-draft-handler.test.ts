@@ -78,10 +78,6 @@ describe('editDraft — coercion and delegation', () => {
     assert.equal(calls.update.updates.expandSignature, false);
   });
 
-  // The hash is NOT checked here. updateDraft owns the refusal order — the body-shape
-  // coupling guards name the shape the caller has to fix, and complaining about a stale
-  // read ahead of that would be no use to it. So the handler's job is to hand the value
-  // through untouched, including when it is absent.
   it('passes bodyHash through to updateDraft without validating it', async () => {
     const { client, calls } = spyClient();
     await editDraft({ emailId: 'd1', textBody: 'Hi', bodyHash: 'bh1-deadbeef' }, client, undefined, false);
@@ -93,6 +89,46 @@ describe('editDraft — coercion and delegation', () => {
     await editDraft({ emailId: 'd1', textBody: 'Hi' }, client, undefined, false);
     assert.equal(calls.update.updates.bodyHash, undefined);
     assert.equal(calls.update.updates.textBody, 'Hi');
+  });
+
+  it('refuses a body edit with no bodyHash before any attachment is uploaded', async () => {
+    const { client, calls } = spyClient();
+    for (const args of [
+      { emailId: 'd1', htmlBody: '<p>Hi</p>', attachments: [{ path: 'a.pdf' }] },
+      { emailId: 'd1', clearFields: ['textBody'], attachments: [{ path: 'a.pdf' }], bodyHash: '  ' },
+    ]) {
+      await assert.rejects(
+        () => editDraft(args, client, '/attach/root', false),
+        (e: unknown) => e instanceof InvalidInputError && /needs bodyHash/.test((e as Error).message),
+      );
+    }
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.update, undefined);
+  });
+
+  it('runs the presence check exactly when an uploading call writes or clears a body', async () => {
+    const refused = [
+      { emailId: 'd1', textBody: 'Hi' },
+      { emailId: 'd1', clearFields: ['htmlBody'] },
+    ];
+    for (const args of refused) {
+      const { client, calls } = spyClient();
+      await assert.rejects(
+        () => editDraft({ ...args, attachments: [{ path: 'a.pdf' }] }, client, '/attach/root', false),
+        (e: unknown) => e instanceof InvalidInputError && /needs bodyHash/.test((e as Error).message),
+      );
+      assert.equal(calls.upload, undefined);
+    }
+    const passed = [
+      { emailId: 'd1', clearFields: ['cc'] },
+      { emailId: 'd1', textBody: 'Hi', bodyHash: 'bh1-deadbeef' },
+    ];
+    for (const args of passed) {
+      const { client, calls } = spyClient();
+      await editDraft({ ...args, attachments: [{ path: 'a.pdf' }] }, client, '/attach/root', false);
+      assert.ok(calls.upload);
+      assert.ok(calls.update);
+    }
   });
 
   it('requires an emailId', async () => {

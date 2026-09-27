@@ -1,6 +1,6 @@
 import { htmlToText, isBlank } from './body-format.js';
 import { formatAddress, formatReplyDate } from './email-formatter.js';
-import { buildCidMap, resolveCidRefs, sanitizeQuoteHtml } from './inline-images.js';
+import { buildCidMap, describePart, resolveCidRefs, sanitizeQuoteHtml } from './inline-images.js';
 import type { CidMapping, CidPart, MintedInlinePart } from './inline-images.js';
 import type { ResolvedSignature } from './identity.js';
 import type { BodyBlock } from './body-tokens.js';
@@ -175,6 +175,24 @@ export function signatureHtmlBlock(signature: ResolvedSignature | undefined): st
     ?? (signature.text !== undefined ? textToHtmlBlock(signature.text) : undefined);
   if (inner === undefined) return undefined;
   return `<div>${inner}</div>`;
+}
+
+/**
+ * The embedded-image (cid:) references the html signature makes. An identity's signature is
+ * a string, so no part carries the image any of these names.
+ */
+export function signatureCidRefs(signature: ResolvedSignature | undefined): string[] {
+  if (signature?.html === undefined) return [];
+  return sanitizeQuoteHtml(signature.html, { mode: 'collect' }).refs;
+}
+
+export function rejectSignatureEmbeddedImage(ref: string): string {
+  return (
+    `The sending identity's signature displays an embedded image "${describePart(ref)}", ` +
+    'and nothing in this call supplies it: the identity holds the signature\'s html but not ' +
+    'the image. Write the sign-off into htmlBody yourself in place of {{signature}}, or remove ' +
+    'the embedded image from the identity\'s signature in Fastmail\'s settings.'
+  );
 }
 
 /**

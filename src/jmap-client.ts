@@ -3,7 +3,7 @@ import { validateFastmailUrl } from './url-validation.js';
 import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, describeUntrusted, echoPath, PathAccessError, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
-import { signatureBlock } from './reply-quote.js';
+import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from './reply-quote.js';
 import { matchesIdentity, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
@@ -612,6 +612,20 @@ function rejectWildcardIdentityFrom(identityEmail: string): string {
 function rejectWildcardFromValue(fromAddress: string): string {
   return `The from address "${describeUntrusted(fromAddress)}" is a wildcard identity's pattern, not an address. ` +
     'A from needs a concrete address in that domain; the wildcard identity still verifies it and still supplies its signature.';
+}
+
+const REJECT_UNVERIFIED_FROM =
+  'From address is not verified for sending. Choose one of your verified identities.';
+
+/**
+ * createDraft's refusal of a caller `from` address half, in its order (the pattern before the
+ * identity match), for a compose handler that has to raise it earlier. Undefined when valid.
+ */
+export function rejectFromAddress(identities: any[], fromAddress: string): string | undefined {
+  if (isWildcardIdentityEmail(fromAddress)) return rejectWildcardFromValue(fromAddress);
+  return identities.some((id) => typeof id?.email === 'string' && matchesIdentity(id.email, fromAddress))
+    ? undefined
+    : REJECT_UNVERIFIED_FROM;
 }
 
 function partCid(part: any): string {
@@ -1862,7 +1876,7 @@ export class JmapClient {
     if (email.from) {
       selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedFrom!.email));
       if (!selectedIdentity) {
-        throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
+        throw new InvalidInputError(REJECT_UNVERIFIED_FROM);
       }
     } else {
       selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
@@ -2060,7 +2074,7 @@ export class JmapClient {
     if (updates.from) {
       selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedUpdateFrom!.email));
       if (!selectedIdentity) {
-        throw new InvalidInputError('From address is not verified for sending. Choose one of your verified identities.');
+        throw new InvalidInputError(REJECT_UNVERIFIED_FROM);
       }
     } else {
       const existingFrom = existingEmail.from?.[0]?.email;
@@ -2256,7 +2270,9 @@ export class JmapClient {
       const signatureLanded = new Map<'textBody' | 'htmlBody', boolean>();
       for (const p of writtenParts) {
         const blocks: BodyBlocks = {
-          signature: signatureBlock(editSignature, p.part, messageShipsHtml),
+          signature: signingIdentity
+            ? signatureBlock(editSignature, p.part, messageShipsHtml)
+            : { available: false, cause: 'no-identity' },
           // Neither history token expands or is REMOVED here: it is stored text.
           quote: { available: 'as-written' },
           forward: { available: 'as-written' },
@@ -2513,7 +2529,13 @@ export class JmapClient {
       }
 
       if (danglingRefs.length > 0) {
-        throw new InvalidInputError(rejectDanglingCidRef(danglingRefs[0], availability));
+        // One the caller did not write came in with an expanded sign-off.
+        const fromSignature = expandSignature
+          && signatureCidRefs(editSignature).includes(danglingRefs[0])
+          && !htmlCidRefs(callerWrittenHtml).includes(danglingRefs[0]);
+        throw new InvalidInputError(fromSignature
+          ? rejectSignatureEmbeddedImage(danglingRefs[0])
+          : rejectDanglingCidRef(danglingRefs[0], availability));
       }
     }
 
