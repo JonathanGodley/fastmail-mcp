@@ -3701,11 +3701,16 @@ export class CalDAVCalendarClient {
 
     const datePattern = /^\d{4}-\d{2}-\d{2}$/;
     const dateTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+    // Trimmed as validateAndFormatICalDate trims, or a padded value it accepts is refused here.
+    const isoShaped = (value: string) => {
+      const trimmed = String(value).trim();
+      return datePattern.test(trimmed) || dateTimePattern.test(trimmed);
+    };
     // Unvalidated by definition, so echoed.
-    if (fields.start !== undefined && !datePattern.test(fields.start) && !dateTimePattern.test(fields.start)) {
+    if (fields.start !== undefined && !isoShaped(fields.start)) {
       throw new InvalidInputError(`Invalid start date format: "${echoCallerText(fields.start)}". Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
-    if (fields.end !== undefined && !datePattern.test(fields.end) && !dateTimePattern.test(fields.end)) {
+    if (fields.end !== undefined && !isoShaped(fields.end)) {
       throw new InvalidInputError(`Invalid end date format: "${echoCallerText(fields.end)}". Expected ISO 8601 (e.g. 2026-04-07T14:00:00Z or 2026-04-07)`);
     }
 

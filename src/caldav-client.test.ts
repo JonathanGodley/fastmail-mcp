@@ -5642,6 +5642,20 @@ describe('updateCalendarEvent start/end frame and ordering agreement', () => {
     assert.ok(written.includes('DURATION:PT1H'));
   });
 
+  it('trims surrounding whitespace from a date-only or datetime start and end, as create does', async () => {
+    const allDay = mockClient(stored('pad1@fm', 'DTSTART;VALUE=DATE:20260320', 'DTEND;VALUE=DATE:20260321'));
+    await allDay.client.updateCalendarEvent('pad1@fm', { start: ' 2026-04-10 ', end: '  2026-04-11 ' });
+    const allDayData = callArguments(allDay.mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    assert.ok(allDayData.includes('DTSTART;VALUE=DATE:20260410'), allDayData);
+    assert.ok(allDayData.includes('DTEND;VALUE=DATE:20260411'), allDayData);
+
+    const timed = mockClient(UTC_EVENT);
+    await timed.client.updateCalendarEvent('utc@fm', { start: ' 2026-03-20T07:00:00Z ', end: ' 2026-03-20T08:00:00Z' });
+    const timedData = callArguments(timed.mockDAVClient.updateCalendarObject)[0].calendarObject.data;
+    assert.ok(timedData.includes('DTSTART:20260320T070000Z'), timedData);
+    assert.ok(timedData.includes('DTEND:20260320T080000Z'), timedData);
+  });
+
   // RFC 5545 §3.6.1: a DATE DTSTART takes only a dur-day or dur-week DURATION.
   it('refuses a date-only start beside a stored DURATION that has a time part', async () => {
     const { client, mockDAVClient } = mockClient(stored('dur4@fm', 'DTSTART:20260410T090000Z', 'DURATION:PT1H'));
