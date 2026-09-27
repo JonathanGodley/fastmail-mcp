@@ -1424,7 +1424,7 @@ export class JmapClient {
    * subclass that does not: an unaccounted id must not vanish from the sentence.
    */
   protected throwBulkSetError(
-    notUpdated: Record<string, { type: string; description?: string }>,
+    rawNotUpdated: Record<string, { type: string; description?: string } | null>,
     total: number,
     successCount: number,
     action: string,
@@ -1432,6 +1432,15 @@ export class JmapClient {
     trailingNote?: string,
   ): never {
     const MAX_REASONS = 5;
+
+    // A server can list an id with a null (or non-object) SetError; it is still a failure,
+    // and one no caller can fix, so it takes a type outside CALLER_FIXABLE_SET_ERROR_TYPES.
+    const notUpdated: Record<string, { type: string; description?: string }> = {};
+    for (const [id, entry] of Object.entries(rawNotUpdated)) {
+      notUpdated[id] = entry && typeof entry === 'object' && typeof entry.type === 'string'
+        ? entry
+        : { type: 'unknown', description: 'the server gave no error details' };
+    }
 
     const failedIds = Object.keys(notUpdated);
     const failCount = failedIds.length;

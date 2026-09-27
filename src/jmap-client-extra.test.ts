@@ -1445,6 +1445,23 @@ describe('bulkMarkRead', () => {
     );
   });
 
+  it('reports a notUpdated entry the server left null as a failure, instead of crashing', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['Email/set', { updated: { 'e1': null }, notUpdated: { 'e2': null } }, 'bulkUpdate'],
+      ],
+    });
+    await assert.rejects(
+      () => client.bulkMarkRead(['e1', 'e2']),
+      (err: Error) => {
+        assert.match(err.message, /Failed to mark as read 1 of 2 emails \(1 succeeded\)/);
+        assert.match(err.message, /no error details: e2/);
+        assert.notEqual(err.name, 'InvalidInputError');
+        return true;
+      },
+    );
+  });
+
   it('names the action as "unread" (not "read") when a mark-as-unread call partially fails', async () => {
     stubMakeRequest(client, {
       methodResponses: [
