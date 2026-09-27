@@ -675,7 +675,7 @@ Both are opt-in and neither changes any default.
 
 *Too little stripped:*
 
-- An **unrecognised quote shape passes through unchanged** rather than being guessed at, and says so with a `0`. Text derived from HTML-only quoting (Outlook's `<div>` nesting, a Gmail quote flattened without `>` prefixes) has no text-level boundary to find. This is the same foreign-client recognition residual as the compose-side quote guard; see [`docs/email-bodies.md`](docs/email-bodies.md).
+- **History flattened without `>` prefixes passes through unchanged.** The sender's own plain-text part carries the quoted history as an `On <date>, <name> wrote:` line followed by flush-left text, with no `>` lines; a message written in Front has a text part like this. With no `>` prefixes the quote has no end delimiter, so the only available cut runs to the end of the message and would delete a reply written below or between the quoted lines. Such a message comes back whole with `quotedBytesStripped` `0`, or loses only what a deeper recognised marker such as `-----Original Message-----` removes; this is the same foreign-client recognition residual as the compose-side quote guard (see [`docs/email-bodies.md`](docs/email-bodies.md)).
 - **Localized attributions** ("schrieb:", "a écrit :") aren't recognised, so that one line survives above an otherwise stripped quote.
 
 *Too much stripped:*
