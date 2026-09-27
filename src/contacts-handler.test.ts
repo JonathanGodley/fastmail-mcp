@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createContactTool, updateContactTool, deleteContactTool, type ContactsWriteClient } from './contacts-handler.js';
+import { createContactTool, getContactTool, updateContactTool, deleteContactTool, type ContactsWriteClient } from './contacts-handler.js';
 import { InvalidInputError } from './coerce.js';
 import type { UpdateContactPatch } from './contacts-calendar.js';
 
@@ -228,6 +228,27 @@ describe('updateContactTool', () => {
 });
 
 // ---------- delete_contact ----------
+
+describe('getContactTool', () => {
+  it('trims contactId before the lookup, as update_contact and delete_contact do', async () => {
+    const { client } = makeClient();
+    const seen: string[] = [];
+    client.getContactById = async (id: string) => { seen.push(id); return CARD; };
+    await getContactTool({ contactId: '  C1 ' }, client);
+    assert.deepEqual(seen, ['C1']);
+  });
+
+  it('refuses a whitespace-only contactId without a lookup', async () => {
+    const { client } = makeClient();
+    let looked = false;
+    client.getContactById = async () => { looked = true; return CARD; };
+    await assert.rejects(
+      () => getContactTool({ contactId: '   ' }, client),
+      (err: Error) => err instanceof InvalidInputError && /contactId is required/.test(err.message),
+    );
+    assert.equal(looked, false);
+  });
+});
 
 describe('deleteContactTool', () => {
   it('returns the id and the full pre-destroy card', async () => {

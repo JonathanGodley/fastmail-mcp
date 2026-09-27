@@ -143,6 +143,14 @@ export async function updateContactTool(args: any, client: ContactsWriteClient):
   return content;
 }
 
+export async function getContactTool(args: any, client: ContactsWriteClient): Promise<ToolContent> {
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
+  const contactId = requireContactId(args);
+  const contact = await client.getContactById(contactId);
+  return [{ type: 'text', text: toolJson(raw ? contact : simplifyContact(contact, { verbose })) }];
+}
+
 /**
  * delete_contact. Takes no `raw`/`verbose`: its only card, `deletedCard`, is always
  * untransformed, so either parameter would be a silent no-op.

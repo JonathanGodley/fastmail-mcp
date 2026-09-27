@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
@@ -24,7 +24,7 @@ import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_
 import { readThread } from './thread-handler.js';
 import { runBulkReadTest } from './bulk-test-handler.js';
 import { listMailboxes, createMailbox } from './mailbox-handler.js';
-import { createContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
+import { createContactTool, getContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
 import createDebug from 'debug';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
@@ -2083,24 +2083,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_contact': {
-        const { contactId } = args as any;
-        // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw, 'raw') ?? false;
-        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
-        if (!contactId) {
-          throw new McpError(ErrorCode.InvalidParams, 'contactId is required');
-        }
-        const contactsClient = initializeContactsCalendarClient();
-        const contact = await contactsClient.getContactById(contactId);
-        const output = raw ? contact : simplifyContact(contact, { verbose });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: toolJson(output),
-            },
-          ],
-        };
+        return { content: await getContactTool(args, initializeContactsCalendarClient()) };
       }
 
       case 'search_contacts': {
