@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createContactTool, updateContactTool, deleteContactTool, type ContactsWriteClient } from './contacts-handler.js';
+import { createContactTool, getContactTool, updateContactTool, deleteContactTool, type ContactsWriteClient } from './contacts-handler.js';
 import { InvalidInputError } from './coerce.js';
+import { simplifyContact } from './response-formatters.js';
 import type { UpdateContactPatch } from './contacts-calendar.js';
 
 // A card in the shape a live address book actually returns: opaque entry-map keys, a
@@ -228,6 +229,61 @@ describe('updateContactTool', () => {
 });
 
 // ---------- delete_contact ----------
+
+describe('getContactTool', () => {
+  it('trims contactId before the lookup, as update_contact and delete_contact do', async () => {
+    const { client } = makeClient();
+    const seen: string[] = [];
+    client.getContactById = async (id: string) => { seen.push(id); return CARD; };
+    await getContactTool({ contactId: '  C1 ' }, client);
+    assert.deepEqual(seen, ['C1']);
+  });
+
+  it('returns one text item holding the simplified card by default', async () => {
+    const { client } = makeClient();
+    const content = await getContactTool({ contactId: 'C1' }, client);
+    assert.equal(content.length, 1);
+    assert.equal(content[0].type, 'text');
+    assert.deepEqual(payload(content), simplifyContact(CARD, { verbose: false }));
+  });
+
+  it('returns the card untransformed under raw, and the verbose shape under verbose', async () => {
+    const { client } = makeClient();
+    assert.deepEqual(payload(await getContactTool({ contactId: 'C1', raw: true }, client)), CARD);
+    const verbose = simplifyContact(CARD, { verbose: true });
+    assert.notDeepEqual(verbose, simplifyContact(CARD, { verbose: false }));
+    assert.deepEqual(payload(await getContactTool({ contactId: 'C1', verbose: 'true' }, client)), verbose);
+  });
+
+  for (const flag of ['raw', 'verbose']) {
+    it(`names ${flag} when it cannot read it`, async () => {
+      const { client } = makeClient();
+      await assert.rejects(
+        () => getContactTool({ contactId: 'C1', [flag]: 'garbage' }, client),
+        (err: Error) => err instanceof InvalidInputError && err.message.startsWith(`${flag} must be true or false`),
+      );
+    });
+  }
+
+  it('refuses absent arguments as a missing contactId, not a TypeError', async () => {
+    const { client } = makeClient();
+    await assert.rejects(
+      () => getContactTool(undefined, client),
+      (err: Error) => err instanceof InvalidInputError && /contactId is required/.test(err.message),
+    );
+  });
+
+  it('refuses a whitespace-only contactId without a lookup', async () => {
+    const { client } = makeClient();
+    let looked = false;
+    client.getContactById = async () => { looked = true; return CARD; };
+    await assert.rejects(
+      () => getContactTool({ contactId: '   ' }, client),
+      (err: Error) => err instanceof InvalidInputError && /contactId is required/.test(err.message),
+    );
+    assert.equal(looked, false);
+  });
+});
 
 describe('deleteContactTool', () => {
   it('returns the id and the full pre-destroy card', async () => {

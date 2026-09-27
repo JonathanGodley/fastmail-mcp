@@ -219,17 +219,17 @@ describe('formatSendDraftResult', () => {
   });
 
   it('carries the embedded-image receipt on every outcome, marked or not', () => {
-    const notes = ['Sent with 2 embedded image(s) (1.4 MB).'];
+    const notes = ['Sent with 2 image(s) shown in the body or marked inline (1.4 MB).'];
     assert.equal(
       formatSendDraftResult({ submissionId: 'sub-1', notes }),
-      'Draft sent successfully. Submission ID: sub-1\nSent with 2 embedded image(s) (1.4 MB).',
+      'Draft sent successfully. Submission ID: sub-1\nSent with 2 image(s) shown in the body or marked inline (1.4 MB).',
     );
     const skipped = formatSendDraftResult({
       submissionId: 'sub-1',
       keywordMaintenance: { kind: 'reply', messageId: 'orig@example.com', marked: false, skipReason: 'not-found' },
       notes,
     });
-    assert.match(skipped, /Sent with 2 embedded image\(s\) \(1\.4 MB\)\.$/);
+    assert.match(skipped, /Sent with 2 image\(s\) shown in the body or marked inline \(1\.4 MB\)\.$/);
   });
 
   it('reports the answered+read mark for a sent reply draft', () => {

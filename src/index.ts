@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, simplifyContact, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
@@ -24,7 +24,7 @@ import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_
 import { readThread } from './thread-handler.js';
 import { runBulkReadTest } from './bulk-test-handler.js';
 import { listMailboxes, createMailbox } from './mailbox-handler.js';
-import { createContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
+import { createContactTool, getContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
 import createDebug from 'debug';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
@@ -524,6 +524,9 @@ const CREATE_PARENT_PARAM_DESC =
 const LENIENT_LIST_DESC =
   ' Accepts an array, or a single value, comma-separated string or JSON-encoded array as one string.';
 
+const MAILBOX_LIST_COMMA_DESC =
+  ' The string form splits on every comma, so a mailbox whose name or path contains a comma has to be passed in an array (or a JSON-encoded array).';
+
 // The recipient lists (to/cc/bcc/replyTo on draft_email and edit_draft) FAIL CLOSED through
 // coerceStringArrayStrict. Said on the surface because a dropped recipient field turns into
 // an outcome the caller would not question: a reply that quietly reverts to reply-all, an
@@ -543,7 +546,7 @@ const LENIENT_OBJECT_LIST_DESC =
 const labelMailboxesDesc = (verb: 'add' | 'remove') =>
   `Array of mailboxes to ${verb} as labels. Each entry resolves the same way: ` + MAILBOX_REF_FORMS +
   ' Any entry that fails to resolve rejects the whole call, and the error names every failing entry at once. So does any entry that resolves to a FOLDER rather than a label (see the tool description): the check runs after resolution, so naming one by name or path is rejected exactly as naming it by role is.' +
-  LENIENT_LIST_DESC;
+  LENIENT_LIST_DESC + MAILBOX_LIST_COMMA_DESC;
 
 // Shared by every tool that changes a message's filing, delete included.
 const SEEN_AGGREGATE_DESC =
@@ -888,12 +891,12 @@ const TOOLS = [
             inReplyTo: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'mode:\'new\' only: Message-IDs to reply to, for threading against a message that is not in this account (mode:\'reply\' sets them itself from originalEmailId).' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
+              description: 'mode:\'new\' only: Message-IDs to reply to, for threading against a message that is not in this account (mode:\'reply\' sets them itself from originalEmailId). A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
             },
             references: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'mode:\'new\' only: Message-IDs for the References header (mode:\'reply\' sets them itself).' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
+              description: 'mode:\'new\' only: Message-IDs for the References header (mode:\'reply\' sets them itself). A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
             },
             asAttachment: {
               type: ['boolean', 'string'],
@@ -968,7 +971,7 @@ const TOOLS = [
               // to read, which is the point of declaring the string form at all.
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: LENIENT_LIST_DESC.trimStart() + " Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. This reaches everything get_email_attachments lists, including images embedded in the body. Removing an image the surviving body still displays is rejected: drop its <img> reference from the body you supply in the same call, or keep the attachment. To remove every attachment, use clearFields:['attachments'] instead.",
+              description: LENIENT_LIST_DESC.trimStart() + " Attachments to remove from the draft, identified by blobId (from get_email_attachments) or, if unambiguous, by name. A ref that matches no attachment, or a name matching more than one, is rejected — use the blobId. This reaches everything get_email_attachments lists, including images embedded in the body. Removing an image the surviving body still displays is rejected: drop its <img> reference from the body you supply in the same call, or keep the attachment. To remove every attachment, use clearFields:['attachments'] instead. The string form splits on every comma, so an attachment name containing a comma has to be passed in an array (or a JSON-encoded array). A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.",
             },
             clearFields: {
               // The `enum` stays in `items`, not on the property: `items` constrains ARRAY
@@ -976,7 +979,7 @@ const TOOLS = [
               // which raises the same named rejection over the coerced array.
               type: ['array', 'string'],
               items: { type: 'string', enum: ['to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId'] },
-              description: LENIENT_LIST_DESC.trimStart() + " Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments, forwardedMessageId. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected). Clearing textBody or htmlBody requires bodyHash. clearFields:['attachments'] takes off every part, images embedded in the body included, and is rejected when the surviving body still references one of them (rewrite or clear that body in the same call). clearFields:['forwardedMessageId'] de-forwards the draft: it drops the recorded X-Forwarded-Message-Id so send_draft will not mark the original forwarded, and on a forward draft it drops the recorded sourceEmailId with it (that pointer names the instance the marking is about; on a reply draft it is kept). That is metadata, so it works on a body edit and a metadata-only edit alike, and it does NOT touch the body — a forwarded-message block already in the body stays there until you replace the body yourself. The converse holds too: deleting that block from the body does not de-forward the draft, so send_draft still marks the original forwarded until you clear this field.",
+              description: LENIENT_LIST_DESC.trimStart() + " Field names to deliberately clear (to empty/none). Allowed: to, cc, bcc, replyTo, subject, textBody, htmlBody, attachments, forwardedMessageId. `from` cannot be cleared. Cannot also pass the same field as a value (e.g. attachments + clearFields:['attachments'] is rejected). Clearing textBody or htmlBody requires bodyHash. clearFields:['attachments'] takes off every part, images embedded in the body included, and is rejected when the surviving body still references one of them (rewrite or clear that body in the same call). clearFields:['forwardedMessageId'] de-forwards the draft: it drops the recorded X-Forwarded-Message-Id so send_draft will not mark the original forwarded, and on a forward draft it drops the recorded sourceEmailId with it (that pointer names the instance the marking is about; on a reply draft it is kept). That is metadata, so it works on a body edit and a metadata-only edit alike, and it does NOT touch the body — a forwarded-message block already in the body stays there until you replace the body yourself. The converse holds too: deleting that block from the body does not de-forward the draft, so send_draft still marks the original forwarded until you clear this field. A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.",
             },
           },
           required: ['emailId'],
@@ -1048,12 +1051,12 @@ const TOOLS = [
             requiredMailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: REQUIRED_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC,
+              description: REQUIRED_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC + MAILBOX_LIST_COMMA_DESC,
             },
             excludeMailboxes: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: EXCLUDE_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC,
+              description: EXCLUDE_MAILBOXES_PARAM_DESC + LENIENT_LIST_DESC + MAILBOX_LIST_COMMA_DESC,
             },
             after: {
               type: 'string',
@@ -1166,7 +1169,7 @@ const TOOLS = [
       },
       {
         name: 'create_contact',
-        description: 'Create a contact in the address book. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape get_contact returns (verbose/raw apply); if only that read-back fails, the contact still exists and the result is its id with a note saying so - do not create it again. Every entry array accepts both a bare string and an object: emails ["a@b.example"] or [{address, label}], phones ["+1…"] or [{number, label}]; addresses take objects only. An empty array is rejected in every one of them — omit the field instead, the same rule update_contact applies. An unknown per-item key, or a key of the wrong type, is rejected naming its position (e.g. emails[2]).',
+        description: 'Create a contact in the address book. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape get_contact returns (verbose/raw apply); if only that read-back fails, the contact still exists and the result is its id with a note saying so - do not create it again. Every entry array accepts both a bare string and an object: emails ["a@b.example"] or [{address, label}], phones ["+1…"] or [{number, label}]; addresses take objects only. An empty array, or a blank string, is rejected in every one of them — omit the field instead, the same rule update_contact applies. An unknown per-item key, or a key of the wrong type, is rejected naming its position (e.g. emails[2]).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1188,7 +1191,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
                 },
               },
-              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'Email addresses. Each entry is a bare address string or {address, label?}. Each address may appear once. [] or a blank string is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             phones: {
               type: ['array', 'string'],
@@ -1199,7 +1202,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
                 },
               },
-              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'Phone numbers. Each entry is a bare number string or {number, label?}. Each number may appear once. [] or a blank string is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             addresses: {
               type: ['array', 'string'],
@@ -1210,7 +1213,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "home".' },
                 },
               },
-              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'Postal addresses, as {full, label?} objects. A bare string is NOT accepted here. [] or a blank string is rejected — omit the field instead.' + LENIENT_OBJECT_LIST_DESC,
             },
             notes: {
               type: 'string',
@@ -1237,7 +1240,7 @@ const TOOLS = [
           'Update a contact, MERGING per entry rather than overwriting the card. Returns {contact, previousCard}: the updated card (verbose/raw apply to it) and the card exactly as it stood before the write. ' +
           CONTACT_ECHO_DESC +
           CONTACT_STATE_GUARD_DESC +
-          ' Only the fields you pass are touched; omit a field to leave it alone. emails/phones merge by value: an entry whose address/number matches one already stored keeps everything the simplified output does not show (contexts, pref, and any other stored field), and only what you supply is written over it. Resending an entry exactly as you read it changes nothing, and a stored entry you could not have named is kept as it is: one with an empty address/number (which the default view does not show), or a stored duplicate of an address/number you sent. To remove one, clear the array with clearFields and then write it again. LABELS ARE ADD-AND-OVERRIDE, NOT A CLEAN REWRITE: a label that differs from the one you read is written as this card\'s `label` property, which then wins here — but Fastmail\'s own apps commonly store the label as a `contexts` set instead, and that set is left as it was, so the two can end up disagreeing outside this server. A label cannot currently be removed at all. A single call that BOTH drops a stored entry AND adds one the card does not have is rejected as ambiguous, and the rejection prints the dropped entries in full (up to 50; past that it says how many more and to read them with get_contact verbose:true) so you can resend them losslessly; pass allowEntryReplace:true to go ahead anyway, which rewrites every entry of THAT array from what you supplied and does NOT carry those hidden fields (arrays in the same call that merged cleanly are unaffected). addresses do NOT merge (an address entry has no matchable key) — supplying them replaces the whole set. name merges into the stored structured name: a bare string sets the full name and keeps the given/surname components, and {given}/{surname} update just that part. An empty array (emails: []) is rejected — use clearFields. notes sets a single note, so a card storing more than one is rejected rather than collapsed. A card whose kind is anything but individual (a contact group, an org, a location, ...) cannot be updated by this tool.',
+          ' Only the fields you pass are touched; omit a field to leave it alone. emails/phones merge by value: an entry whose address/number matches one already stored keeps everything the simplified output does not show (contexts, pref, and any other stored field), and only what you supply is written over it. Resending an entry exactly as you read it changes nothing, and a stored entry you could not have named is kept as it is: one with an empty address/number (which the default view does not show), or a stored duplicate of an address/number you sent. To remove one, clear the array with clearFields and then write it again. LABELS ARE ADD-AND-OVERRIDE, NOT A CLEAN REWRITE: a label that differs from the one you read is written as this card\'s `label` property, which then wins here — but Fastmail\'s own apps commonly store the label as a `contexts` set instead, and that set is left as it was, so the two can end up disagreeing outside this server. A label cannot currently be removed at all. A single call that BOTH drops a stored entry AND adds one the card does not have is rejected as ambiguous, and the rejection prints the dropped entries in full (up to 50; past that it says how many more and to read them with get_contact verbose:true) so you can resend them losslessly; pass allowEntryReplace:true to go ahead anyway, which rewrites every entry of THAT array from what you supplied and does NOT carry those hidden fields (arrays in the same call that merged cleanly are unaffected). addresses do NOT merge (an address entry has no matchable key) — supplying them replaces the whole set. name merges into the stored structured name: a bare string sets the full name and keeps the given/surname components, and {given}/{surname} update just that part. An empty array (emails: []) or a blank string is rejected — use clearFields. notes sets a single note, so a card storing more than one is rejected rather than collapsed. A card whose kind is anything but individual (a contact group, an org, a location, ...) cannot be updated by this tool.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1263,7 +1266,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "work" or "home".' },
                 },
               },
-              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'The complete set of email addresses the contact should end up with, each a bare address string or {address, label?}. Matched against the stored entries by address, so a repeated address keeps its hidden fields. Send an entry back with the label you read and nothing changes; send a DIFFERENT label and it is added as this card\'s `label` property while any `contexts` set the entry already carried stays put, so the label can only be changed or added, never removed. Each address may appear once. [] or a blank string is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             phones: {
               type: ['array', 'string'],
@@ -1274,7 +1277,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this number is for, e.g. "mobile" or "work".' },
                 },
               },
-              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'The complete set of phone numbers the contact should end up with, each a bare number string or {number, label?}. Matched against the stored entries by number, so a repeated number keeps its hidden fields. Labels behave as they do for emails: resending the label you read changes nothing, a different label is added as this card\'s `label` property alongside any existing `contexts` set, and a label cannot be removed. Each number may appear once. [] or a blank string is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             addresses: {
               type: ['array', 'string'],
@@ -1285,7 +1288,7 @@ const TOOLS = [
                   label: { type: 'string', description: 'What this address is for, e.g. "home".' },
                 },
               },
-              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
+              description: 'Postal addresses, as {full, label?} objects. These REPLACE the stored set outright — a postal entry has no matchable key, so nothing is merged and any field the stored entries carried is lost. A bare string is NOT accepted here. [] or a blank string is rejected — use clearFields.' + LENIENT_OBJECT_LIST_DESC,
             },
             notes: {
               type: 'string',
@@ -1506,7 +1509,7 @@ const TOOLS = [
             clearFields: {
               type: ['array', 'string'],
               items: { type: 'string', enum: ['description', 'location', 'transparency'] },
-              description: 'Property names to delete from the event. Allowed: description, location, transparency. Cannot also pass the same field as a value. Clearing transparency deletes the event\'s statement about free/busy. The event still reads as busy — that is what an event saying nothing means — so this changes the record rather than the state: it is how you put an event back to the shape the Fastmail client writes for an ordinary busy event, which carries no such property at all. To mark an event busy in so many words, pass transparency: "busy" instead.' + LENIENT_LIST_DESC,
+              description: 'Property names to delete from the event. Allowed: description, location, transparency. Cannot also pass the same field as a value. Clearing transparency deletes the event\'s statement about free/busy. The event still reads as busy — that is what an event saying nothing means — so this changes the record rather than the state: it is how you put an event back to the shape the Fastmail client writes for an ordinary busy event, which carries no such property at all. To mark an event busy in so many words, pass transparency: "busy" instead. A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.' + LENIENT_LIST_DESC,
             },
           },
           required: ['eventId'],
@@ -1534,13 +1537,13 @@ const TOOLS = [
       },
       {
         name: 'list_identities',
-        description: "List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo, and the identity's configured signature as textSignature/htmlSignature when it has one; a blank signature is omitted). AN IDENTITY'S email MAY BE A WILDCARD PATTERN — \"*@example.com\" rather than an address. Such an identity verifies, and signs, any concrete address in that domain, but the pattern itself is not a sendable address and is refused as a from value by draft_email, edit_draft and send_draft alike; pass a concrete address in its domain instead. JMAP does not append the signature server-side, so signing is a choice each compose call makes: put {{signature}} where the sign-off goes in a draft_email body (or in an edit_draft body with expandSignature:true) and the identity's own signature is written at exactly that point, or read the field from here and write it into the body yourself. Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.",
+        description: "List sending identities (email addresses that can be used for sending). Returns simplified format by default (name, email, replyTo, and the identity's configured signature as textSignature/htmlSignature when it has one; a blank signature is omitted). replyTo, and verbose's bcc, keep JMAP's shape: an array of {name, email} objects. AN IDENTITY'S email MAY BE A WILDCARD PATTERN — \"*@example.com\" rather than an address. Such an identity verifies, and signs, any concrete address in that domain, but the pattern itself is not a sendable address and is refused as a from value by draft_email, edit_draft and send_draft alike; pass a concrete address in its domain instead. JMAP does not append the signature server-side, so signing is a choice each compose call makes: put {{signature}} where the sign-off goes in a draft_email body (or in an edit_draft body with expandSignature:true) and the identity's own signature is written at exactly that point, or read the field from here and write it into the body yourself. Use verbose=true only if you need extra fields like SMTP config or verification state. Use raw=true for original JMAP response.",
         inputSchema: {
           type: 'object',
           properties: {
             verbose: {
               type: ['boolean', 'string'],
-              description: lenientBool('Include extra identity fields (SMTP config, verification state). Not needed for most tasks.'),
+              description: lenientBool('Include every property the server returns for each identity, passed through as sent. On Fastmail today that includes SMTP settings and verification state, but which properties appear is the server\'s choice. Not needed for most tasks.'),
             },
             raw: {
               type: ['boolean', 'string'],
@@ -2083,24 +2086,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_contact': {
-        const { contactId } = args as any;
-        // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw, 'raw') ?? false;
-        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
-        if (!contactId) {
-          throw new McpError(ErrorCode.InvalidParams, 'contactId is required');
-        }
-        const contactsClient = initializeContactsCalendarClient();
-        const contact = await contactsClient.getContactById(contactId);
-        const output = raw ? contact : simplifyContact(contact, { verbose });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: toolJson(output),
-            },
-          ],
-        };
+        return { content: await getContactTool(args, initializeContactsCalendarClient()) };
       }
 
       case 'search_contacts': {
@@ -2213,9 +2199,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // participants stays undefined ("leave the attendees alone").
         const participants = coerceParticipants((args as any).participants);
         assertICalTextLimits({ title, description, location, participants });
-        // Coerced so a stringified array ('["location"]') passes the Array.isArray test
-        // below instead of being dropped silently. (#54)
-        const clearFields = coerceStringArray((args as any).clearFields);
+        const clearFields = coerceStringArrayStrict((args as any).clearFields, 'clearFields');
         if (eventId == null) {
           throw new McpError(ErrorCode.InvalidParams, 'eventId is required');
         }
@@ -2690,7 +2674,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               'mark_email_read', 'pin_email', 'delete_email', 'move_email', 'archive_email',
               'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
-              'add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels'
+              'add_labels', 'remove_labels', 'bulk_add_labels', 'bulk_remove_labels',
+              'test_bulk_operations', 'check_function_availability'
             ]
           },
           identity: {

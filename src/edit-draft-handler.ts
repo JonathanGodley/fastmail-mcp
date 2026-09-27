@@ -1,8 +1,9 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceAttachments, coerceBool, InvalidInputError } from './coerce.js';
+import { coerceRecipients, coerceStringArrayStrict, coerceAttachments, coerceBool, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs } from './body-format.js';
 import { rejectMissingBodyHash } from './inline-notes.js';
+import { assertDraftEditValues } from './jmap-client.js';
 import type { AttachmentPart, UpdateDraftResult, UploadAttachmentsOptions } from './jmap-client.js';
 
 /** The client surface editDraft needs; JmapClient satisfies it structurally. */
@@ -55,8 +56,8 @@ export async function editDraft(
   const a = args ?? {};
   const { emailId, from, subject, textBody, htmlBody, bodyHash } = a;
   const { to, cc, bcc, replyTo } = coerceRecipients(a);
-  const clearFields = coerceStringArray(a.clearFields);
-  const removeAttachments = coerceStringArray(a.removeAttachments);
+  const clearFields = coerceStringArrayStrict(a.clearFields, 'clearFields');
+  const removeAttachments = coerceStringArrayStrict(a.removeAttachments, 'removeAttachments');
   // coerceBool refuses a value it cannot read (like "garbage"), and an absent value reads as
   // false, which stores the body exactly as written rather than rewriting it unasked.
   //
@@ -77,12 +78,22 @@ export async function editDraft(
 
   const specs = coerceAttachments(a.attachments);
   // updateDraft owns the refusal order (body-shape guards first) but runs after the upload.
-  // The hash presence check needs no network, so a call that would upload runs it here, or
-  // the likeliest refusal orphans the uploaded blobs. Staleness needs the stored draft.
-  const touchesBody = textBody !== undefined || htmlBody !== undefined
-    || (clearFields ?? []).some((f) => f === 'textBody' || f === 'htmlBody');
-  if (specs?.length && touchesBody && (typeof bodyHash !== 'string' || bodyHash.trim() === '')) {
-    throw new InvalidInputError(rejectMissingBodyHash());
+  // A call that would upload runs every refusal that needs no network here first, so none
+  // of them orphans the uploaded blobs.
+  //
+  // What still runs after the upload leaves those blobs unreferenced: the refusals that need
+  // the stored draft (not found, not a draft, in Trash, a stale bodyHash, a body-shape guard)
+  // and an unverified from, which needs Identity/get. Accepted: nothing can reach the blobs,
+  // hoisting would repeat the draft read or the identity read on every attaching edit, and
+  // RFC 8620 section 6 lets a server delete an unreferenced blob after an hour (whether
+  // Fastmail does is not verified).
+  if (specs?.length) {
+    assertDraftEditValues({ to, cc, bcc, replyTo, subject, textBody, htmlBody, from, clearFields, removeAttachments }, true);
+    const touchesBody = textBody !== undefined || htmlBody !== undefined
+      || (clearFields ?? []).some((f) => f === 'textBody' || f === 'htmlBody');
+    if (touchesBody && (typeof bodyHash !== 'string' || bodyHash.trim() === '')) {
+      throw new InvalidInputError(rejectMissingBodyHash());
+    }
   }
   const attachments = specs?.length
     ? await client.uploadAttachments(specs, attachDir, allowBlobAttach)

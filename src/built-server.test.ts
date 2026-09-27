@@ -352,26 +352,26 @@ const ARRAY_PARAM_COERCERS: Record<string, string> = {
   'draft_email.cc': 'draft-email-handler.ts coerceRecipients() -> coerceStringArrayStrict',
   'draft_email.bcc': 'draft-email-handler.ts coerceRecipients() -> coerceStringArrayStrict',
   'draft_email.replyTo': 'draft-email-handler.ts coerceRecipients() -> coerceStringArrayStrict',
-  'draft_email.inReplyTo': 'draft-email-handler.ts coerceStringArray',
-  'draft_email.references': 'draft-email-handler.ts coerceStringArray',
+  'draft_email.inReplyTo': 'draft-email-handler.ts coerceStringArrayStrict',
+  'draft_email.references': 'draft-email-handler.ts coerceStringArrayStrict',
   'draft_email.attachments': 'draft-email-handler.ts coerceAttachments',
   'edit_draft.to': 'edit-draft-handler.ts coerceRecipients() -> coerceStringArrayStrict',
   'edit_draft.cc': 'edit-draft-handler.ts coerceRecipients() -> coerceStringArrayStrict',
   'edit_draft.bcc': 'edit-draft-handler.ts coerceRecipients() -> coerceStringArrayStrict',
   'edit_draft.replyTo': 'edit-draft-handler.ts coerceRecipients() -> coerceStringArrayStrict',
   'edit_draft.attachments': 'edit-draft-handler.ts coerceAttachments',
-  'edit_draft.removeAttachments': 'edit-draft-handler.ts coerceStringArray',
-  'edit_draft.clearFields': 'edit-draft-handler.ts coerceStringArray',
+  'edit_draft.removeAttachments': 'edit-draft-handler.ts coerceStringArrayStrict',
+  'edit_draft.clearFields': 'edit-draft-handler.ts coerceStringArrayStrict',
   'create_contact.emails': 'contacts-handler.ts coerceContactEmails',
   'create_contact.phones': 'contacts-handler.ts coerceContactPhones',
   'create_contact.addresses': 'contacts-handler.ts coerceContactAddresses',
   'update_contact.emails': 'contacts-handler.ts coerceContactEmails',
   'update_contact.phones': 'contacts-handler.ts coerceContactPhones',
   'update_contact.addresses': 'contacts-handler.ts coerceContactAddresses',
-  'update_contact.clearFields': 'contacts-handler.ts coerceStringArray',
+  'update_contact.clearFields': 'contacts-handler.ts coerceStringArrayStrict',
   'create_calendar_event.participants': 'index.ts coerceParticipants',
   'update_calendar_event.participants': 'index.ts coerceParticipants',
-  'update_calendar_event.clearFields': 'index.ts coerceStringArray',
+  'update_calendar_event.clearFields': 'index.ts coerceStringArrayStrict',
   'archive_email.emailIds': 'index.ts coerceStringArrayStrict',
   'add_labels.mailboxes': 'index.ts coerceStringArray',
   'remove_labels.mailboxes': 'index.ts coerceStringArray',
@@ -923,4 +923,34 @@ describe('a tools/call with no arguments object', () => {
       child.kill();
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// 5. update_calendar_event refuses a clearFields it cannot read as a list
+// ---------------------------------------------------------------------------
+//
+// The read sits in index.ts's CallTool switch, which has no in-process seam. The refusal
+// comes before the CalDAV configuration check, so an unconfigured server is enough.
+
+describe('update_calendar_event clearFields', () => {
+  for (const clearFields of [{ location: true }, 42, false]) {
+    it(`refuses a clearFields of ${JSON.stringify(clearFields)} rather than ignoring it`, async () => {
+      assertDistIsCurrent();
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(process.env)) {
+        if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+      }
+      env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+      const client = createClient({ env });
+      try {
+        await client.init();
+        await assert.rejects(
+          client.call('update_calendar_event', { eventId: 'evt-1', title: 'x', clearFields }),
+          (e: any) => /clearFields must be an array of strings/.test(String(e?.message)),
+        );
+      } finally {
+        client.close();
+      }
+    });
+  }
 });

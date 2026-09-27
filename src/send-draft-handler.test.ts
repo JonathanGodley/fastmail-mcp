@@ -137,7 +137,7 @@ describe('sendDraftAndMaintainKeywords', () => {
   });
 
   it("passes the send's embedded-image receipt through, whatever the thread-state outcome", async () => {
-    const notes = ['Sent with 1 embedded image(s) (2 KB).'];
+    const notes = ['Sent with 1 image(s) shown in the body or marked inline (2 KB).'];
     const plain = spyClient({
       sendDraft: async () => ({
         submissionId: 'sub-1',

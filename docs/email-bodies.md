@@ -677,7 +677,7 @@ mandatory on a body part, and Cyrus — the server Fastmail runs — fills a mis
 Content-Type in before `Email/get` returns. Each function's docblock carries the full
 reasoning; they are the authority, and this section is the map.
 
-### Edit matrix (12 cells, confirmed live, post-fix)
+### Edit matrix (12 cells, confirmed live)
 
 Evidence that the extraction is correct: every cell matched the traced prediction (no
 corruption, no cross-contamination, no phantom, nothing lost). Single-format edits that

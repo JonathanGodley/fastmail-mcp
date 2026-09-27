@@ -1434,3 +1434,17 @@ describe('bulk email tools return their success text via a shared formatter (#18
     );
   });
 });
+
+describe('check_function_availability lists every tool', () => {
+  it('names each tool the server declares in one of its functions lists', () => {
+    const declared = [...collectToolParams().keys()];
+    assert.ok(declared.length >= 40, `expected the TOOLS literal to yield every tool, got ${declared.length}`);
+    const body = collectCaseBodies().get('check_function_availability');
+    assert.ok(body, 'could not find the check_function_availability case in src/index.ts');
+    const listed = new Set<string>();
+    for (const m of body.join('\n').matchAll(/functions:\s*\[([^\]]*)\]/g)) {
+      for (const n of m[1].matchAll(/'([a-z_]+)'/g)) listed.add(n[1]);
+    }
+    assert.deepEqual(declared.filter((t) => !listed.has(t)), []);
+  });
+});

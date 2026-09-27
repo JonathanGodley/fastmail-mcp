@@ -122,6 +122,12 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   reports success. Both are silent, and both look exactly like a call that did what it was
   told.
 
+  `clearFields` on `edit_draft`, `update_contact` and `update_calendar_event`, and
+  `edit_draft`'s `removeAttachments`, fail closed for the `edit_draft` reason: a dropped
+  value reads as "clear nothing, remove nothing", and the edit reports success. So do
+  `draft_email`'s `inReplyTo` and `references`: a dropped value saves an unthreaded draft,
+  and a coerced `[null]` writes the header `null`.
+
   Strictness is per element, and covers the **empty string** as well as the wrong type. That
   is not pedantry: `['']` passes a `typeof entry !== 'string'` check, and the plain coercer's
   `.filter(Boolean)` runs only on the comma-split branch, so without an explicit check a
@@ -176,7 +182,10 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   a fresh literal built from the validated keys). `emails`/`phones` accept a bare value
   string as well as the object form; `addresses` do not, having no single obvious scalar
   reading. A repeated value is rejected naming both positions, because the merge matches
-  entries by that value and a repeat could only surface as a phantom addition.
+  entries by that value and a repeat could only surface as a phantom addition. Unlike
+  `participants`, a blank string reads as the empty list rather than omitted: `[]` is
+  already refused on these arrays, so the blank string meets that refusal instead of passing
+  as a silent no-op.
 - `requireNonEmpty` / `validateClearFields` — the loud-reject + `clearFields` machinery
   shared by `update_calendar_event`, `edit_draft` and `update_contact`.
 
@@ -1435,8 +1444,9 @@ unknown-parameter guard — an instruction the caller cannot act on is worse tha
 This is carried by *which renderer the handler picks*, not by a flag at every call site:
 `formatRawEmailQueryResult` (paged) versus `formatQueryResult` (not), because a forgotten
 flag would silently drop a promised signal while a wrong function name is visible in the
-handler. Paginating the contacts and calendar protocol paths is tracked on
-[#51](https://github.com/JonathanGodley/fastmail-mcp/issues/51).
+handler. Paginating the contacts listings is tracked on
+[#94](https://github.com/JonathanGodley/fastmail-mcp/issues/94), and the calendar listing on
+[#169](https://github.com/JonathanGodley/fastmail-mcp/issues/169).
 
 **The CalDAV calendar listing joins the same discipline, over a different protocol.**
 `list_calendar_events` does not go through JMAP at all, so nothing hands it a server-computed

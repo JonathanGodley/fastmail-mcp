@@ -1445,14 +1445,14 @@ describe('contact entry coercion', () => {
   const isInvalidInput = (pattern: RegExp) => (err: unknown) =>
     err instanceof InvalidInputError && pattern.test(err.message);
 
-  it('returns undefined for undefined, null and a blank string', () => {
-    // A blank string reads as "not supplied", never as the empty array: the empty array is
-    // a REJECTED shape on these parameters, so resolving a client quirk into it would turn
-    // a stringification bug into a rejection the caller cannot explain.
+  it('returns undefined for undefined and null, and the empty list for a blank string', () => {
+    // The empty list is what the contact tools refuse with their "use clearFields" (or
+    // "omit it") message, so a blank string meets the same refusal as [].
     for (const coerce of [coerceContactEmails, coerceContactPhones, coerceContactAddresses]) {
       assert.equal(coerce(undefined), undefined);
       assert.equal(coerce(null), undefined);
-      assert.equal(coerce('   '), undefined);
+      assert.deepEqual(coerce(''), []);
+      assert.deepEqual(coerce('   '), []);
     }
   });
 
