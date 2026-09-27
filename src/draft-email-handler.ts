@@ -812,7 +812,7 @@ export async function composeDraftEmail(
     params.references = [...(original.references || []), originalMessageId];
 
     let subject = subjectOverride ?? (original.subject || '');
-    if (subjectOverride === undefined && !/^Re:/i.test(subject)) subject = `Re: ${subject}`;
+    if (subjectOverride === undefined && matchSubjectPrefix(subject) !== 'reply') subject = `Re: ${subject}`;
     params.subject = subject;
 
     // Reply-To if the original named one, else From, via formatAddress and never
@@ -856,7 +856,7 @@ export async function composeDraftEmail(
       params.subject = subjectOverride;
     } else {
       const orig = original?.subject || '';
-      params.subject = /^fwd?:/i.test(orig.trim()) ? orig : `Fwd: ${orig}`;
+      params.subject = matchSubjectPrefix(orig) === 'forward' ? orig : `Fwd: ${orig}`;
     }
     // Recorded on BOTH forward shapes: send_draft resolves it to mark the original
     // forwarded on transmit, and the attached .eml is not machine-resolvable as provenance.

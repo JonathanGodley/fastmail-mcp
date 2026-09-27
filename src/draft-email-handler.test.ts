@@ -1780,6 +1780,19 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     assert.equal(already.calls.draft.subject, 'Re: Hello');
   });
 
+  // The same prefix set the mode:'new' note reads (subject-prefix.ts): a counter or loose
+  // whitespace is still a reply prefix. A forward prefix is not, so it gains one.
+  it('does not double-prefix a counted or spaced reply prefix', async () => {
+    for (const [orig, want] of [
+      ['Re[2]: Hello', 'Re[2]: Hello'], ['RE : Hello', 'RE : Hello'], [' re: Hello', ' re: Hello'],
+      ['Fwd: Hello', 'Re: Fwd: Hello'],
+    ]) {
+      const { client, calls } = plainClient(makeOriginal({ subject: orig }));
+      await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+      assert.equal(calls.draft.subject, want, orig);
+    }
+  });
+
   it('uses a caller subject verbatim, prefixes nothing, and threads the same way', async () => {
     const { client, calls } = plainClient(makeOriginal({ subject: 'Re: Project update' }));
     const r = await compose(
@@ -2495,7 +2508,7 @@ describe('EMAIL_BODY_PROPERTIES — what a forward needs fetched', () => {
 
 describe("draft_email — mode:'forward' subject, recipients and the recorded source", () => {
   it('does not double-prefix a subject that already says it is a forward', async () => {
-    for (const s of ['Fwd: Hello', 'fw: Hello', 'FWD: Hello', 'FW: Hello']) {
+    for (const s of ['Fwd: Hello', 'fw: Hello', 'FWD: Hello', 'FW: Hello', 'Fwd[2]: Hello', 'FWD : Hello']) {
       const { client, calls } = plainClient(makeOriginal({ subject: s }));
       await compose({ mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], textBody: 'FYI\n{{forward}}' }, client);
       assert.equal(calls.draft.subject, s);
