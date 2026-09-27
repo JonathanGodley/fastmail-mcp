@@ -14,9 +14,8 @@ describe('formatInlineNotes', () => {
     assert.equal(formatInlineNotes([]), '');
   });
 
-  // One line each. The summaries these append to end in caller-controlled text with no
-  // terminator ("Subject: <subject>"), so a space join ran the first note straight on from
-  // the subject and read as part of it.
+  // One line each. The summaries these append to can end in an unquoted recipient list
+  // ("BCC: <addresses>"), so a space join ran the first note straight on from it.
   it('puts each note on a line of its own', () => {
     assert.equal(formatInlineNotes(['One.', 'Two.']), '\nOne.\nTwo.');
   });

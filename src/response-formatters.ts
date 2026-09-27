@@ -83,8 +83,8 @@ function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
   return parts.join(', ');
 }
 
-// ONE LINE EACH, not a space join: the summaries these ride on end in unterminated
-// caller-controlled text (`Subject: ${subject}`), which a space would run the note into.
+// ONE LINE EACH, not a space join: the summaries these ride on can end in an unquoted list
+// of recipients, which a space would run the note into.
 export function formatInlineNotes(notes?: string[]): string {
   return notes?.length ? notes.map((note) => `\n${note}`).join('') : '';
 }
