@@ -538,7 +538,7 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
 
 **🎯 Most Popular Tools:**
 - **check_function_availability**: Check what's available and get setup guidance  
-- **test_bulk_operations**: Safely test bulk operations with dry-run mode
+- **test_bulk_operations**: Test bulk operations, dry run by default
 - **send_draft**: The one tool that transmits a composed message — compose with `draft_email`, then send here
 - **search_emails**: Free-text + structured email search (from/to/cc/bcc/subject/date/mailbox, plus multi-mailbox scoping), with Trash and Spam excluded by default
 - **list_emails**: List emails across all mailboxes (or one, via `mailbox`), with Trash and Spam excluded by default — pass a small `limit` for a quick look
@@ -1060,7 +1060,7 @@ Single (non-repeating) events are unaffected.
 - **list_identities**: List sending identities (email addresses that can be used for sending). Returns simplified format by default, including the identity's configured `textSignature`/`htmlSignature` when it has one (see [Identity fields](#identity-fields) for how to use them, and [Signing a message](#signing-a-message) for the `{{signature}}` token that writes them into a body for you). **An identity's `email` may be a wildcard pattern** (`*@example.com`) rather than an address: it verifies and signs any concrete address in that domain, but the pattern itself cannot be used as a `from` value — pass a concrete address in its domain instead. See [Wildcard identities are not addresses](#email-tools).
   - Parameters: `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **check_function_availability**: Check which functions are available based on account permissions (includes setup guidance). Calendar tools run over CalDAV, so calendar is reported available only when CalDAV credentials are configured, regardless of the JMAP calendar capability. Contacts is reported available only when the session carries both the JMAP contacts capability and a primary account for it. That confirms **read** access only: a read-only contacts token reports exactly the same capability, so `create_contact`/`update_contact`/`delete_contact` are listed as available and only refuse when a write is attempted.
-- **test_bulk_operations**: Safely test bulk operations with dry-run mode
+- **test_bulk_operations**: Test `bulk_mark_read` on up to 10 recent Inbox messages. The default dry run writes nothing and lists the messages with their current read state (`wasRead`). With `dryRun: false` it **writes to those real messages**: it marks them all read, then marks unread again only the ones that were unread before, so each ends in its own prior state. If that second step fails, messages that were unread can be left read; the result reports each step.
   - Parameters: `dryRun` (default: true), `limit` (default: 3, max: 10)
 
 ## API Information
@@ -1180,7 +1180,7 @@ If calendar and contacts functions return "Forbidden" errors, this is likely due
 
 Use the built-in testing tools:
 - **check_function_availability**: See what's available and get setup help
-- **test_bulk_operations**: Safely test bulk operations without making changes
+- **test_bulk_operations**: Test bulk operations; its default dry run makes no changes
 
 For more detailed error information, check the console output when running the server.
 

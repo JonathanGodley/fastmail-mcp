@@ -22,6 +22,7 @@ import { editDraft } from './edit-draft-handler.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
+import { runBulkReadTest } from './bulk-test-handler.js';
 import { listMailboxes, createMailbox } from './mailbox-handler.js';
 import { createContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
 import createDebug from 'debug';
@@ -1882,7 +1883,7 @@ const TOOLS = [
       },
       {
         name: 'test_bulk_operations',
-        description: 'Test bulk operations by finding recent emails and performing safe operations (mark read/unread)',
+        description: 'Test bulk_mark_read on up to 10 recent Inbox messages. The default dry run writes nothing and lists the messages with their current read state. With dryRun:false it WRITES to those real messages: it marks them all read, then marks unread again only the ones that were unread before, so each ends in its own prior state. If the second step fails, messages that were unread can be left read; the result reports each step.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -2745,79 +2746,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         
-        const emailIds = emails.slice(0, testLimit).map(email => email.id);
-        const operations = [
-          {
-            name: 'bulk_mark_read',
-            description: `Mark ${emailIds.length} emails as read`,
-            parameters: { emailIds, read: true }
-          },
-          {
-            name: 'bulk_mark_read (undo)',
-            description: `Mark ${emailIds.length} emails as unread (undo previous)`,
-            parameters: { emailIds, read: false }
-          }
-        ];
-        
-        const results = {
-          testEmails: emails.map(email => ({
-            id: email.id,
-            subject: email.subject,
-            from: email.from?.[0]?.email || 'unknown',
-            receivedAt: email.receivedAt
-          })),
-          operations: [] as any[]
-        };
-        
-        if (dryRun) {
-          results.operations = operations.map(op => ({
-            ...op,
-            status: 'DRY RUN - Would execute but not actually performed',
-            executed: false
-          }));
-          
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `BULK OPERATIONS TEST (DRY RUN)\n\n${toolJson(results)}\n\nTo actually execute the test, set dryRun: false`,
-              },
-            ],
-          };
-        } else {
-          for (const operation of operations) {
-            try {
-              await client.bulkMarkRead(operation.parameters.emailIds, coerceBool(operation.parameters.read) ?? true);
-              results.operations.push({
-                ...operation,
-                status: 'SUCCESS',
-                executed: true,
-                timestamp: new Date().toISOString()
-              });
-
-              await new Promise(resolve => setTimeout(resolve, 500));
-            } catch (error) {
-              results.operations.push({
-                ...operation,
-                status: 'FAILED',
-                executed: false,
-                // Folded into result JSON rather than raised, so the top-level catch's
-                // redaction never sees it.
-                error: redactBearerTokens(error instanceof Error ? error.message : String(error)),
-                timestamp: new Date().toISOString()
-              });
-            }
-          }
-          
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `BULK OPERATIONS TEST (EXECUTED)\n\n${toolJson(results)}`,
-              },
-            ],
-          };
-        }
+        const text = await runBulkReadTest(emails.slice(0, testLimit), dryRun, client);
+        return { content: [{ type: 'text', text }] };
       }
 
       default:
