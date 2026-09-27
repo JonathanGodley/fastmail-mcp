@@ -507,12 +507,15 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
   `normalizeName`, whose class is `\s` **plus an explicit U+0085** — NEL is a mandatory
   line break per UAX #14 but is NOT in ECMAScript `\s` (verified empirically 2026-07-05).
 - **Placement:** the block goes where the caller writes `{{forward}}`, in each part the
-  caller supplied and in that part's own form; nothing is built for a part the caller did
-  not supply. A forward that places no `{{forward}}` and does not pass `asAttachment: true`
-  is refused, as is a token in one supplied part but not the other. So a forward ships HTML
+  caller supplied and in that part's own form. A part the caller did not supply is derived
+  in one direction only: an `htmlBody` supplied alone gets a text alternative derived from
+  the EXPANDED html, so it carries the block too, while a `textBody` supplied alone gets no
+  html. A forward that places no `{{forward}}` and does not pass `asAttachment: true` is
+  refused, as is a token in one supplied part but not the other. So a forward ships HTML
   only when the caller supplies an `htmlBody`: a text-only forward of an html original
-  reproduces it as text, any inline images it displayed ride as regular attachments, and the
-  result says so and names `{{forward}}` in `htmlBody` as the fix. An attachment-only
+  reproduces it as text, any inline images it displayed ride as regular attachments unless
+  `includeOriginalAttachments` is false, and the result says what happened and names
+  `{{forward}}` in `htmlBody` as the fix. An attachment-only
   original gets the header block alone. The reproduced html runs through the same sanitiser
   floor as reply quotes (script/style/handlers stripped, real http(s) images kept).
 - **Quotability includes embedded images.** An original whose body is nothing but
