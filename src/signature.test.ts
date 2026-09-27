@@ -65,6 +65,14 @@ describe('reading the sign-off off an identity', () => {
     assert.equal(sigFor([wild], 'anything@example.com')?.text, 'Wild');
   });
 
+  it('prefers an exact-address identity to a wildcard listed before it', () => {
+    const wild = { id: 'id-w', email: '*@example.com', mayDelete: true, textSignature: 'Wild' };
+    const exact = { id: 'id-e', email: 'ops@example.com', mayDelete: true, textSignature: 'Ops' };
+    assert.equal(selectIdentity([wild, exact], 'OPS@example.com'), exact);
+    assert.equal(selectIdentity([exact, wild], 'ops@example.com'), exact);
+    assert.equal(selectIdentity([wild, exact], 'other@example.com'), wild);
+  });
+
   it('resolves to no signature — not an error — when from names nothing verified', () => {
     assert.equal(sigFor([SIGNED_IDENTITY], 'stranger@elsewhere.example'), undefined);
   });

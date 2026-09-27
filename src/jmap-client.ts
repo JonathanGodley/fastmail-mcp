@@ -4,7 +4,7 @@ import { parseAddress, requireNonEmpty, validateClearFields, coerceUtcDate, desc
 import type { AttachmentSpec } from './coerce.js';
 import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assertBodyInputs } from './body-format.js';
 import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from './reply-quote.js';
-import { matchesIdentity, signatureOf } from './identity.js';
+import { defaultIdentity, identityFor, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
 import {
@@ -623,7 +623,7 @@ const REJECT_UNVERIFIED_FROM =
  */
 export function rejectFromAddress(identities: any[], fromAddress: string): string | undefined {
   if (isWildcardIdentityEmail(fromAddress)) return rejectWildcardFromValue(fromAddress);
-  return identities.some((id) => typeof id?.email === 'string' && matchesIdentity(id.email, fromAddress))
+  return identityFor(identities, fromAddress)
     ? undefined
     : REJECT_UNVERIFIED_FROM;
 }
@@ -1830,8 +1830,7 @@ export class JmapClient {
   async getDefaultIdentity(): Promise<any> {
     const identities = await this.getIdentities();
     
-    // Find the default identity (usually the one that can't be deleted)
-    return identities.find((id: any) => id.mayDelete === false) || identities[0];
+    return defaultIdentity(identities);
   }
 
   async createDraft(email: {
@@ -1874,12 +1873,12 @@ export class JmapClient {
 
     let selectedIdentity;
     if (email.from) {
-      selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedFrom!.email));
+      selectedIdentity = identityFor(identities, parsedFrom!.email);
       if (!selectedIdentity) {
         throw new InvalidInputError(REJECT_UNVERIFIED_FROM);
       }
     } else {
-      selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
+      selectedIdentity = defaultIdentity(identities);
     }
 
     // With no `from`, the identity's OWN `email` is written, which for a wildcard is the
@@ -2072,17 +2071,16 @@ export class JmapClient {
 
     let selectedIdentity;
     if (updates.from) {
-      selectedIdentity = identities.find(id => matchesIdentity(id.email, parsedUpdateFrom!.email));
+      selectedIdentity = identityFor(identities, parsedUpdateFrom!.email);
       if (!selectedIdentity) {
         throw new InvalidInputError(REJECT_UNVERIFIED_FROM);
       }
     } else {
       const existingFrom = existingEmail.from?.[0]?.email;
       if (existingFrom) {
-        selectedIdentity = identities.find(id => matchesIdentity(id.email, existingFrom))
-          || identities.find(id => id.mayDelete === false) || identities[0];
+        selectedIdentity = identityFor(identities, existingFrom) ?? defaultIdentity(identities);
       } else {
-        selectedIdentity = identities.find(id => id.mayDelete === false) || identities[0];
+        selectedIdentity = defaultIdentity(identities);
       }
     }
 
@@ -2179,7 +2177,7 @@ export class JmapClient {
     const writtenFromAddress: string | undefined =
       parsedUpdateFrom?.email || existingEmail.from?.[0]?.email || selectedIdentity.email;
     const signingIdentity = writtenFromAddress
-      ? identities.find((id: any) => typeof id?.email === 'string' && matchesIdentity(id.email, writtenFromAddress))
+      ? identityFor(identities, writtenFromAddress)
       : undefined;
     // The display name written alongside that address: the caller's own in THIS edit's
     // `from` (#161), else the name the stored draft carries against that address, else the
@@ -2912,7 +2910,7 @@ export class JmapClient {
     }
 
     const identities = await this.getIdentities();
-    const selectedIdentity = identities.find(id => matchesIdentity(id.email, fromEmail));
+    const selectedIdentity = identityFor(identities, fromEmail);
     if (!selectedIdentity) {
       throw new InvalidInputError('From address on draft does not match any sending identity. Edit the draft to set a from address matching one of your verified identities before sending.');
     }

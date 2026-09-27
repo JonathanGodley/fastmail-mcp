@@ -28,9 +28,8 @@ export function matchesIdentity(identityEmail: string, address: string): boolean
 
 /**
  * The identity a compose call will send as: the one matching an explicit `from`, else the
- * account's default (the identity that cannot be deleted, falling back to the first).
- * Mirrors JmapClient.createDraft's own selection, which is the rule that actually decides
- * the `from` header.
+ * account's default. JmapClient.createDraft picks through the same two helpers below, and
+ * that is the rule that actually decides the `from` header.
  *
  * Returns undefined when `from` names nothing verified. Deliberately NOT an error here:
  * createDraft raises the real "not verified for sending" refusal a moment later, and a
@@ -38,10 +37,24 @@ export function matchesIdentity(identityEmail: string, address: string): boolean
  * an oblique one.
  */
 export function selectIdentity(identities: any[] | undefined | null, from?: string): any | undefined {
+  return from ? identityFor(identities, from) : defaultIdentity(identities);
+}
+
+/**
+ * The identity that verifies `address`. An exact-address identity wins over a wildcard one
+ * whatever order the server lists them in, since its name and signature are the ones set up
+ * for that address. Every site that picks an identity for an address goes through here.
+ */
+export function identityFor(identities: any[] | undefined | null, address: string): any | undefined {
+  const list = (identities ?? []).filter((id: any) => typeof id?.email === 'string');
+  const addr = address.toLowerCase();
+  return list.find((id: any) => id.email.toLowerCase() === addr)
+    ?? list.find((id: any) => matchesIdentity(id.email, address));
+}
+
+/** The account's default identity: the one that cannot be deleted, else the first listed. */
+export function defaultIdentity(identities: any[] | undefined | null): any | undefined {
   const list = identities ?? [];
-  if (from) {
-    return list.find((id: any) => typeof id?.email === 'string' && matchesIdentity(id.email, from));
-  }
   return list.find((id: any) => id?.mayDelete === false) ?? list[0];
 }
 

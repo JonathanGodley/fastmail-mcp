@@ -4034,6 +4034,56 @@ describe('updateDraft wildcard identity', () => {
   });
 });
 
+// An account can hold both `*@example.com` and `ops@example.com`. The exact identity is the
+// one that sends as that address, whichever order the server lists the two in.
+describe('an exact-address identity beats a wildcard listed before it', () => {
+  const EXACT = { id: 'id-ops', name: 'Ops Desk', email: 'ops@example.com', mayDelete: true };
+  let client: JmapClient;
+
+  beforeEach(() => {
+    client = makeClient();
+    mock.method(client, 'getIdentities', async () => [WILDCARD_IDENTITY, EXACT]);
+    mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, SENT_MAILBOX]);
+  });
+
+  it('createDraft writes the exact identity\'s name', async () => {
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-x' } } }, 'createDraft']],
+    }));
+    await client.createDraft({ subject: 'Hi', from: 'ops@example.com' });
+    const emailObj = callArguments(makeReq)[0].methodCalls[0][1].create.draft;
+    assert.deepEqual(emailObj.from, [{ name: 'Ops Desk', email: 'ops@example.com' }]);
+  });
+
+  for (const updates of [{ subject: 'Changed' }, { from: 'ops@example.com' }]) {
+    it(`updateDraft writes the exact identity's name: ${Object.keys(updates)[0]}`, async () => {
+      const existing = { ...EXISTING_DRAFT, from: [{ email: 'ops@example.com' }] };
+      const makeReq = stubRequests(client, async (req: any) => {
+        if (req.methodCalls[0][0] === 'Email/get') {
+          return { methodResponses: [['Email/get', { list: [existing] }, 'getEmail']] };
+        }
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } }, destroyed: ['draft-1'] }, 'updateDraft']] };
+      });
+      await client.updateDraft('draft-1', updates);
+      const emailObj = callArguments(makeReq, 1)[0].methodCalls[0][1].create.draft;
+      assert.deepEqual(emailObj.from, [{ name: 'Ops Desk', email: 'ops@example.com' }]);
+    });
+  }
+
+  it('sendDraft submits under the exact identity', async () => {
+    const draft = { ...SENDABLE_DRAFT, from: [{ email: 'ops@example.com' }] };
+    const makeReq = stubRequests(client, async (req: any) => {
+      if (req.methodCalls[0][0] === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [draft] }, 'getEmail']] };
+      }
+      return { methodResponses: [['EmailSubmission/set', { created: { submission: { id: 'sub-1' } } }, 'submitDraft']] };
+    });
+    await client.sendDraft('draft-1');
+    const submitCall = callArguments(makeReq, 1)[0];
+    assert.equal(submitCall.methodCalls[0][1].create.submission.identityId, EXACT.id);
+  });
+});
+
 // ---------- updateDraft display-name resolution (#152) ----------
 //
 // The name the stored draft already carries against the address being written wins over
