@@ -2199,10 +2199,11 @@ export class JmapClient {
     // off the part UNION: which list holds the .eml is a MIME-shape accident.
     const emlAttached = storedParts.some((p: any) => classifyPartType(p?.type) === 'message/rfc822');
     // The source instance rides with the forward marking: dropped when a FORWARD draft is
-    // de-forwarded, kept on a reply draft.
+    // de-forwarded, kept on a reply draft. Vetted as the create vets it (isSettableSourceId).
     const storedSourceId = existingEmail[SOURCE_ID_HEADER];
+    const trimmedSourceId = typeof storedSourceId === 'string' ? storedSourceId.trim() : undefined;
     const carriedSourceId: string | undefined =
-      typeof storedSourceId === 'string' && storedSourceId.trim() !== '' ? storedSourceId.trim() : undefined;
+      isSettableSourceId(trimmedSourceId) ? trimmedSourceId : undefined;
 
     // How the notes name the carried block, from the HEADERS ALONE, never the body's markup.
     const keepNoun = !isReply && carriedForwardHeader.length > 0 && !emlAttached

@@ -5594,6 +5594,17 @@ describe('source-instance header (X-Fastmail-MCP-Source-Id)', () => {
     assert.equal(fetchedIds.includes('orig-1'), false);
   });
 
+  // The same rule the create applies: a stored value that is not a JMAP id (another
+  // client, or a hand-edited header) is treated as absent, never written back.
+  it('updateDraft drops a stored header that is not a JMAP id rather than carrying it', async () => {
+    for (const stored of ['not a jmap id!', 'orig-1\r\nBcc: x@example.com']) {
+      const makeReq = mockSrcUpdate(client, { ...REPLY_QUOTED, [SRC_PROP]: stored });
+      await client.updateDraft('rdraft-1', { subject: 'Re: Hello (edited)' });
+      assert.equal(draftFromCall(makeReq)[SRC_PROP], undefined, JSON.stringify(stored));
+      makeReq.mock.restore();
+    }
+  });
+
   it('a draft that never had the header stays without it', async () => {
     const { [SRC_PROP]: _drop, ...rest } = REPLY_QUOTED as any;
     const makeReq = mockSrcUpdate(client, { ...rest, id: 'rdraft-1' });
