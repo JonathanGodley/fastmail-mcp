@@ -6,10 +6,6 @@ CONTRIBUTING.md carries the rules every contributor follows: documentation ships
 
 ## Building and testing, in practice
 
-A running MCP server keeps serving the build it started with, so test a change to server code by invoking that code directly through this repo's own CLI, tests or `scripts/mcp-harness.mjs`. Going through the connected MCP tools answers from the old process and makes a correct change look broken.
-
-JMAP index reads (RFC 8620 §3.4): our `getMethodResult`/`getListResult` positional reads are safe only while `Email/get`, `Mailbox/get` and `Thread/get` each appear once per batch. Match responses by call id before generalising to a batch where a method could repeat or be reordered. When a resolver cannot complete, it follows the `attachMailboxInfo` model: non-throwing, never silent.
-
 A live harness run is on-demand proof of the real external path (Fastmail's blob store cannot be meaningfully mocked), never the sole coverage. "Verified once, live" is not "tested going forward." Use `scripts/mcp-harness.mjs` rather than hand-writing a client.
 
 A new pin is proved by a lever that turns it red at that assertion. A lever that trips an earlier assertion proves nothing about a later one. A claim about a set (every call site, every tool, every field) is proved by enumerating the set, never by sampling it.
@@ -29,13 +25,9 @@ A comment earns its place by changing what the next reader would do. `attachMail
 
 **Fix it rather than filing it.** A small defect with an obvious fix is fixed in the change in front of you, or, where nothing is in flight, in the pass that found it; a build that touches an area owns the defects it finds there. A defect that would leave the merged build broken is never trackable: if it genuinely cannot be fixed now, the build does not merge and it goes to the operator. File a finding only when the work genuinely cannot land now: the fix is design work of its own (judged on the minimal fix, not the ideal one), it needs a decision with a real trade-off nobody has made, it is the residual half of a partly-fixed change, or the area is fenced off from the current session. A review that surfaces a question answers it or surfaces it to the operator; it does not file it. A symmetric case scoped out of a fix is a finding like any other and needs its own disposition. Upstream bookkeeping is exempt: the per-PR adoption issues and the `docs/upstream-sync.md` ledger are filed unfiltered.
 
-## Parallel work: one worktree per concern, kept alive through review
+## Parallel work
 
-One worktree per implementer, a lone agent included, because agents sharing one checkout share one git index and can commit each other's staged work. The main instance orchestrates: it partitions the work, routes findings, and merges. It does not implement.
-
-Keep each worktree alive until its work is reviewed AND its findings are fixed. Merging as soon as a branch is feature-complete leaves review fixes nowhere to go but a shared checkout, where several agents edit the same files at once and the result is one diff that maps to no issue.
-
-Route each finding to the worktree that owns it and RESUME that worktree's agent, which already holds the context for its area. Give it its list, and let it verify and commit in its own worktree.
+Parallel work follows `/orchestrate`.
 
 **Land a branch by MERGING it, and sweep for the worktree afterwards.** Re-applying a branch's changes as fresh commits on `main` leaves the branch tip unreachable from `main` forever, so nothing will report the work as landed and the worktree can never be cleaned up on that evidence. When a branch is landed, remove its worktree and delete the branch in the same breath. `.gitignore` excludes `.claude/*`, where the harness puts an isolated agent's worktree, so a leftover never appears in `git status`; `git worktree list` is the only thing that shows them. Run it before ending a session.
 
@@ -55,7 +47,7 @@ Per-feature behaviour rationale lives in the relevant fork GitHub issue, e.g. `e
 
 ## Working with upstream
 
-`upstream` = `MadLlama25/fastmail-mcp` (the fork's base); `origin` = `JonathanGodley/fastmail-mcp`. `gh` resolves bare commands to the fork: `gh repo set-default JonathanGodley/fastmail-mcp` is stored in this checkout (`remote.origin.gh-resolved`). Pass `--repo MadLlama25/fastmail-mcp` only when upstream is deliberately the target, such as reading their PRs for the adopt issues below, and remember that ⛔ below forbids writing there.
+`upstream` = `MadLlama25/fastmail-mcp` (the fork's base); `origin` = `JonathanGodley/fastmail-mcp`. `gh` resolves bare commands to the fork: `gh repo set-default JonathanGodley/fastmail-mcp` is stored in this checkout (`remote.origin.gh-resolved`). Pass `--repo MadLlama25/fastmail-mcp` only when upstream is deliberately the target, such as reading their PRs for the adopt issues below, and never write there.
 
 Strategy. Track upstream by *generally merging it into the fork whenever that is doable*: a periodic mainline sync that re-bases the fork's differentiators (response simplification, the calendar work) on top of upstream's latest, supplemented by the fork's own fixes carried ahead of upstream as open PRs *against* upstream. Never block fork progress on upstream review.
 
@@ -67,8 +59,4 @@ Offering a fix back (our work → theirs). Any fix that addresses an upstream is
 
 ⚠️ **Write the closing keyword in the fully-qualified `Closes MadLlama25/fastmail-mcp#NN` form, never a bare `Closes #NN`.** A bare number in a commit destined for upstream closes their issue when they merge it, and then closes this repository's unrelated issue of the same number the moment upstream's history is merged back here. The qualified form is inert coming back. For the same reason, a CLOSED/COMPLETED state on a fork issue is not trustworthy without checking that the closing commit is actually about it. The mechanical guard is tracked as #158.
 
-**⛔ Never comment on an upstream PR or issue directly.** Drafting the text is fine; a human posts it. The fork's OWN issues are fine for Claude to open, comment on, and close. Close a fork issue as part of shipping its fix, but validate first: confirm the fix is complete, genuinely resolves the issue, and is pushed to `origin/main`, then close with a commit-citing comment. A tagged release is NOT a precondition for closing.
-
-## Artifacts read as standalone work
-
-No plan codenames, session jargon or AI-workflow meta in anything durable. GitHub artifacts cite the public `#issue`/PR, and the release-notes codename rule above is the same rule applied to tags and release bodies.
+The fork's OWN issues are fine for Claude to open, comment on, and close. Close a fork issue as part of shipping its fix, but validate first: confirm the fix is complete, genuinely resolves the issue, and is pushed to `origin/main`, then close with a commit-citing comment. A tagged release is NOT a precondition for closing.
