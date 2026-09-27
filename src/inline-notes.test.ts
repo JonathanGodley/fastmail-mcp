@@ -146,23 +146,18 @@ describe('the notes a call emits', () => {
     assert.equal(
       noteForwardPooled(3, ['logo.png']),
       '3 media part(s) could not be embedded and were attached as regular attachments: ' +
-      '"logo.png" …and 2 more — re-run with asAttachment: true for full fidelity, ' +
-      'then delete this draft.',
+      '"logo.png" …and 2 more.',
     );
   });
 
   it('reports pooled media even when no part had a name', () => {
     assert.equal(
       noteForwardPooled(1, []),
-      '1 media part(s) could not be embedded and were attached as regular attachments — ' +
-      're-run with asAttachment: true for full fidelity, then delete this draft.',
+      '1 media part(s) could not be embedded and were attached as regular attachments.',
     );
   });
 
   it('takes the remedy from its caller, for a tool whose caller has a better lever', () => {
-    // The default remedy is right where the forward's format is inferred and re-running as
-    // .eml is the only lever. On a tool where the caller places the block themselves it is
-    // not, so the sentence ends where that caller's fix is.
     assert.equal(
       noteForwardPooled(1, ['logo.png'], 'put the token in htmlBody.'),
       '1 media part(s) could not be embedded and were attached as regular attachments: ' +
@@ -538,10 +533,10 @@ describe('emitInlineNotes', () => {
       ['1 media part(s) could not be embedded and were attached as regular attachments: ' +
        '"logo.png" — put the token in htmlBody.'],
     );
-    // Omitted, the shared default stands.
-    assert.match(
+    // Omitted, the sentence states the fact alone.
+    assert.equal(
       emitInlineNotes(tally({ pooled: 1, pooledNames: [] }), { surface: 'forward' })[0],
-      /re-run with asAttachment: true for full fidelity, then delete this draft\.$/,
+      '1 media part(s) could not be embedded and were attached as regular attachments.',
     );
   });
 
@@ -637,7 +632,7 @@ describe('emitInlineNotes', () => {
     assert.deepEqual(notes, [
       'This draft embeds 1 image(s) from the original (1 KB).',
       '1 media part(s) could not be embedded and were attached as regular attachments: ' +
-      '"logo.png" — re-run with asAttachment: true for full fidelity, then delete this draft.',
+      '"logo.png".',
       '2 attachment(s), including 1 image(s), were not included because ' +
       'includeOriginalAttachments is false. Body-embedded images were still carried — ' +
       'they are part of the message body.',

@@ -114,23 +114,19 @@ export function noteForwardUnresolvedReferences(count: number): string {
   );
 }
 
-/** The remedy the pooled sentence ends on when the caller names no other one. */
-export const POOLED_REMEDY_RERUN =
-  're-run with asAttachment: true for full fidelity, then delete this draft.';
-
 /**
  * Media that could not be embedded and rides the forward as a regular attachment.
  *
- * The REMEDY is a parameter because `draft_email`, where the caller places the block, has a
- * better lever than re-running as .eml, and one the token gate would not refuse.
+ * The REMEDY is the caller's, because the working fix depends on where the caller placed the
+ * forwarded block; `draft_email` names it. With none, the sentence states the fact alone.
  */
 export function noteForwardPooled(
-  count: number, names: (string | null | undefined)[], remedy: string = POOLED_REMEDY_RERUN,
+  count: number, names: (string | null | undefined)[], remedy?: string,
 ): string {
   const listed = describePartNames(names, count);
   return (
     `${count} media part(s) could not be embedded and were attached as regular attachments` +
-    `${listed ? `: ${listed}` : ''} — ${remedy}`
+    `${listed ? `: ${listed}` : ''}${remedy ? ` — ${remedy}` : '.'}`
   );
 }
 
@@ -834,10 +830,7 @@ export interface InlineNoteContext {
   includeOriginalAttachments?: boolean;
   /** Set when the body contained reference-shaped text this server could not act on. */
   unparsableCidText?: boolean;
-  /**
-   * How to end the pooled sentence, for a tool whose caller has a better lever than
-   * re-running as .eml. Defaults to POOLED_REMEDY_RERUN. See noteForwardPooled.
-   */
+  /** How to end the pooled sentence. See noteForwardPooled. */
   pooledRemedy?: string;
 }
 

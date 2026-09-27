@@ -370,16 +370,17 @@ function noteForwardTextForm(imagesRode: boolean): string {
 }
 
 /**
- * What the pooled-media sentence ends on for this tool. Every forward that pools a part has
- * `{{forward}}` in its body, and the shared default says to re-run with `asAttachment: true`,
- * a call the token gate refuses while the token is still there. The first remedy is for the
- * noteForwardTextForm path, where moving the token into htmlBody embeds the images.
+ * What the pooled-media sentence ends on. Every forward that pools a part has `{{forward}}`
+ * in its body, so re-running as .eml means dropping the token, which the token gate requires.
+ * The first remedy is for the noteForwardTextForm path, where moving the token into htmlBody
+ * embeds the images. Either fix is a new draft, so both say to delete this one.
  */
 const POOLED_REMEDY_PLACE_IN_HTML =
   'put {{forward}} in htmlBody to embed them, or drop the token and pass asAttachment: true ' +
-  'to forward the original whole.';
+  'to forward the original whole, then delete this draft.';
 const POOLED_REMEDY_DROP_TOKEN =
-  'drop {{forward}} and pass asAttachment: true to forward the original whole.';
+  'drop {{forward}} and pass asAttachment: true to forward the original whole, then delete ' +
+  'this draft.';
 
 /** A reply that placed no {{quote}}: a forgotten token would otherwise be silent. */
 const NOTE_REPLY_UNQUOTED =

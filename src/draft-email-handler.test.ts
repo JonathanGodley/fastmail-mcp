@@ -729,7 +729,7 @@ describe('draft_email — {{forward}} shipping in the text form over an html ori
     // to `asAttachment: true`, which this tool refuses while {{forward}} is in the body.
     assert.ok(r.notes!.some((n) => n.startsWith('1 media part(s) could not be embedded')
       && n.endsWith('put {{forward}} in htmlBody to embed them, or drop the token and pass '
-        + 'asAttachment: true to forward the original whole.')), JSON.stringify(r.notes));
+        + 'asAttachment: true to forward the original whole, then delete this draft.')), JSON.stringify(r.notes));
     assert.ok(r.notes!.every((n) => !/re-run with asAttachment: true for full fidelity/.test(n)));
   });
 
@@ -781,7 +781,7 @@ describe('draft_email — {{forward}} shipping in the text form over an html ori
     const pooled = r.notes!.filter((n) => n.startsWith('1 media part(s) could not be embedded'));
     assert.equal(pooled.length, 1, JSON.stringify(r.notes));
     assert.ok(
-      pooled[0].endsWith('drop {{forward}} and pass asAttachment: true to forward the original whole.'),
+      pooled[0].endsWith('drop {{forward}} and pass asAttachment: true to forward the original whole, then delete this draft.'),
       pooled[0],
     );
     assert.doesNotMatch(pooled[0], /re-run with asAttachment: true/);
@@ -2516,7 +2516,7 @@ describe('draft_email — what a {{forward}} carries out of the original', () =>
     ]);
     assert.deepEqual(r.notes, [
       '1 media part(s) could not be embedded and were attached as regular attachments: "p.png"' +
-      ' — drop {{forward}} and pass asAttachment: true to forward the original whole.',
+      ' — drop {{forward}} and pass asAttachment: true to forward the original whole, then delete this draft.',
     ]);
   });
 
@@ -2536,7 +2536,7 @@ describe('draft_email — what a {{forward}} carries out of the original', () =>
     const r = await compose(HTML_FORWARD, client);
     assert.deepEqual(r.notes, [
       '2 media part(s) could not be embedded and were attached as regular attachments:' +
-      ' "a.png", "b.png" — drop {{forward}} and pass asAttachment: true to forward the original whole.',
+      ' "a.png", "b.png" — drop {{forward}} and pass asAttachment: true to forward the original whole, then delete this draft.',
     ]);
   });
 
