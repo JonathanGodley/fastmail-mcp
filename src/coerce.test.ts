@@ -1591,7 +1591,6 @@ describe('canonicalZoneName', () => {
     assert.ok(zoneCanonicalizationCacheHas('nZ'), 'the different-case alias did not get its own key');
   });
 
-  // A stored TZID reaches this on every listing, and an invitation's sender chooses it.
   it('retains nothing for a name ICU cannot resolve', () => {
     const before = zoneCanonicalizationCacheSize();
     for (let i = 0; i < 50; i++) canonicalZoneName(`Vendor/Zone-${i}-${'x'.repeat(1000)}`);
