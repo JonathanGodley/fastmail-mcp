@@ -59,8 +59,8 @@ export function identityFor(identities: any[] | undefined | null, address: strin
 
 /** The account's default identity: the one that cannot be deleted, else the first listed. */
 export function defaultIdentity(identities: any[] | undefined | null): any | undefined {
-  const list = identities ?? [];
-  return list.find((id: any) => id?.mayDelete === false) ?? list[0];
+  const list = (identities ?? []).filter((id: any) => typeof id?.email === 'string');
+  return list.find((id: any) => id.mayDelete === false) ?? list[0];
 }
 
 /**

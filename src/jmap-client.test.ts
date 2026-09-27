@@ -4096,6 +4096,15 @@ describe('an exact-address identity beats a wildcard listed before it', () => {
     mock.method(client, 'getMailboxes', async () => [DRAFTS_MAILBOX, SENT_MAILBOX]);
   });
 
+  it('createDraft refuses rather than writing a from with no address when no identity has one', async () => {
+    mock.method(client, 'getIdentities', async () => [{ id: 'id-x', name: 'No Address', mayDelete: false }]);
+    const makeReq = stubRequests(client, async () => ({
+      methodResponses: [['Email/set', { created: { draft: { id: 'email-x' } } }, 'createDraft']],
+    }));
+    await assert.rejects(() => client.createDraft({ subject: 'Hi' }), /No sending identities found/);
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
   it('createDraft writes the exact identity\'s name', async () => {
     const makeReq = stubRequests(client, async () => ({
       methodResponses: [['Email/set', { created: { draft: { id: 'email-x' } } }, 'createDraft']],

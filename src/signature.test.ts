@@ -60,6 +60,13 @@ describe('reading the sign-off off an identity', () => {
     assert.equal(selectIdentity([first, SIGNED_IDENTITY]), SIGNED_IDENTITY);
   });
 
+  it('never picks an identity with no email as the default', () => {
+    const broken = { id: 'id-x', mayDelete: false };
+    const usable = { id: 'id-u', email: 'me@example.com', mayDelete: true };
+    assert.equal(selectIdentity([broken, usable]), usable);
+    assert.equal(selectIdentity([{ id: 'id-y' }, usable]), usable);
+  });
+
   it('honours a wildcard identity', () => {
     const wild = { id: 'id-w', email: '*@example.com', mayDelete: true, textSignature: 'Wild' };
     assert.equal(sigFor([wild], 'anything@example.com')?.text, 'Wild');

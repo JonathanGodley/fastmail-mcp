@@ -1884,7 +1884,7 @@ export class JmapClient {
     }
 
     const identities = await this.getIdentities();
-    if (!identities || identities.length === 0) {
+    if (!defaultIdentity(identities)) {
       throw new Error('No sending identities found');
     }
 
@@ -2086,7 +2086,7 @@ export class JmapClient {
     }
 
     const identities = await this.getIdentities();
-    if (!identities || identities.length === 0) {
+    if (!defaultIdentity(identities)) {
       throw new Error('No sending identities found');
     }
 
