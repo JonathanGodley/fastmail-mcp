@@ -1543,7 +1543,7 @@ const TOOLS = [
           properties: {
             verbose: {
               type: ['boolean', 'string'],
-              description: lenientBool('Include extra identity fields (SMTP config, verification state). Not needed for most tasks.'),
+              description: lenientBool('Include every property the server returns for each identity, passed through as sent. On Fastmail today that includes SMTP settings and verification state, but which properties appear is the server\'s choice. Not needed for most tasks.'),
             },
             raw: {
               type: ['boolean', 'string'],

@@ -466,7 +466,7 @@ search_emails { "query": "invoice", "excludeMailboxes": ["Newsletters"] }
 
 The signature fields are the identity's configured sign-off, the same text the Fastmail web UI appends for you. JMAP does not append it server-side, so signing is a per-call choice here: put `{{signature}}` where the sign-off goes in a `draft_email` body (or in an `edit_draft` body with `expandSignature:true`) and this server writes the identity's own signature at exactly that point, or read the field from here and write it into the body yourself. An unset or blank signature is omitted like any other empty field ([#33](https://github.com/JonathanGodley/fastmail-mcp/issues/33)). See [Signing a message](#signing-a-message) for where the token goes and what happens when it has nothing to expand to.
 
-**Verbose adds**: `bcc`, `verificationState`, `showInCompose`, `saveSentToMailboxId`, `displayName`, `isAutoConfigured`, `enableExternalSMTP`, `server`, `port`, `ssl`, `addBccOnSMTP`, `saveOnSMTP`, `externalCredentialId`, `warnings`, `useForAutoReply`, `verificationCheckTime`, plus any other JMAP fields
+**Verbose adds**: every other property the server returns for the identity, passed through as sent. Which ones appear is the server's choice; on Fastmail they have included `bcc`, `verificationState`, `showInCompose`, `saveSentToMailboxId`, `displayName`, `isAutoConfigured`, `enableExternalSMTP`, `server`, `port`, `ssl`, `addBccOnSMTP`, `saveOnSMTP`, `externalCredentialId`, `warnings`, `useForAutoReply` and `verificationCheckTime`, but none is promised
 
 ### Contact fields
 
