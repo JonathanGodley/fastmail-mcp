@@ -3821,7 +3821,7 @@ export class CalDAVCalendarClient {
       callerZone = validateCallerTimezone(fields.timeZone);
       if (fields.start === undefined && fields.end === undefined) {
         throw new InvalidInputError(
-          `timeZone was supplied ('${callerZone}') but neither start nor end was. timeZone only ` +
+          `timeZone was supplied ('${callerZone}'${etcGmtOffsetNote(callerZone)}) but neither start nor end was. timeZone only ` +
           "qualifies a start/end value being written in this same call — it cannot be applied to a " +
           "stored value on its own. Re-send start and/or end (even unchanged) alongside timeZone, " +
           "or drop timeZone."

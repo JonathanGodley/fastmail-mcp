@@ -6691,6 +6691,15 @@ describe('timeZone parameter (#157)', () => {
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
     });
 
+    it('names an Etc/GMT timeZone with its real offset when refusing it without start or end', async () => {
+      const { client } = updateClient(ZONED);
+      await assert.rejects(
+        () => client.updateCalendarEvent('tz@fm', { timeZone: 'Etc/GMT-10' }),
+        (err: Error) => err.message.startsWith(
+          "timeZone was supplied ('Etc/GMT-10' (UTC+10:00; the Etc/GMT sign is inverted)) but neither start nor end was."),
+      );
+    });
+
     it('rejects timeZone combined with a Z-designated start', async () => {
       const { client } = updateClient(ZONED);
       await assert.rejects(
