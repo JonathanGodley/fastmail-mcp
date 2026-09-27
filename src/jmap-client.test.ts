@@ -1653,6 +1653,23 @@ describe('updateDraft', () => {
     assert.ok(result.notes?.some((n) => /the sending identity has no signature configured/.test(n)));
   });
 
+  // {{quote}} and {{forward}} are stored as typed under the flag, so an escaped spelling of
+  // one is too: it may sit in quoted history the caller handed back and did not write.
+  it('keeps the backslash of an escaped {{quote}} or {{forward}} under the flag', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    await client.updateDraft('draft-1', {
+      htmlBody: '<p>Thanks.</p>{{signature}}<blockquote>type \\{{quote}} or \\{{ forward }}</blockquote>',
+      expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    const html = createdDraft(makeReq).bodyValues.html.value;
+    assert.match(html, /Test User/);
+    assert.ok(
+      html.endsWith('<blockquote>type \\{{quote}} or \\{{ forward }}</blockquote>'),
+      `expected both escapes kept as written, got ${html}`,
+    );
+  });
+
   it('refuses, naming the signature, when the html sign-off displays an embedded image', async () => {
     mock.method(client, 'getIdentities', async () => [
       { ...SIGNING_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' },

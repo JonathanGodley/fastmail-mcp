@@ -247,8 +247,11 @@ export function expandBodyTokens(authored: string, blocks: BodyBlocks): BodyToke
     ): string => {
       const c = classify(whole, escapedLeft, escapedRight, left, name, right);
       switch (c.kind) {
-        case 'escape':
-          return c.literal;
+        case 'escape': {
+          // An as-written token's escape is as-written too; it may be someone else's text.
+          const escaped = whole.replace(/[\\{}\s]/g, '').toLowerCase() as BodyTokenName;
+          return blocks[escaped]?.available === 'as-written' ? whole : c.literal;
+        }
         case 'near-miss':
           nearMisses.push({ name: c.name, index, text: whole });
           return whole;
