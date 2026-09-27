@@ -21,7 +21,9 @@ export async function runBulkReadTest(
   client: BulkTestClient,
   pause: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 ): Promise<string> {
-  const known = emails.filter((email) => email.keywords && typeof email.keywords === 'object' && !Array.isArray(email.keywords));
+  const hasReadState = (email: any) =>
+    !!email.keywords && typeof email.keywords === 'object' && !Array.isArray(email.keywords);
+  const known = emails.filter(hasReadState);
   const emailIds = known.map((email) => email.id);
   const unreadIds = known.filter((email) => !email.keywords.$seen).map((email) => email.id);
 
@@ -46,7 +48,7 @@ export async function runBulkReadTest(
       subject: email.subject,
       from: email.from?.[0]?.email || 'unknown',
       receivedAt: email.receivedAt,
-      wasRead: !!email.keywords?.$seen,
+      ...(hasReadState(email) ? { wasRead: !!email.keywords.$seen } : { excluded: true }),
     })),
     operations: [] as any[],
   };

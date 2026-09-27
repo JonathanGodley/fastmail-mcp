@@ -40,6 +40,17 @@ describe('runBulkReadTest', () => {
     ]);
   });
 
+  it('reports a message with no reported read state as excluded, not as unread', async () => {
+    const { client } = makeClient();
+    const text = await runBulkReadTest([{ id: 'e1' }, { id: 'e2', keywords: {} }], true, client, noPause);
+    const report = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+    const [e1, e2] = report.testEmails;
+    assert.equal('wasRead' in e1, false);
+    assert.equal(e1.excluded, true);
+    assert.equal(e2.wasRead, false);
+    assert.equal('excluded' in e2, false);
+  });
+
   it('writes nothing back when every message was already read', async () => {
     const { client, calls } = makeClient();
     await runBulkReadTest([email('e1', true), email('e2', true)], false, client, noPause);

@@ -1897,7 +1897,7 @@ const TOOLS = [
       },
       {
         name: 'test_bulk_operations',
-        description: 'Test bulk_mark_read on up to 10 recent Inbox messages. The default dry run writes nothing and lists the messages with their current read state. With dryRun:false it WRITES to those real messages: it marks them all read, then marks unread again only the ones that were unread before, so each ends in its own prior state. A message whose read state was not reported is left out of both steps. If the second step fails, messages that were unread can be left read; the result reports each step.',
+        description: 'Test bulk_mark_read on up to 10 recent Inbox messages. The default dry run writes nothing and lists the messages with their current read state. With dryRun:false it WRITES to those real messages: it marks them all read, then marks unread again only the ones that were unread before, so each ends in its own prior state. A message whose read state was not reported is left out of both steps and listed as excluded rather than with a read state. If the second step fails, messages that were unread can be left read; the result reports each step.',
         inputSchema: {
           type: 'object',
           properties: {
