@@ -891,12 +891,12 @@ const TOOLS = [
             inReplyTo: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'mode:\'new\' only: Message-IDs to reply to, for threading against a message that is not in this account (mode:\'reply\' sets them itself from originalEmailId).' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
+              description: 'mode:\'new\' only: Message-IDs to reply to, for threading against a message that is not in this account (mode:\'reply\' sets them itself from originalEmailId). A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
             },
             references: {
               type: ['array', 'string'],
               items: { type: 'string' },
-              description: 'mode:\'new\' only: Message-IDs for the References header (mode:\'reply\' sets them itself).' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
+              description: 'mode:\'new\' only: Message-IDs for the References header (mode:\'reply\' sets them itself). A value that cannot be read as a list (a number, an object), or a non-string or blank entry, is rejected rather than ignored.' + LENIENT_LIST_DESC + ' ' + THREAD_SPLINTER_DESC,
             },
             asAttachment: {
               type: ['boolean', 'string'],

@@ -1,5 +1,5 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArray, coerceBool, coerceAttachments, describeUntrusted, InvalidInputError, parseAddress } from './coerce.js';
+import { coerceRecipients, coerceStringArrayStrict, coerceBool, coerceAttachments, describeUntrusted, InvalidInputError, parseAddress } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs, isBlank, htmlHasVisibleContent } from './body-format.js';
 import { coerceSubjectOverride } from './subject.js';
@@ -795,8 +795,8 @@ export async function composeDraftEmail(
 
   if (mode === 'new') {
     if (a.mailbox != null) params.mailbox = a.mailbox;
-    params.inReplyTo = coerceStringArray(a.inReplyTo);
-    params.references = coerceStringArray(a.references);
+    params.inReplyTo = coerceStringArrayStrict(a.inReplyTo, 'inReplyTo');
+    params.references = coerceStringArrayStrict(a.references, 'references');
     params.subject = subjectOverride;
   } else {
     if (typeof original?.id === 'string' && original.id !== '') params.sourceEmailId = original.id;

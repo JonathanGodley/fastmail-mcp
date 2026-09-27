@@ -185,8 +185,8 @@ describe('draft_email — mode', () => {
   });
 
   it('takes the recipient fields and the threading headers as an array OR a bare string', async () => {
-    // Both declarations are `['array','string']` and both run through the lenient coercer,
-    // so a client that sends one address or one Message-ID as a scalar is not rejected.
+    // Both declarations are `['array','string']`, so a client that sends one address or one
+    // Message-ID as a scalar is not rejected.
     const { client, calls } = spyClient();
     await compose(
       {
@@ -201,6 +201,24 @@ describe('draft_email — mode', () => {
     assert.deepEqual(calls.draft.inReplyTo, ['thread@example.com']);
     assert.deepEqual(calls.draft.references, ['root@example.com', 'thread@example.com']);
   });
+
+  for (const param of ['inReplyTo', 'references']) {
+    for (const [value, message] of [
+      [42, `${param} must be an array of strings`],
+      [{ id: 'x' }, `${param} must be an array of strings`],
+      [[null], `${param}[0] must be a string; received null.`],
+      [[''], `${param}[0] must be a non-empty string.`],
+    ] as Array<[unknown, string]>) {
+      it(`refuses a ${param} of ${JSON.stringify(value)} rather than writing an unthreaded or wrong header`, async () => {
+        const { client, calls } = spyClient();
+        await assert.rejects(
+          compose({ mode: 'new', to: 'sam@example.com', textBody: 'hi', [param]: value }, client),
+          (e: any) => e instanceof InvalidInputError && e.message.startsWith(message),
+        );
+        assert.equal(calls.draft, undefined);
+      });
+    }
+  }
 
   it("keeps the contentless-draft guard on mode:'new', testing bodies with isBlank", async () => {
     const { client } = spyClient();

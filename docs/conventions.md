@@ -124,7 +124,9 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
 
   `clearFields` on `edit_draft`, `update_contact` and `update_calendar_event`, and
   `edit_draft`'s `removeAttachments`, fail closed for the `edit_draft` reason: a dropped
-  value reads as "clear nothing, remove nothing", and the edit reports success.
+  value reads as "clear nothing, remove nothing", and the edit reports success. So do
+  `draft_email`'s `inReplyTo` and `references`: a dropped value saves an unthreaded draft,
+  and a coerced `[null]` writes the header `null`.
 
   Strictness is per element, and covers the **empty string** as well as the wrong type. That
   is not pedantry: `['']` passes a `typeof entry !== 'string'` check, and the plain coercer's
