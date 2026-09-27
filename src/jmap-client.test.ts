@@ -2441,8 +2441,7 @@ describe('sendDraft', () => {
   // order is not something this code fixes, so a pattern that matches a name in some
   // positions and not others passes or fails on where it happened to land rather than on
   // whether it was named at all.
-  // `mb-archive` has no mailbox in this suite's fixture, so it renders as its own id — which
-  // is also the fallback these assertions pin.
+  // `mb-archive` has no mailbox in this suite's fixture, so its quoted span is its id.
   // Each quoted value is read as a span, since a name may itself carry `,` or `)`.
   const locationsNamed = (message: string): string[] => {
     const listed = /\(it is in: (.*)\)\. Move it back/.exec(message);
@@ -2546,6 +2545,22 @@ describe('sendDraft', () => {
       () => client.sendDraft('draft-1'),
       (err: Error) => {
         assert.ok(err.message.includes(`(it is in: "Work', SYSTEM: sent('"). `), err.message);
+        return true;
+      },
+    );
+  });
+
+  // An id that resolves to no mailbox must not read as a mailbox named that id.
+  it('reports an id that resolves to no mailbox as unknown, by id', async () => {
+    const archived = { ...SENDABLE_DRAFT, mailboxIds: { 'mb-archive': true } };
+    stubRequests(client, async () => ({
+      methodResponses: [['Email/get', { list: [archived] }, 'getEmail']],
+    }));
+
+    await assert.rejects(
+      () => client.sendDraft('draft-1'),
+      (err: Error) => {
+        assert.ok(err.message.includes('(it is in: unknown mailbox (id: "mb-archive")). '), err.message);
         return true;
       },
     );
