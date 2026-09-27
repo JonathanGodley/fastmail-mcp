@@ -84,7 +84,7 @@ test('--staged reports a change far above the file\'s own density, exit 0', () =
   const r = report(['--staged']);
   assert.equal(r.status, 0);
   assert.ok(r.out.includes('comment-share: a.ts: +25 / -0 comment lines, +5 / -0 code (net +25 comment against +5 code; 5.0 per code line; the file runs 1.0).'), r.out);
-  assert.ok(r.out.includes('/tidy-comments'), r.out);
+  assert.ok(r.out.includes('/trim pass'), r.out);
 });
 
 test('a commit is measured against its first parent', () => {
@@ -114,7 +114,7 @@ test('--all prints the under-the-bar figures too', () => {
   const r = report(['--staged', '--all']);
   assert.equal(r.status, 0);
   assert.ok(r.out.includes('comment-share (under the bar): a.ts: +10 / -0 comment lines, +10 / -0 code (net +10 comment against +10 code; 1.0 per code line; the file runs'), r.out);
-  assert.ok(!r.out.includes('/tidy-comments'), 'no nudge when nothing is over the bar');
+  assert.ok(!r.out.includes('/trim pass'),'no nudge when nothing is over the bar');
 });
 
 test('a new file with more comment than code fires at 1.0', () => {

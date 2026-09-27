@@ -199,7 +199,7 @@ function main(argv) {
   if (lines.length) {
     process.stdout.write(lines.join('\n') + '\n');
     if (lines.some((l) => l.startsWith('comment-share: '))) {
-      process.stdout.write('Worth a /tidy-comments pass: a figure far above the file\'s own is nearly always restatement or history, not domain complexity.\n');
+      process.stdout.write('Worth a /trim pass: a figure far above the file\'s own is nearly always restatement or history, not domain complexity.\n');
     }
   }
   return 0;
