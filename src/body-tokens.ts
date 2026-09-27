@@ -93,6 +93,7 @@ export interface BodyTokenScan {
  * Why a block has nothing to expand to; each is a distinct sentence a handler owes the caller.
  *
  *  - `no-signature`                the identity has no signature at all.
+ *  - `no-identity`                   the address the message sends as is no verified identity.
  *  - `no-text-form`                  the signature exists but has no form this part can carry
  *                                    (an images-only html signature, in a text part).
  *  - `nothing-quotable`              the original has nothing quotable in ANY form —
@@ -101,6 +102,7 @@ export interface BodyTokenScan {
  */
 export type BlockUnavailableCause =
   | 'no-signature'
+  | 'no-identity'
   | 'no-text-form'
   | 'nothing-quotable'
   | 'nothing-quotable-in-this-form';

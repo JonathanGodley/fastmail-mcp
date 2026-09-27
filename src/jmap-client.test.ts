@@ -1670,6 +1670,22 @@ describe('updateDraft', () => {
     );
   });
 
+  it('names an unverified stored From, not a missing signature, when the token is removed', async () => {
+    mock.method(client, 'getIdentities', async () => [
+      { ...SIGNING_IDENTITY, email: 'other@example.com', mayDelete: false },
+    ]);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>Thanks.</p>{{signature}}', expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.equal(createdDraft(makeReq).bodyValues.html.value, '<p>Thanks.</p>');
+    assert.ok(
+      result.notes?.some((n) => /is not one of your verified identities/.test(n)),
+      `got ${JSON.stringify(result.notes)}`,
+    );
+    assert.equal(result.notes?.some((n) => /has no signature configured/.test(n)), false);
+  });
+
   it('refuses, naming the signature, when the html sign-off displays an embedded image', async () => {
     mock.method(client, 'getIdentities', async () => [
       { ...SIGNING_IDENTITY, htmlSignature: '<div>Regards</div><img src="cid:logo">' },

@@ -714,7 +714,7 @@ The token is expanded **once, at write**, so the saved draft is the finished mes
 
 When the token has nothing to expand to it is **removed, and the result says why** rather than shipping literal braces to the recipient. That is not an error - the draft is still saved - but it is not silence either. Two reasons arise:
 
-- no signature is available for the address the message sends as - it has none configured, or (an `edit_draft` of a draft whose From is not one of your verified identities) there is no identity to take one from. A `draft_email` `from` that is not a verified identity is refused before anything is built;
+- no signature is available for the address the message sends as - it has none configured, or (an `edit_draft` of a draft whose From is not one of your verified identities) there is no identity to take one from, and the note says which;
 - the message ships no HTML and the identity's signature has no plain-text form (an images-only HTML signature: no HTML ships, so no image does either, and a bare `[image]` line would describe something the message does not carry).
 
 A body with **no** `{{signature}}` in it is stored unsigned, and when the identity has a signature the result carries a note saying so - so "this draft is unsigned" is never something you have to re-read the draft to find out. The receipt lists only the tokens you placed, and a body with none gets no receipt.

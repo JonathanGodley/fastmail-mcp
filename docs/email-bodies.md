@@ -262,11 +262,12 @@ refused, and so is a part carrying more than one.
 **A token that expands to nothing is reported, never dropped in silence.** `{{signature}}`
 is an input the caller cannot verify without re-reading the draft, so a token that quietly
 vanishes is indistinguishable from one that worked. Every unexpanded token emits a note
-naming the part it sat in and the cause, and there are two:
+naming the part it sat in and the cause, and there are three:
 
 | cause | what happened |
 | --- | --- |
-| `no-signature` | the identity has none configured, or `from` names no verified identity — and, on an HTML part, an identity whose signature has no form at all to write there |
+| `no-signature` | the identity has none configured — and, on an HTML part, an identity whose signature has no form at all to write there |
+| `no-identity` | `edit_draft` only: the draft's From address is not one of your verified identities (`draft_email` refuses such a `from` outright) |
 | `no-text-form` | the identity has a signature, but no plain-text form this part can carry: an images-only HTML signature, in a text part |
 
 The split is not cosmetic. An identity that has a sign-off but cannot put one in *this* part

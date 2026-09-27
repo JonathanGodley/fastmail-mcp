@@ -2270,7 +2270,9 @@ export class JmapClient {
       const signatureLanded = new Map<'textBody' | 'htmlBody', boolean>();
       for (const p of writtenParts) {
         const blocks: BodyBlocks = {
-          signature: signatureBlock(editSignature, p.part, messageShipsHtml),
+          signature: signingIdentity
+            ? signatureBlock(editSignature, p.part, messageShipsHtml)
+            : { available: false, cause: 'no-identity' },
           // Neither history token expands or is REMOVED here: it is stored text.
           quote: { available: 'as-written' },
           forward: { available: 'as-written' },
