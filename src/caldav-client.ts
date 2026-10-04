@@ -2069,8 +2069,9 @@ export function sortEventsByStart(events: CalendarEvent[], zone: string | undefi
 
 // `url` separates one UID held in two calendars; `recurrenceId` (absent first) an override
 // from the occurrence it shares an instant with; the raw `start` two spellings of one instant
-// and the unreadable group. Code-unit comparison, so the order does not depend on the host's
-// locale. Rows equal on all four stay in arrival order.
+// and the unreadable group. Rows equal on all four (a record's duplicated block) fall to their
+// whole serialisation, so only identical rows tie, and those are interchangeable. Code-unit
+// comparison throughout, so the order does not depend on the host's locale.
 const EVENT_TIEBREAK_KEYS = ['url', 'id', 'recurrenceId', 'start'] as const;
 
 function compareEventTiebreak(a: CalendarEvent, b: CalendarEvent): number {
@@ -2082,7 +2083,8 @@ function compareEventTiebreak(a: CalendarEvent, b: CalendarEvent): number {
     if (y === undefined) return 1;
     return x < y ? -1 : 1;
   }
-  return 0;
+  const [x, y] = [a, b].map((row) => JSON.stringify(row));
+  return x === y ? 0 : x < y ? -1 : 1;
 }
 
 /**

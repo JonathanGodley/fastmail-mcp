@@ -10594,8 +10594,11 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
       // One record's two blocks, told apart only by their raw start.
       { id: 'bad-c@fm', url: '/cal/work/bad-c.ics', title: 'Untitled', start: 'garbage 2' },
       { id: 'bad-c@fm', url: '/cal/work/bad-c.ics', title: 'Untitled', start: 'garbage 1' },
+      // Equal on every named key, different elsewhere: one record's duplicated block.
+      { id: 'twin@fm', url: '/cal/work/twin.ics', title: 'Twin B', start: '2027-03-02T09:00:00Z' },
+      { id: 'twin@fm', url: '/cal/work/twin.ics', title: 'Twin A', start: '2027-03-02T09:00:00Z' },
     ];
-    const keyOf = (e: any) => `${e.url}|${e.id}|${e.recurrenceId ?? ''}|${e.start ?? ''}`;
+    const keyOf = (e: any) => `${e.url}|${e.id}|${e.recurrenceId ?? ''}|${e.start ?? ''}|${e.title}`;
     const orders: any[][] = [];
     for (let shift = 0; shift < rows.length; shift++) {
       const rotated = [...rows.slice(shift), ...rows.slice(0, shift)];
@@ -10611,7 +10614,7 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
     assert.deepEqual(seen[0].slice(0, 4).map(k => k.split('|')[1]).sort(), ['bad-a@fm', 'bad-b@fm', 'bad-c@fm', 'bad-c@fm']);
     // The occurrence the server sent without a recurrenceId comes before the override.
     assert.ok(
-      seen[0].indexOf('/cal/work/s.ics|s@fm||2027-03-02T09:00:00Z') < seen[0].indexOf('/cal/work/s.ics|s@fm|2027-03-05T09:00:00Z|2027-03-02T09:00:00Z'),
+      seen[0].indexOf('/cal/work/s.ics|s@fm||2027-03-02T09:00:00Z|S') < seen[0].indexOf('/cal/work/s.ics|s@fm|2027-03-05T09:00:00Z|2027-03-02T09:00:00Z|S'),
       seen[0].join('\n'),
     );
   });

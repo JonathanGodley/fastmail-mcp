@@ -1073,6 +1073,7 @@ function findStringifyAliases(source: string): number[] {
 // for a payload serialisation leaves the count at 2 and passes. Everything else has to go
 // through toolJson / redactedJson (see the header for what that does and does not buy).
 const NON_PAYLOAD_STRINGIFY: Record<string, { count: number; why: string }> = {
+  'caldav-client.ts': { count: 1, why: 'the last-resort sort key for calendar rows, never emitted' },
   'coerce.ts': { count: 2, why: 'the seams themselves - toolJson and redactedJson' },
   'contact-card.ts': { count: 2, why: 'quotes a dropped/added value into a prose sentence' },
   'jmap-client.ts': { count: 1, why: 'the HTTP request body POSTed to the JMAP endpoint' },
