@@ -376,6 +376,19 @@ for (const { tool, run } of READ_TOOLS) {
       });
     }
 
+    it('refuses a negative position without the email-only ascending hint', async () => {
+      // The contacts tools have no `ascending` parameter to point the caller at.
+      const { client } = makeReadClient({ ids: ['C1'], total: 1, position: 0 });
+      await assert.rejects(
+        () => run({ position: -1 }, 20, client),
+        (err: Error) => {
+          assert.ok(err instanceof InvalidInputError);
+          assert.doesNotMatch(err.message, /ascending/);
+          return true;
+        },
+      );
+    });
+
     it('hands the coerced position and the given limit to the client', async () => {
       const { client, queries } = makeReadClient({ ids: ['C1'], total: 1, position: 40 });
       await run({ position: '40' }, 25, client);
