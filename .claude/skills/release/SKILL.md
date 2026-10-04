@@ -5,17 +5,17 @@ description: Cut a fastmail-mcp fork release on origin (JonathanGodley/fastmail-
 
 # Cut a fork release
 
-This encodes the **Releasing** section of `CLAUDE.md` and **Bumping the version** in `CONTRIBUTING.md` as a runnable checklist. Releases live on the fork (`origin` = `JonathanGodley/fastmail-mcp`). Pass `--repo JonathanGodley/fastmail-mcp` on every release, tag and issue command (`CLAUDE.md` Releasing).
+This encodes the **Releasing** section of `CLAUDE.md` and **Bumping the version** in `CONTRIBUTING.md` as a runnable checklist.
 
 The dangerous steps (anything that pushes, publishes, or closes a public issue) are grouped AFTER the checkpoint in step 5. Do the verification steps first; do not cross the checkpoint until its precondition holds.
 
 ## 1. Preconditions
 
 - **The user explicitly asked to release THIS session.** Releases are never automatic. If they did not ask, the job of this skill is to STOP and report the procedure — a speculative or dry-read invocation must never trigger a release.
-- **Large or feature release? Triage first, strongly suggested,** with `/triage-release`. Answer "would cutting now ship a known defect": enumerate the delta since the last tag, re-derive every open issue's claim from the code, and band what blocks the cut vs what ships as a release-note known. Run it before bundling any release carrying more than a handful of commits or any new feature surface; a two-line fix release does not need it.
+- **Large or feature release? Run `/triage-release` first, strongly suggested,** before bundling more than a handful of commits or any new feature surface; a two-line fix release does not need it.
 - **Confirm what is bundled** (batching, and its security-fix exception: `CLAUDE.md` Releasing).
 - **Check upstream drift.** `git fetch upstream && git log --oneline $(git merge-base HEAD upstream/main)..upstream/main`. A two-digit list means schedule a sync — the method is `docs/upstream-sync.md`. This check never blocks a release; it just makes the drift visible while someone is looking.
-- **Confirm the documentation tax was paid.** Each bundled change must already have shipped its README + tool-description (`src/index.ts`) updates (`CONTRIBUTING.md` "Documentation ships with the change"). A release does not retroactively excuse a missed doc update — if one is outstanding, fix it before tagging.
+- **Confirm the documentation tax was paid.** Each bundled change must already have shipped its README + tool-description (`src/index.ts`) updates (`CONTRIBUTING.md` "Documentation ships with the change"); fix any outstanding one before tagging.
 
 ## 2. Bump the version: three hand-edited sites, the lockfile and the README pin
 
@@ -82,7 +82,7 @@ gh release create vX.Y.Z-fork.N --repo JonathanGodley/fastmail-mcp --verify-tag 
 
 Close any issue this release fixed that is still open, on the rule in `CLAUDE.md` Working with upstream (validate first; a tagged release is not a precondition). A bare `(#N)` in a commit does not auto-close; only `Closes/Fixes/Resolves #N` on a default-branch push does.
 
-This applies to the **fork's own** issues only. Never close (or comment on) an UPSTREAM `MadLlama25/fastmail-mcp` issue/PR autonomously — draft any such text and let the user post it.
+This applies to the **fork's own** issues only; never close or comment on a `MadLlama25/fastmail-mcp` issue or PR (`CLAUDE.md`, Working with upstream).
 
 ```
 gh issue close <N> --repo JonathanGodley/fastmail-mcp --comment "<cite the release + commit>"
