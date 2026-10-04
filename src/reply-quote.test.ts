@@ -146,6 +146,11 @@ describe('buildQuoteBlocks — the attribution line', () => {
     assert.match(textBlockFor({ text: 'orig', name: ' \t ', email: 'jon@example.com' }), /^jon@example\.com wrote:\n/);
   });
 
+  it('treats a name or email of only invisible characters as missing', () => {
+    assert.match(textBlockFor({ text: 'orig', name: '​‍', email: 'jon@example.com' }), /^jon@example\.com wrote:\n/);
+    assert.match(textBlockFor({ text: 'orig', name: '​', email: '﻿ ­' }), /^unknown wrote:\n/);
+  });
+
   it('collapses a newline in the sender display name', () => {
     const block = textBlockFor({ text: 'orig', name: 'Alex\nExample', sentAt: '2026-06-15T03:29:02Z' });
     assert.match(block, /^On .*, Alex Example wrote:\n/);
