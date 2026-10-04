@@ -11,6 +11,11 @@ import { InvalidInputError, PathAccessError } from './coerce.js';
 import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
 import { callArguments, findCallArguments } from './testing/mock-calls.js';
 import { noteEditSubjectPrefix } from './subject-prefix.js';
+import {
+  noteDiscardedTextPart, noteSignatureTokenStored, rejectExpandSignatureWithoutToken,
+  rejectMissingBodyHash, rejectRepeatedSignatureToken, rejectStaleBodyHash,
+} from './inline-notes.js';
+import { REJECT_BODY_EDITS_WITH_BODY } from './body-edits.js';
 
 // ---------- helpers ----------
 
@@ -5847,5 +5852,283 @@ describe('updateDraft — a reply or forward prefix written into the subject', (
 
     assert.equal(draftFromCall(makeReq).subject, '');
     assertNoPrefixNote(r);
+  });
+});
+
+describe('updateDraft bodyEdits (#177)', () => {
+  let client: JmapClient;
+  beforeEach(() => { client = makeClient(); });
+
+  const HTML = '<p>Hi Bob,</p><p>See you Friday.</p><blockquote type="cite"><p>Original &amp; quoted</p></blockquote>';
+  const TEXT = 'Hi Bob,\n\nSee you Friday.\n\n> Original & quoted';
+  const BASE = {
+    id: 'draft-1', subject: 'Re: Hello',
+    from: [{ email: 'me@example.com' }], to: [{ email: 'bob@example.com' }],
+    cc: [], bcc: [],
+    mailboxIds: { 'mb-drafts': true }, keywords: { $draft: true },
+    inReplyTo: ['orig-msg@example.com'], references: ['orig-msg@example.com'],
+  };
+  const DUAL = { ...BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { t: { value: TEXT }, h: { value: HTML } } };
+  const TEXT_ONLY = { ...BASE,
+    textBody: [{ partId: 't', type: 'text/plain' }], htmlBody: [{ partId: 't', type: 'text/plain' }],
+    bodyValues: { t: { value: TEXT } } };
+  const SIGNING = {
+    id: 'id-1', name: 'Test User', email: 'me@example.com', mayDelete: false,
+    textSignature: '-- \nTest User', htmlSignature: '<div>Test User</div>',
+  };
+
+  // Serves `fixture` as the draft and the draft the create call wrote as the re-read.
+  function serve(fixture: any) {
+    mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
+    let created: any;
+    return mock.method(client, 'makeRequest', async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [params.ids?.[0] === 'draft-2' ? created : fixture] }, 'getEmail']] };
+      }
+      if (params.create) {
+        created = { ...params.create.draft, id: 'draft-2' };
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      }
+      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+    });
+  }
+
+  function created(makeReq: RequestMock) {
+    const [request] = findCallArguments(makeReq, ([req]) => req.methodCalls[0][1].create, 'creating the replacement draft');
+    return request.methodCalls[0][1].create.draft;
+  }
+
+  function wroteNothing(makeReq: RequestMock) {
+    assert.equal(makeReq.mock.calls.some(({ arguments: [req] }) => req.methodCalls[0][0] === 'Email/set'), false);
+  }
+
+  it('edits the html of an html draft, regenerates its text and reports each op', async () => {
+    const makeReq = serve(DUAL);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: 'Friday', replace: 'Saturday' }, { find: 'Hi Bob,', replace: 'Hello Bob,' }],
+      bodyHash: hashOf(DUAL),
+    });
+    const draft = created(makeReq);
+    assert.equal(
+      draft.bodyValues.html.value,
+      '<p>Hello Bob,</p><p>See you Saturday.</p><blockquote type="cite"><p>Original &amp; quoted</p></blockquote>',
+    );
+    assert.match(draft.bodyValues.text.value, /See you Saturday\./);
+    assert.match(draft.bodyValues.text.value, /Original & quoted/);
+    assert.deepEqual(result.bodyEdits, {
+      part: 'htmlBody',
+      ops: [
+        { offset: HTML.indexOf('Friday'), matchedSize: 6, replacementSize: 8 },
+        { offset: 3, matchedSize: 7, replacementSize: 10 },
+      ],
+    });
+    assert.ok(result.bodyHash);
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.ok(result.notes?.includes(noteDiscardedTextPart()));
+  });
+
+  it('matches the html as stored, entities included', async () => {
+    serve(DUAL);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { bodyEdits: [{ find: 'Original & quoted', replace: 'x' }], bodyHash: hashOf(DUAL) }),
+      { message: /^bodyEdits\[0\]\.find not found; re-read the draft and copy the text exactly as its htmlBody stores it/ },
+    );
+  });
+
+  it('edits the text part of a text-only draft and ships no html', async () => {
+    const makeReq = serve(TEXT_ONLY);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: 'Original & quoted', replace: '' }],
+      bodyHash: hashOf(TEXT_ONLY),
+    });
+    const draft = created(makeReq);
+    assert.equal(draft.bodyValues.text.value, 'Hi Bob,\n\nSee you Friday.\n\n> ');
+    assert.equal(draft.htmlBody, undefined);
+    assert.deepEqual(result.bodyEdits, {
+      part: 'textBody',
+      ops: [{ offset: TEXT.indexOf('Original'), matchedSize: 17, replacementSize: 0 }],
+    });
+    assert.ok(result.bodyHash);
+    assert.equal(result.notes, undefined);
+  });
+
+  it('carries no receipt on an edit without bodyEdits', async () => {
+    serve(DUAL);
+    const result = await client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: hashOf(DUAL) });
+    assert.equal(result.bodyEdits, undefined);
+  });
+
+  for (const [label, extra] of [
+    ['htmlBody', { htmlBody: '<p>x</p>' }],
+    ['textBody', { textBody: 'x' }],
+    ['clearFields htmlBody', { clearFields: ['htmlBody'] }],
+    ['clearFields textBody', { clearFields: ['textBody'] }],
+  ] as const) {
+    it(`refuses bodyEdits with ${label}, before writing anything`, async () => {
+      const makeReq = serve(DUAL);
+      await assert.rejects(
+        () => client.updateDraft('draft-1', {
+          bodyEdits: [{ find: 'Friday', replace: 'x' }], bodyHash: hashOf(DUAL),
+          ...(extra as { htmlBody?: string; textBody?: string; clearFields?: string[] }),
+        }),
+        (err: unknown) => err instanceof InvalidInputError && err.message === REJECT_BODY_EDITS_WITH_BODY,
+      );
+      wroteNothing(makeReq);
+    });
+  }
+
+  it('allows bodyEdits beside a clearFields entry that is not a body', async () => {
+    const makeReq = serve(DUAL);
+    await client.updateDraft('draft-1', { bodyEdits: [{ find: 'Friday', replace: 'x' }], clearFields: ['subject'], bodyHash: hashOf(DUAL) });
+    assert.equal(created(makeReq).subject, '');
+  });
+
+  it('requires bodyHash', async () => {
+    const makeReq = serve(DUAL);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { bodyEdits: [{ find: 'Friday', replace: 'x' }] }),
+      { message: rejectMissingBodyHash() },
+    );
+    wroteNothing(makeReq);
+  });
+
+  it('refuses a stale bodyHash before locating any op', async () => {
+    const makeReq = serve(DUAL);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { bodyEdits: [{ find: 'not in the body', replace: 'x' }], bodyHash: hashOf(TEXT_ONLY) }),
+      { message: rejectStaleBodyHash() },
+    );
+    wroteNothing(makeReq);
+  });
+
+  it('refuses an ambiguous find without writing', async () => {
+    const makeReq = serve(DUAL);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { bodyEdits: [{ find: '<p>', replace: '<div>' }], bodyHash: hashOf(DUAL) }),
+      { message: 'bodyEdits[0].find occurs 3 times in htmlBody: ambiguous; include more context so it matches exactly once.' },
+    );
+    wroteNothing(makeReq);
+  });
+
+  // -- embedded images: the spliced body goes through the same reconciliation as a whole body --
+
+  const MINT = 'ii-0123456789abcdef0123456789abcdef@inline.invalid';
+  function image(cid: string, partId: string) {
+    return { partId, blobId: `blob-${partId}`, type: 'image/png', name: `${partId}.png`, cid, disposition: 'inline', size: 2048 };
+  }
+  const IMAGE_DRAFT = { ...BASE,
+    textBody: null,
+    htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { h: { value: `<p>Mine <img src="cid:${MINT}"></p><blockquote><img src="cid:theirs@x"></blockquote>` } },
+    attachments: [image(MINT, 'a'), image('theirs@x', 'b')] };
+
+  it('takes off an image whose reference a replace deleted, and keeps one the untouched text displays', async () => {
+    const makeReq = serve(IMAGE_DRAFT);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: ` <img src="cid:${MINT}">`, replace: '' }],
+      bodyHash: hashOf(IMAGE_DRAFT),
+    });
+    const draft = created(makeReq);
+    assert.equal(draft.bodyValues.html.value, '<p>Mine</p><blockquote><img src="cid:theirs@x"></blockquote>');
+    assert.deepEqual(draft.attachments, [
+      { blobId: 'blob-b', type: 'image/png', name: 'b.png', disposition: 'inline', cid: 'theirs@x' },
+    ]);
+    assert.deepEqual(result.inlineImages, { embedded: 1, degraded: 0, removed: 1 });
+  });
+
+  it("demotes someone else's image whose reference a replace deleted, as a whole-body edit would", async () => {
+    const makeReq = serve(IMAGE_DRAFT);
+    await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: '<img src="cid:theirs@x">', replace: 'gone' }],
+      bodyHash: hashOf(IMAGE_DRAFT),
+    });
+    const parts = created(makeReq).attachments;
+    assert.equal(parts.find((p: any) => p.cid === 'theirs@x').disposition, 'attachment');
+  });
+
+  it('refuses a replace that invents a reserved cid reference', async () => {
+    serve(IMAGE_DRAFT);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        bodyEdits: [{ find: 'Mine', replace: '<img src="cid:ii-fedcba9876543210fedcba9876543210@inline.invalid">' }],
+        bodyHash: hashOf(IMAGE_DRAFT),
+      }),
+      (err: unknown) => err instanceof InvalidInputError && /ii-fedcba9876543210fedcba9876543210@inline\.invalid/.test(err.message),
+    );
+  });
+
+  // -- {{signature}}: the replace strings are the caller's own text, the rest of the part is not --
+
+  const PLANTED = { ...BASE,
+    textBody: [{ partId: 'h', type: 'text/html' }], htmlBody: [{ partId: 'h', type: 'text/html' }],
+    bodyValues: { h: { value: '<p>Thanks.</p><p>SIGN</p><blockquote><p>{{signature}}</p></blockquote>' } } };
+
+  it('expands a {{signature}} written in a replace under the flag, and leaves a stored one alone', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING]);
+    const makeReq = serve(PLANTED);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: '<p>SIGN</p>', replace: '{{signature}}' }],
+      expandSignature: true,
+      bodyHash: hashOf(PLANTED),
+    });
+    assert.equal(
+      created(makeReq).bodyValues.html.value,
+      '<p>Thanks.</p><div><div>Test User</div></div><blockquote><p>{{signature}}</p></blockquote>',
+    );
+    assert.deepEqual(result.bodyEdits!.ops, [{ offset: 14, matchedSize: 11, replacementSize: '<div><div>Test User</div></div>'.length }]);
+    assert.equal(result.bodyHash, undefined);
+    assert.ok(result.bodyHashWithheld);
+  });
+
+  it('does not count a stored {{signature}} toward the flag', async () => {
+    serve(PLANTED);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        bodyEdits: [{ find: '<p>SIGN</p>', replace: '<p>Bye</p>' }],
+        expandSignature: true,
+        bodyHash: hashOf(PLANTED),
+      }),
+      { message: rejectExpandSignatureWithoutToken(true) },
+    );
+  });
+
+  it('counts tokens across every replace in the part', async () => {
+    serve(PLANTED);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        bodyEdits: [{ find: '<p>SIGN</p>', replace: '{{signature}}' }, { find: 'Thanks.', replace: 'Thanks. {{signature}}' }],
+        expandSignature: true,
+        bodyHash: hashOf(PLANTED),
+      }),
+      { message: rejectRepeatedSignatureToken('htmlBody', 2) },
+    );
+  });
+
+  it('stores a replace verbatim without the flag, and notes the token it added', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING]);
+    const makeReq = serve(PLANTED);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: '<p>SIGN</p>', replace: '{{signature}}' }],
+      bodyHash: hashOf(PLANTED),
+    });
+    assert.equal(
+      created(makeReq).bodyValues.html.value,
+      '<p>Thanks.</p>{{signature}}<blockquote><p>{{signature}}</p></blockquote>',
+    );
+    assert.deepEqual(result.bodyEdits!.ops, [{ offset: 14, matchedSize: 11, replacementSize: 13 }]);
+    assert.ok(result.notes?.includes(noteSignatureTokenStored('htmlBody', 1)));
+    assert.ok(result.bodyHash);
+  });
+
+  it('stays silent about a stored {{signature}} an unflagged edit leaves in place', async () => {
+    serve(PLANTED);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: 'Thanks.', replace: 'Thank you.' }],
+      bodyHash: hashOf(PLANTED),
+    });
+    assert.equal(result.notes, undefined);
   });
 });

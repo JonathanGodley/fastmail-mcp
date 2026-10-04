@@ -2,6 +2,8 @@ import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { coerceRecipients, coerceStringArrayStrict, coerceAttachments, coerceBool, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs } from './body-format.js';
+import { coerceBodyEdits } from './body-edits.js';
+import type { BodyEdit } from './body-edits.js';
 import { rejectMissingBodyHash } from './inline-notes.js';
 import { assertDraftEditValues } from './jmap-client.js';
 import type { AttachmentPart, UpdateDraftResult, UploadAttachmentsOptions } from './jmap-client.js';
@@ -28,6 +30,7 @@ export interface EditDraftClient {
       clearFields?: string[];
       attachments?: AttachmentPart[];
       removeAttachments?: string[];
+      bodyEdits?: BodyEdit[];
       expandSignature?: boolean;
       bodyHash?: string;
     },
@@ -75,6 +78,7 @@ export async function editDraft(
   // attachment coercion, as in draft_email, so both tools report the same first error on
   // identical input.
   assertBodyInputs(a);
+  const bodyEdits = coerceBodyEdits(a.bodyEdits);
 
   const specs = coerceAttachments(a.attachments);
   // updateDraft owns the refusal order (body-shape guards first) but runs after the upload.
@@ -88,8 +92,8 @@ export async function editDraft(
   // RFC 8620 section 6 lets a server delete an unreferenced blob after an hour (whether
   // Fastmail does is not verified).
   if (specs?.length) {
-    assertDraftEditValues({ to, cc, bcc, replyTo, subject, textBody, htmlBody, from, clearFields, removeAttachments }, true);
-    const touchesBody = textBody !== undefined || htmlBody !== undefined
+    assertDraftEditValues({ to, cc, bcc, replyTo, subject, textBody, htmlBody, from, clearFields, removeAttachments, bodyEdits }, true);
+    const touchesBody = textBody !== undefined || htmlBody !== undefined || bodyEdits !== undefined
       || (clearFields ?? []).some((f) => f === 'textBody' || f === 'htmlBody');
     if (touchesBody && (typeof bodyHash !== 'string' || bodyHash.trim() === '')) {
       throw new InvalidInputError(rejectMissingBodyHash());
@@ -111,6 +115,7 @@ export async function editDraft(
     clearFields,
     attachments,
     removeAttachments,
+    bodyEdits,
     expandSignature,
     bodyHash,
   }, {

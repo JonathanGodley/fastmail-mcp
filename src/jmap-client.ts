@@ -7,7 +7,9 @@ import { normalizeBodies, htmlHasVisibleContent, buildBodyParts, isBlank, assert
 import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from './reply-quote.js';
 import { defaultIdentity, identityFor, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
-import type { BodyBlocks, BodyTokenScan } from './body-tokens.js';
+import type { BodyBlocks, BodyTokenExpansion, BodyTokenScan } from './body-tokens.js';
+import { REJECT_BODY_EDITS_WITH_BODY, locateBodyEdits, spliceBodyEdits } from './body-edits.js';
+import type { BodyEdit, BodyEditPart, BodyEditsReceipt, LocatedBodyEdit } from './body-edits.js';
 import {
   bodyHash, classifyPartType, collectDraftBodyParts, draftInterleavedTextType, draftPartKey,
   isTextBodyType, resolveDraftBodyHash,
@@ -630,9 +632,16 @@ export function assertDraftEditValues(
     to?: string[]; cc?: string[]; bcc?: string[]; replyTo?: string[];
     subject?: string; textBody?: string; htmlBody?: string; from?: string;
     clearFields?: string[]; attachments?: unknown[]; removeAttachments?: string[];
+    bodyEdits?: BodyEdit[];
   },
   attaching = false,
 ): void {
+  if (updates.bodyEdits !== undefined && (
+    updates.htmlBody !== undefined || updates.textBody !== undefined
+    || (updates.clearFields ?? []).some((f) => f === 'htmlBody' || f === 'textBody')
+  )) {
+    throw new InvalidInputError(REJECT_BODY_EDITS_WITH_BODY);
+  }
   const parsedFrom = updates.from ? parseAddress(updates.from) : undefined;
   if (parsedFrom && isWildcardIdentityEmail(parsedFrom.email)) {
     throw new InvalidInputError(rejectWildcardFromValue(parsedFrom.email));
@@ -715,6 +724,8 @@ export interface UpdateDraftResult {
   // a body; neither on a metadata-only edit, where the caller's hash is still current.
   bodyHash?: string;
   bodyHashWithheld?: string;
+  // Present only when the edit was made with bodyEdits.
+  bodyEdits?: BodyEditsReceipt;
   notes?: string[];
 }
 
@@ -2099,6 +2110,8 @@ export class JmapClient {
     clearFields?: string[];
     attachments?: AttachmentPart[];
     removeAttachments?: string[];
+    // Exact find/replace ops on the governing stored part, in place of a whole body.
+    bodyEdits?: BodyEdit[];
     // Expand `{{signature}}` in the bodies this call writes. Absent means false; see the
     // token step below for why the trigger is a flag, not the token's presence.
     expandSignature?: boolean;
@@ -2198,23 +2211,19 @@ export class JmapClient {
 
     // ---- What this edit does to each body ----
     // Order below: the coupling guards, the hash, the token refusals, then the merge.
-    const wroteHtml = updates.htmlBody !== undefined;
-    const wroteText = updates.textBody !== undefined;
+    //
+    // bodyEdits writes the governing part (the html when the draft has one), and from here on
+    // is that part written whole: the spliced result takes every path a handed-back body does.
+    const editedPart: BodyEditPart | undefined = updates.bodyEdits
+      ? (!isBlank(existingHtmlValue) ? 'htmlBody' : 'textBody')
+      : undefined;
+    const wroteHtml = updates.htmlBody !== undefined || editedPart === 'htmlBody';
+    const wroteText = updates.textBody !== undefined || editedPart === 'textBody';
     const clearedHtml = clear.has('htmlBody');
     const clearedText = clear.has('textBody');
     const wroteAnyBody = wroteText || wroteHtml;
     const clearedAnyBody = clearedText || clearedHtml;
     const touchesBody = wroteAnyBody || clearedAnyBody;
-
-    // The caller's OWN html, before the `{{signature}}` expansion. Checks that must not see
-    // this server's text (an expanded signature may carry a reserved identifier) read this,
-    // never workingHtml.
-    const callerWrittenHtml = updates.htmlBody;
-
-    // Replaced only by the expansion below. Never write back into `updates`: an in-process
-    // caller can reuse that object across calls.
-    let workingHtml = updates.htmlBody;
-    let workingText = updates.textBody;
 
     // ---- The draft's provenance, carried or cleared ----
     // In-Reply-To survives every edit. The forward marking is cleared only through
@@ -2301,7 +2310,7 @@ export class JmapClient {
       throw new InvalidInputError('editing textBody alone won\'t change what most recipients see (they render htmlBody). To change the message, edit htmlBody (the text fallback regenerates automatically); to save a custom plain-text alternative, supply htmlBody alongside it; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
     }
     // PRE-expansion html on purpose; an html that expands to nothing is refused downstream.
-    if (clearedText && !clearedHtml && !isBlank(mergeHtml(callerWrittenHtml))) {
+    if (clearedText && !clearedHtml && !isBlank(mergeHtml(updates.htmlBody))) {
       throw new InvalidInputError('textBody can\'t be cleared on its own while htmlBody is present — the text fallback is managed automatically (regenerated from htmlBody, or html-only if none can be derived). Omit textBody from clearFields; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
     }
 
@@ -2321,6 +2330,32 @@ export class JmapClient {
       }
     }
 
+    // ---- The parts as the caller authored them ----
+    // After the hash check, so a stale caller is told to re-read before any find is judged.
+    let authoredHtml = updates.htmlBody;
+    let authoredText = updates.textBody;
+    let edited: { stored: string; located: LocatedBodyEdit[] } | undefined;
+    if (editedPart) {
+      const stored = (editedPart === 'htmlBody' ? existingHtmlValue : existingTextValue) ?? '';
+      const located = locateBodyEdits(stored, updates.bodyEdits!, editedPart);
+      edited = { stored, located };
+      const spliced = spliceBodyEdits(stored, located, updates.bodyEdits!.map((op) => op.replace));
+      if (editedPart === 'htmlBody') authoredHtml = spliced;
+      else authoredText = spliced;
+    }
+
+    // The caller's OWN html, before the `{{signature}}` expansion. Checks that must not see
+    // this server's text (an expanded signature may carry a reserved identifier) read this,
+    // never workingHtml.
+    const callerWrittenHtml = authoredHtml;
+
+    // Replaced only by the expansion below. Never write back into `updates`: an in-process
+    // caller can reuse that object across calls.
+    let workingHtml = authoredHtml;
+    let workingText = authoredText;
+    // What each op's replacement stored, which the expansion below can lengthen.
+    let storedReplacements = updates.bodyEdits?.map((op) => op.replace);
+
     // ---- Body tokens ----
     // The ONE thing this tool does to a body it is handed, and it is opt-in.
     //
@@ -2329,20 +2364,27 @@ export class JmapClient {
     // be planted, so a stored `{{signature}}` is stable under every unflagged edit.
     const expandSignature = updates.expandSignature === true;
     const writtenParts: { part: 'textBody' | 'htmlBody'; authored: string; stored?: string }[] = [];
-    if (wroteText) writtenParts.push({ part: 'textBody', authored: updates.textBody!, ...(existingTextValue !== undefined && { stored: existingTextValue }) });
-    if (wroteHtml) writtenParts.push({ part: 'htmlBody', authored: updates.htmlBody!, ...(existingHtmlValue !== undefined && { stored: existingHtmlValue }) });
+    if (wroteText) writtenParts.push({ part: 'textBody', authored: authoredText!, ...(existingTextValue !== undefined && { stored: existingTextValue }) });
+    if (wroteHtml) writtenParts.push({ part: 'htmlBody', authored: authoredHtml!, ...(existingHtmlValue !== undefined && { stored: existingHtmlValue }) });
     const scans = new Map<'textBody' | 'htmlBody', BodyTokenScan>(
       writtenParts.map((p) => [p.part, scanBodyTokens(p.authored)] as const),
     );
     const tokenNotes: string[] = [];
 
+    // The `{{signature}}` tokens the flag claims as the caller's own: in a part bodyEdits
+    // spliced, only those its replace strings carry, never the untouched stored text.
+    const ownSignatures = (part: 'textBody' | 'htmlBody'): number =>
+      part === editedPart
+        ? updates.bodyEdits!.reduce((n, op) => n + scanBodyTokens(op.replace).counts.signature, 0)
+        : scans.get(part)!.counts.signature;
+
     if (expandSignature) {
       // The only text-keyed refusal on this tool: the flag claims the written part as the
       // caller's own. After the hash check, so a stale caller is told to re-read first.
-      const placed = writtenParts.reduce((n, p) => n + scans.get(p.part)!.counts.signature, 0);
+      const placed = writtenParts.reduce((n, p) => n + ownSignatures(p.part), 0);
       if (placed === 0) throw new InvalidInputError(rejectExpandSignatureWithoutToken(wroteAnyBody));
       for (const p of writtenParts) {
-        const n = scans.get(p.part)!.counts.signature;
+        const n = ownSignatures(p.part);
         if (n > 1) throw new InvalidInputError(rejectRepeatedSignatureToken(p.part, n));
       }
 
@@ -2360,9 +2402,20 @@ export class JmapClient {
           quote: { available: 'as-written' },
           forward: { available: 'as-written' },
         };
-        // THE single pass, over the caller's OWN string. Runs on every written part, because
-        // a `\{{signature}}` escape in a flagged call must still be resolved.
-        const expansion = expandBodyTokens(p.authored, blocks);
+        // THE single pass, over the caller's OWN strings: the written part, or each replace
+        // of a spliced one. Runs on every written part, because a `\{{signature}}` escape in a
+        // flagged call must still be resolved.
+        let expansion: Pick<BodyTokenExpansion, 'text' | 'tokens'>;
+        if (p.part === editedPart) {
+          const replaced = updates.bodyEdits!.map((op) => expandBodyTokens(op.replace, blocks));
+          storedReplacements = replaced.map((r) => r.text);
+          expansion = {
+            text: spliceBodyEdits(edited!.stored, edited!.located, storedReplacements),
+            tokens: replaced.flatMap((r) => r.tokens),
+          };
+        } else {
+          expansion = expandBodyTokens(p.authored, blocks);
+        }
         if (p.part === 'htmlBody') workingHtml = expansion.text;
         else workingText = expansion.text;
         signatureLanded.set(
@@ -2877,6 +2930,12 @@ export class JmapClient {
       ...(bodyHashWithheld !== undefined && { bodyHashWithheld }),
       ...(touchedInlineImages && {
         inlineImages: { embedded: tally.embedded, degraded: tally.degraded, removed: tally.removed },
+      }),
+      ...(editedPart && {
+        bodyEdits: {
+          part: editedPart,
+          ops: edited!.located.map((op, i) => ({ ...op, replacementSize: storedReplacements![i].length })),
+        },
       }),
       ...(notes.length > 0 && { notes }),
     };

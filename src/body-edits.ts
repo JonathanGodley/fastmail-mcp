@@ -21,7 +21,11 @@ export interface BodyEditsReceipt {
   ops: { offset: number; matchedSize: number; replacementSize: number }[];
 }
 
-const BODY_EDIT_KEYS = new Set(['find', 'replace']);
+export const REJECT_BODY_EDITS_WITH_BODY =
+  'bodyEdits cannot be combined with htmlBody, textBody, or a clearFields entry naming either: ' +
+  'bodyEdits changes part of the stored body, and those replace or remove the whole of it. Use one or the other.';
+
+const BODY_EDIT_KEYS =new Set(['find', 'replace']);
 const BODY_EDITS_SHAPE = 'bodyEdits must be an array of {find, replace} objects.';
 
 /**
