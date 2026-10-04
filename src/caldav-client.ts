@@ -1462,7 +1462,7 @@ const YEAR_RANGE = 'the year must be 0001-9999, since an iCalendar year has four
 /**
  * Reject a YYYY-MM-DD that names a day its month does not have; `new Date` would silently
  * roll `2026-02-31` to 3 March. A rolled-over date no longer round-trips through toISOString.
- * Year 0000 is refused too: the Gregorian calendar goes from 1 BC to AD 1.
+ * Year 0000 is refused too, for the reason `YEAR_RANGE` gives.
  *
  * @param echo the caller's whole value, quoted in the message.
  */
