@@ -1,17 +1,11 @@
 # Syncing with upstream
 
 This fork tracks `MadLlama25/fastmail-mcp`. The two trees have diverged enough
-that a sync is a deliberate operation rather than a `git pull`, and the method
-matters more than any single sync: done one way each sync starts from scratch,
-done the other way each sync only has to look at what changed since the last one.
-
-This file is the method. Per-feature rationale lives in the relevant fork issue;
-cross-cutting models live in the other `docs/*.md` files.
+that a sync is a deliberate operation rather than a `git pull`.
 
 ## When to sync
 
-The trigger is a **release**. Releases are this fork's natural cadence, so the
-`/release` skill carries a drift check:
+The trigger is a **release**, so the `/release` skill carries a drift check:
 
 ```
 git fetch upstream
@@ -22,10 +16,8 @@ If that list is long, a sync is due before the release rather than after it. The
 v1.13.4 sync ran at 97 commits of drift, which is well past the point where the
 work is comfortable — a two-digit list is a good moment to schedule one.
 
-Separately, `CLAUDE.md` §Working with upstream requires a fork issue for every
-open third-party upstream PR. That rule and this drift check are the same
-mechanism seen from two ends: the issues catch incoming work one PR at a time,
-the drift check catches what merged while nobody was looking.
+The per-PR adopt issues (`CLAUDE.md`, Working with upstream) catch incoming
+work one PR at a time; the drift check catches what merged while nobody was looking.
 
 ## Why a real two-parent merge
 
@@ -167,10 +159,9 @@ the problem each time. This list is the sync's real cost, so keep it honest.
   rejected outright), and its 20-line header comment is rewritten, because
   upstream's documents the auto-release flow as the normal path. And
   `dependabot.yml` needs its `debug` ignore entry re-added: upstream carries only
-  the `@types/node` one. That entry is a security control, not a stability
-  preference — see the comment in the file — and losing it lets a routine bump
-  nest a second `debug` copy under `tsdav` and silently stop the credential-log
-  suppression while every test stays green.
+  the `@types/node` one. That entry is a security control whose loss no test
+  catches; restore it with its comment from the fork's copy
+  (`git show main:.github/dependabot.yml`), which says why.
 - **`package.json`, `.gitignore` and `.dxtignore` are never a union.** All three
   look mergeable and all three carry deliberate fork deletions or fork-only
   stanzas — `.gitignore`'s `!.claude/skills/release/SKILL.md` un-ignore, `.dxtignore`'s
@@ -214,6 +205,9 @@ springs quietly:
   and a `--theirs` resolution there drops them silently: the tools keep working,
   and calendar writes go back to accepting text of any size
   (see `docs/conventions.md`, "Bounding calendar text").
+- No fork issue was closed by an arriving upstream commit: a bare `Closes #NN`
+  there uses upstream's numbering (#158). List the issues closed since the merge
+  was pushed and check each closing commit.
 
 Then the full gate — `npx tsc --noEmit && npm test && npm run build` — and, because
 the live harness spawns `dist/index.js`, at least one live check of a path that
