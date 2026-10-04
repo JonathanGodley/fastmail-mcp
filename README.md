@@ -369,7 +369,7 @@ Projection is applied to output only; it does not change what is fetched from th
 
 ### Result counts and paging (`position`)
 
-Every `list_emails` and `search_emails` response opens with a summary line that states **how many results matched in total**, not just how many came back:
+Every paged listing (`list_emails`, `search_emails`, `list_contacts`, `search_contacts`) opens with a summary line that states **how many results matched in total**, not just how many came back:
 
 ```
 Showing 20 of 137 results. nextPosition: 20 (pass position:20 for the next page).
@@ -387,8 +387,8 @@ The rules:
 - **The total is always stated**, so a page that happens to fill the `limit` is never mistaken for the complete answer ([#51](https://github.com/JonathanGodley/fastmail-mcp/issues/51)). In the rare case the server declines to compute a total, the summary says the count was not returned rather than passing the page size off as the total.
 - **`nextPosition` appears only while more results remain.** Its absence means the listing is complete — there is no `hasMore: false` to interpret, and no reason to re-run with a larger `position` to check. It is computed from the position actually served plus the items actually returned, so a final page shorter than `limit` ends the listing rather than advertising one more.
 - **Take `nextPosition` from the response** instead of adding up `limit`s yourself. Both usually agree; the response value is the one that accounts for what the server actually did.
-- **Filters apply to every page, server-side** — including the default Trash/Spam exclusion, so paging never changes what matches. The withheld-count note describes the **whole match set**, not the page: the same count repeats on every page, so don't sum the notes as you page.
-- **`position: 0` is the same as omitting it.** A negative value is **rejected** (JMAP would read it as counting back from the end; to read from the oldest end pass `ascending: true`), as is a fraction or non-numeric text. A stringified `"40"` is accepted, like every other numeric parameter.
+- **Filters apply to every page, server-side**, so paging never changes what matches. On the email tools that includes the default Trash/Spam exclusion, and the withheld-count note describes the **whole match set**, not the page: the same count repeats on every page, so don't sum the notes as you page.
+- **`position: 0` is the same as omitting it.** A negative value is **rejected** (JMAP would read it as counting back from the end; on the email tools, read from the oldest end with `ascending: true`), as is a fraction or non-numeric text. A stringified `"40"` is accepted, like every other numeric parameter.
 - **A position past the end is not an error.** It returns an empty page next to the real total (`Showing 0 of 137 results from position 500.`), so you can see you overshot.
 - **The summary is identical on the `raw` path**, which already carried one; `raw` callers can also read JMAP's own `total`/`position` by querying directly.
 
@@ -849,7 +849,7 @@ There is **no `bulk_archive`**. `archive_email` already takes an `emailIds` arra
 
 All three read tools carry `kind` on a card that is not an ordinary person - see [`kind` tells you which cards the write tools will refuse](#kind-tells-you-which-cards-the-write-tools-will-refuse).
 
-- **list_contacts**: List all contacts, one page at a time (see [Result counts and paging](#result-counts-and-paging-position)). Returns simplified format by default. Pages follow one fixed order: first name, then surname, then the card's uid as a tiebreak. Names are compared byte by byte, so the order is case-sensitive (an uppercase letter sorts before every lowercase one), and cards with no first name come first.
+- **list_contacts**: List all contacts, one page at a time (see [Result counts and paging](#result-counts-and-paging-position)). Returns simplified format by default. Pages follow one fixed order: first name, then surname, then the card's uid as a tiebreak. Names are compared byte by byte, so the order is case-sensitive: an unaccented capital sorts before every lowercase letter, and accented letters sort after both. Cards with no first name come first.
   - Parameters: `limit` (default: 20, max 100), `position` (optional, 0-based offset; pass back the `nextPosition` from the previous page), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **get_contact**: Get a specific contact by ID. Returns simplified format by default. Throws if the ID is not found.
   - Parameters: `contactId` (required), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)

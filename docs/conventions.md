@@ -1433,7 +1433,9 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
   in `src/coerce.ts`): a stringified `"40"` is accepted, but a negative value, a
   fraction, or garbage is refused. Negative is the load-bearing one — JMAP reads a
   negative position as an offset from the *end* of the results, so accepting `-1` would
-  quietly serve the last page. Reading from the other end is what `ascending` is for.
+  quietly serve the last page. The email tools have `ascending` for reading from the
+  other end, so they opt into a refusal that names it (`{ ascendingHint: true }`); the
+  contacts tools have no such parameter and get the refusal without it.
 
 **`nextPosition` is gated on the calling tool accepting `position`.** `formatQuerySummary`
 takes a `paged` flag, and a tool gets it from the renderer its handler picks:

@@ -876,20 +876,20 @@ describe('formatEmailQueryResult', () => {
 // still state the total, but a nextPosition would be an instruction its callers cannot
 // follow — passing `position` back is rejected by the unknown-parameter guard.
 describe('formatQuerySummary on an unpaged tool', () => {
-  const contacts = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `ct-${i}` }));
+  const rows = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `ev-${i}` }));
 
   it('states the total but offers no nextPosition when results remain', () => {
-    const summary = formatQueryResult({ items: contacts(50), total: 312 }).split('\n')[0];
+    const summary = formatQueryResult({ items: rows(50), total: 312 }).split('\n')[0];
     assert.equal(summary, 'Showing 50 of 312 results.');
   });
 
   it('offers no nextPosition even if the response carries a position', () => {
-    const summary = formatQueryResult({ items: contacts(50), total: 312, position: 50 }).split('\n')[0];
+    const summary = formatQueryResult({ items: rows(50), total: 312, position: 50 }).split('\n')[0];
     assert.ok(!summary.includes('nextPosition'), summary);
   });
 
   it('says a missing total is missing, without the paging consequence', () => {
-    const summary = formatQueryResult({ items: contacts(50) }).split('\n')[0];
+    const summary = formatQueryResult({ items: rows(50) }).split('\n')[0];
     assert.equal(summary, 'Showing 50 results; the total match count was not returned.');
   });
 });
@@ -939,6 +939,11 @@ describe('the contacts listings are paged on both paths', () => {
       assert.equal(last, 'Showing 12 of 312 results from position 300.');
       const whole = render({ items: contacts(3), total: 3, position: 0 }).split('\n')[0];
       assert.equal(whole, 'Showing 3 of 3 results.');
+    });
+
+    it(`says whether more exist is unknown when no total came back (${path})`, () => {
+      const summary = render({ items: contacts(20), position: 0 }).split('\n')[0];
+      assert.equal(summary, 'Showing 20 results; the total match count was not returned, so whether more results exist is unknown.');
     });
   }
 
