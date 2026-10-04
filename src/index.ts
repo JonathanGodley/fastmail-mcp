@@ -2151,7 +2151,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        // Orchestration lives in src/calendar-list-handler.ts.
         return { content: await listCalendarEventsTool(args, clampLimit(limit, 50, 100), davClient) };
       }
 

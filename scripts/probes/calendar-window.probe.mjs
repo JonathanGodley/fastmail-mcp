@@ -134,8 +134,6 @@ try {
     /^Showing \d+ of \d+ results\.?/.test(summary),
     summary,
   );
-  // The tool pages (#169): nextPosition appears exactly while rows remain, and with no
-  // position passed it is the number returned.
   const counts = /^Showing (\d+) of (\d+) results/.exec(summary);
   const next = /nextPosition: (\d+)/.exec(summary);
   const moreRemain = counts !== null && Number(counts[1]) < Number(counts[2]);

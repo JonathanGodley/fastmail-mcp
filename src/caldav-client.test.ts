@@ -10610,7 +10610,7 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
       return events.map(keyOf);
     });
     for (const order of seen) assert.deepEqual(order, seen[0]);
-    // Unreadable first, as before.
+    // Unreadable first.
     assert.deepEqual(seen[0].slice(0, 4).map(k => k.split('|')[1]).sort(), ['bad-a@fm', 'bad-b@fm', 'bad-c@fm', 'bad-c@fm']);
     // The occurrence the server sent without a recurrenceId comes before the override.
     assert.ok(

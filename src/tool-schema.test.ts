@@ -670,8 +670,7 @@ describe('the limit bound is owned by the handlers', () => {
     );
   });
 
-  // A limit of 101 or more serves 100: the email tools' cap, now that `position` reaches
-  // the rest (#169).
+  // The email tools' cap; `position` reaches the rest.
   it('caps list_calendar_events at 100', () => {
     assert.deepEqual(collectClamps().get('list_calendar_events'), { fallback: 50, max: 100 });
   });
