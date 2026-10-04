@@ -25,8 +25,9 @@ export function envFilePath(home: string): string {
  */
 export function loadHomeEnvFile(home: string): void {
   const path = envFilePath(home);
-  // Opened here first because process.loadEnvFile does not report an unreadable file on every
-  // Node version and platform: some load nothing silently, and on Windows it says ENOENT.
+  // Opened here first because process.loadEnvFile reports a file it cannot open as ENOENT, the
+  // code for a missing file (measured on Windows; on Linux CI an unreadable file was likewise
+  // indistinguishable from a missing one).
   try {
     closeSync(openSync(path, 'r'));
   } catch (err) {
