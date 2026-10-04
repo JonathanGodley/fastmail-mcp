@@ -441,7 +441,8 @@ function collectResolvedCaseBodies(): Map<string, SourceLine[]> {
   for (const [tool, lines] of collectCaseLines()) {
     const body = [...lines];
     for (const [name, fnLines] of functions) {
-      if (lines.some((l) => new RegExp(`\\b${name}\\(`).test(l.text))) body.push(...fnLines);
+      // A bare call only: `client.listMailboxes(` is a method, not mailbox-handler's function.
+      if (lines.some((l) => new RegExp(`(?<![.\\w$])${name}\\(`).test(l.text))) body.push(...fnLines);
     }
     resolved.set(tool, body);
   }
@@ -483,12 +484,12 @@ function collectNoteParams(): string[] {
 describe('recovery notes name only parameters the tool has', () => {
   it('declares every parameter the Trash/Spam exclusion note prescribes', () => {
     const emitters = collectNoteEmittingTools();
-    // Stops a scan that has silently stopped matching from passing against an empty set. An
-    // emitter the scan has lost is the next test's job.
+    // Stops a scan that has silently stopped matching from passing against an empty set. With
+    // exactly two emitters it also fires when one is lost; the includeTrash test names which.
     assert.ok(
       emitters.length >= 2,
-      `found only ${emitters.length} tools appending buildExclusionNote; the handler scan has ` +
-        `probably stopped matching`,
+      `found only ${emitters.length} tools appending buildExclusionNote; either the handler ` +
+        `scan has stopped matching, or an emitter was lost (see the includeTrash test below)`,
     );
     const noteParams = collectNoteParams();
     assert.ok(
@@ -679,7 +680,9 @@ describe('the limit bound is owned by the handlers', () => {
         `probably stopped matching`,
     );
 
-    // A site is clamped when some case reaches it and every case that reaches it clamps.
+    // A site is clamped when some case reaches it and every case that reaches it clamps. That
+    // the clamped value is what reaches the call is not checked here; for the email tools,
+    // email-list-handler.test.ts pins the passed limit reaching the client verbatim.
     const clamps = collectClamps();
     const reachedBy = new Map<string, string[]>();
     for (const [tool, body] of collectResolvedCaseBodies()) {
