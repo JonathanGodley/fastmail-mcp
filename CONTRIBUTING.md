@@ -20,8 +20,7 @@ Every tool that returns email data uses the simplified format from
 - `simplifyEmail()` for full emails and list items;
 - empty, null and false fields are omitted to save tokens;
 - the output is an allow-list: `simplifyEmail()` emits only the fields it
-  names, so a JMAP property that is fetched but not mapped is dropped (a
-  fetched `sentAt`, for example, never reaches the simplified output; #84);
+  names, so a JMAP property that is fetched but not mapped is dropped;
 - every such tool accepts `raw: true` to bypass simplification and return the
   JMAP objects as fetched.
 
