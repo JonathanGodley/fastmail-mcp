@@ -2771,6 +2771,11 @@ describe('parseICalDuration', () => {
   it('parses a single-digit second count (PT30S)', () => {
     assert.equal(parseICalDuration('PT30S', '2026-01-01T00:00:00'), '2026-01-01T00:00:30');
   });
+
+  it('keeps a floating start\'s year below 1000 as written, four digits wide', () => {
+    assert.equal(parseICalDuration('PT1H', '0026-01-01T10:00:00'), '0026-01-01T11:00:00');
+    assert.equal(parseICalDuration('PT1H', '0999-01-01T10:00:00'), '0999-01-01T11:00:00');
+  });
 });
 
 // Australia/Sydney in 2026: clocks go back 03:00 AEDT -> 02:00 AEST on Sunday 5 April, and

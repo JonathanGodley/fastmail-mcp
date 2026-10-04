@@ -2,7 +2,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // Caller-fixable input must throw coerce.ts's tagged InvalidInputError, which the CallTool
 // boundary maps to InvalidParams; a plain Error surfaces as InternalError. See
 // docs/conventions.md.
-import { InvalidInputError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS, zoneOffsetMsAt } from './coerce.js';
+import { InvalidInputError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS, zoneOffsetMsAt, utcMsFromComponents } from './coerce.js';
 import { trimEnd } from './trim-end.js';
 import { foldICalLine } from './ical-fold.js';
 // A calendar window interprets local dates in the same zone the rest of the server displays,
@@ -1000,11 +1000,7 @@ export function parseICalDuration(duration: string, start: string, tzid?: string
     const [datePart, timePart] = start.split('T');
     const [y, mo, d] = datePart.split('-').map(Number);
     const [h, mi, s] = timePart.split(':').map(Number);
-    const utcStart = Date.UTC(y, mo - 1, d, h, mi, s);
-    const utcEnd = utcStart + sign * ms;
-    const e = new Date(utcEnd);
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${e.getUTCFullYear()}-${pad(e.getUTCMonth() + 1)}-${pad(e.getUTCDate())}T${pad(e.getUTCHours())}:${pad(e.getUTCMinutes())}:${pad(e.getUTCSeconds())}`;
+    return formatWallClockIso(utcMsFromComponents(y, mo, d, h, mi, s) + sign * ms);
   }
 
   return endDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
