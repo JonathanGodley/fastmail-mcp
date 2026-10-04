@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { foldICalLine } from './ical-fold.js';
@@ -120,5 +121,68 @@ describe('foldICalLine with custom line ending', () => {
     const long = 'DESCRIPTION:' + 'x'.repeat(80);
     const folded = foldICalLine(long);
     assert.ok(folded.includes('\r\n'));
+  });
+});
+
+describe('foldICalLine exact output', () => {
+  const pin = '\u{1F4CD}';
+
+  it('cuts an ASCII line at 75 octets, then 74 after each continuation space', () => {
+    assert.equal(foldICalLine('A'.repeat(160)),
+      'A'.repeat(75) + '\r\n ' + 'A'.repeat(74) + '\r\n ' + 'A'.repeat(11));
+  });
+
+  it('cuts before a 2-octet character that would pass 75', () => {
+    assert.equal(foldICalLine('X'.repeat(74) + 'é'.repeat(3)),
+      'X'.repeat(74) + '\r\n ' + 'é'.repeat(3));
+  });
+
+  it('cuts before a 3-octet character that would pass 75', () => {
+    assert.equal(foldICalLine('X'.repeat(73) + '！'.repeat(2)),
+      'X'.repeat(73) + '\r\n ' + '！'.repeat(2));
+  });
+
+  it('moves a surrogate pair straddling 75 octets on a continuation line', () => {
+    assert.equal(foldICalLine('X'.repeat(146) + pin + 'Y'),
+      'X'.repeat(75) + '\r\n ' + 'X'.repeat(71) + '\r\n ' + pin + 'Y');
+  });
+
+  it('leaves 75 octets alone and folds 76', () => {
+    assert.equal(foldICalLine('é'.repeat(37) + 'X'), 'é'.repeat(37) + 'X');
+    assert.equal(foldICalLine('X'.repeat(76)), 'X'.repeat(75) + '\r\n X');
+  });
+
+  it('returns an empty string unchanged', () => {
+    assert.equal(foldICalLine(''), '');
+  });
+
+  it('counts a lone high surrogate as 3 octets', () => {
+    assert.equal(foldICalLine('X'.repeat(73) + '\uD83D' + 'YZ'),
+      'X'.repeat(73) + '\r\n \uD83DYZ');
+    assert.equal(foldICalLine('X'.repeat(72) + '\uD83D' + 'YZ'),
+      'X'.repeat(72) + '\uD83D\r\n YZ');
+  });
+
+  it('steps back one unit when a lone low surrogate sits at the cut', () => {
+    assert.equal(foldICalLine('X'.repeat(73) + '\uDC00' + 'YZ'),
+      'X'.repeat(72) + '\r\n X\uDC00YZ');
+    // The step back lands inside the preceding pair.
+    assert.equal(foldICalLine('X'.repeat(69) + pin + '\uDC00' + 'YZ'),
+      'X'.repeat(69) + '\uD83D\r\n \uDCCD\uDC00YZ');
+  });
+
+  it('folds a long mixed line to a pinned output', () => {
+    const alphabet = ['a', 'B', 'é', 'Ω', '！', '中', pin, '\u{10FFFF}'];
+    let seed = 12345;
+    let input = 'DESCRIPTION:';
+    for (let i = 0; i < 600; i++) {
+      seed = (seed * 48271) % 2147483647;
+      input += alphabet[seed % alphabet.length];
+    }
+    const folded = foldICalLine(input);
+    const lines = folded.split('\r\n');
+    for (const line of lines) assert.ok(Buffer.byteLength(line, 'utf8') <= 75);
+    assert.equal(lines[0] + lines.slice(1).map((l) => l.slice(1)).join(''), input);
+    assert.equal(createHash('sha256').update(folded).digest('hex'), '55b7b29b23f2901b7d1eb856fc2de3381ef305cccfe3aa58c26c63de6aecd18d');
   });
 });
