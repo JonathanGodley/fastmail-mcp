@@ -54,6 +54,14 @@ describe('listCalendarEventsTool', () => {
     assert.ok(content.text.endsWith(buildBrokenCollectionNote(paths, 'read')), content.text);
   });
 
+  // A call with no arguments at all arrives with `args` undefined.
+  it('reads the first page when called with no arguments', async () => {
+    const { client, getCalendarEvents } = stubClient({ events: EVENTS, total: 2, position: 0 });
+    const [content] = await listCalendarEventsTool(undefined, 50, client);
+    assert.deepEqual(getCalendarEvents.mock.calls[0].arguments, [undefined, 50, undefined, undefined, undefined]);
+    assert.equal(content.text.split('\n')[0], 'Showing 2 of 2 results.');
+  });
+
   it('renders the page as a paged listing', async () => {
     const { client } = stubClient({ events: EVENTS, total: 5, position: 0 });
     const [content] = await listCalendarEventsTool({}, 2, client);
