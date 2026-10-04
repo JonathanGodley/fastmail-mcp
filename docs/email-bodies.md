@@ -22,10 +22,9 @@ HTML is the source of truth; `text/plain` is a derived fallback.
 
 The model is implemented in `src/body-format.ts`:
 
-- `isBlank` — the single emptiness predicate. Strips zero-width / invisible characters
-  (ZWSP, ZWNJ, ZWJ, BOM, soft hyphen) plus `trim()`, so a `&zwnj;&#8203;`-only body
-  reads as absent. Shared by every emit gate so `''` / whitespace / zero-width-only all
-  read as "absent" consistently.
+- `isBlank`: the single emptiness predicate, shared by every emit gate. Strips zero-width /
+  invisible characters (ZWSP, ZWNJ, ZWJ, BOM, soft hyphen) plus `trim()`, so `''`,
+  whitespace and a `&zwnj;&#8203;`-only body all read as absent.
 - `htmlToText` — converts HTML to the readable plain-text fallback. Never throws (on
   converter failure it falls back to a minimal tag-strip so a send is never blocked).
   May legitimately return `''` for image-only / empty HTML. An `<img>` contributes its
@@ -34,7 +33,7 @@ The model is implemented in `src/body-format.ts`:
   call site through the image-policy parameter (below).
 - **The image policy.** `htmlToText` takes one of three policies, because the same
   conversion serves two different jobs and they want opposite answers for an alt-less
-  image. `suppress` emits nothing for it (the historical behaviour, and what a
+  image. `suppress` emits nothing for it (what a
   quotability probe wants, where a placeholder would make an image-only original look
   readable). `unconditional` emits `[image]` for an alt-less EMBEDDED (`cid:`) image, and
   is what the outgoing derivation uses: a picture-only message otherwise reaches a
@@ -48,18 +47,15 @@ The model is implemented in `src/body-format.ts`:
   converts to non-empty text OR carries any visible-media element (`<img>`, CSS
   `background-image`, `<svg>`, `<video>`, `<picture>`, `<object>`, `<embed>`). It errs
   toward shipping: a false positive sends a thin email, a false negative would block a
-  real one, so an imperfect scan is safe-by-direction. Its own answer is unchanged by the
-  image policy: it already treats any `<img>` as visible content, so whether a placeholder
-  is derived for one cannot move the gate either way.
+  real one, so an imperfect scan is safe-by-direction.
 - `normalizeBodies` — derives the fallback. html-present + text-absent derives the text
   from the HTML; if that derives to empty it returns html-only (an internal `htmlOnly`
   flag, not a reject). text-only and both-supplied pass through untouched.
 - `buildBodyParts` — pure JMAP shaping, no fallback derivation. Builds the body-part
   arrays + `bodyValues` keyed by the literal partIds `text`/`html`.
 
-A consequence worth stating for future changes: a "tighten this up to require a text
-part" change would wrongly refuse legitimate image-only sends. The no-body reject is
-deliberately the only reject.
+Do not tighten this to require a text part: that would refuse legitimate image-only sends.
+The no-body reject is deliberately the only reject.
 
 ## Caller-supplied body validation (#62, #71/#77, #78)
 
@@ -85,7 +81,7 @@ visible to a human who opens the draft or to the recipient.
   Both halves of the test are load-bearing, and the escaped half needs to be narrow. Because
   the guard only fires when there is **no** real markup, it is by definition judging prose —
   and in prose, escaped angle brackets are ordinary content. A loose "`&lt;` anything `&gt;`"
-  test rejected real messages: `Hi &lt;name&gt;, see attached.`, `mail me at &lt;a@b.example&gt;`,
+  test would reject real messages: `Hi &lt;name&gt;, see attached.`, `mail me at &lt;a@b.example&gt;`,
   `Please reply with &lt;approve&gt; or &lt;reject&gt;.` So the escaped tag NAME must be a
   known HTML element, followed by a genuine tag delimiter (whitespace, `/`, or the closing
   `&gt;`) — which is what tells `&lt;a href=…&gt;` from `&lt;a@b.example&gt;`.
@@ -93,7 +89,7 @@ visible to a human who opens the draft or to the recipient.
   **Residual false-positive surface (accepted):** a body with no real markup whose escaped
   brackets happen to wrap a known element name *and* a tag-like delimiter — e.g. prose whose
   only markup-ish content is `&lt;code&gt;` or `&lt;table&gt;` used as a placeholder word.
-  Much smaller than the original test's surface, but not nil. The remedy is in the error
+  The remedy is in the error
   message either way (use `textBody`, or include real markup), and both keep the caller's
   words intact.
 - **CDATA section**, with a deliberate asymmetry between the formats:
@@ -113,7 +109,7 @@ visible to a human who opens the draft or to the recipient.
     or `<script>` block — valid in the SVG/XML integration point, where a browser *does*
     honour CDATA. The reject stands: such a body is vanishingly rare in email, HTML5 mangles
     it anyway once the fragment is parsed as HTML rather than XML, and our text derivation
-    would still swallow it. Recorded so the trade is visible rather than assumed absent.
+    would still swallow it.
   - `textBody` — rejected only when the trimmed body **starts with** `<![CDATA[`, i.e. the
     caller wrapped the whole body. A `text/plain` part is never markup-parsed, so an
     embedded CDATA token is inert, and a message quoting an XML snippet is real content that
@@ -200,8 +196,7 @@ A verbatim `textSignature` would therefore be correct when written and silently 
 after that edit, with nothing reporting the change. So whenever HTML ships, the text form
 is `htmlToText(htmlSignature)` — the same value that edit will produce — and the configured
 `textSignature` is used only for a message that ships no HTML at all, where nothing will
-ever derive it. This is the same "HTML is the source of truth" rule the rest of this file
-describes, applied to a fragment rather than to a whole body.
+ever derive it.
 
 The corollary for a half-configured identity: an identity with only one form still signs
 either kind of body. An HTML-only signature derives its text form; a text-only signature is
@@ -353,9 +348,7 @@ of that draft with nothing the caller could do about it.
 body edit through on a body nobody could have read faithfully. `get_email` withholds the hash
 for a draft whose stored body no edit could reproduce — a part flagged truncated or with an
 encoding problem, a part no read returns, or a body interleaving two parts of the same text
-type (#85, #180) — and names recreating the draft as the way forward. Withholding rather than
-issuing a hash that could never be spent is the same never-silently-drop rule applied to an
-output field: the token the caller would have used is absent, and the reason is stated.
+type (#85, #180) — and names recreating the draft as the way forward.
 
 ## The read side: stripping quoted history (#73, #74)
 
@@ -391,12 +384,11 @@ wasn't recognized" and "the flag did nothing" are indistinguishable, and a calle
 know whether re-reading verbatim is worth a round trip.
 
 **Accepted residuals** (all documented in the README, all reported through the signal).
-They run in **both directions**, and it matters that the list says so: an under-strip
-returns duplicated bytes, an over-strip returns *less than the sender wrote*. Under-strip is
-the one to prefer at every fork, and the marker rules are tuned that way — but the markers
-are conventions, not syntax, so over-strip is real and the reader has to know to watch
-`quotedBytesStripped` for a number that looks too large for a short message, and re-read that
-message without the flag.
+They run in **both directions**: an under-strip returns duplicated bytes, an over-strip
+returns *less than the sender wrote*. Under-strip is the one to prefer at every fork, and
+the marker rules are tuned that way, but the markers are conventions, not syntax, so
+over-strip is real and the reader has to know to watch `quotedBytesStripped` for a number
+that looks too large for a short message, and re-read that message without the flag.
 
 *Under-strip (quoted history survives; `quotedBytesStripped` is 0):*
 
@@ -529,21 +521,19 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
   Message-ID is recorded as `X-Forwarded-Message-Id` (Thunderbird prior art; **Fastmail's
   official client sets the same header**, probed 2026-07-05).
 
-**The forwarded-message header, and how a draft stops being a forward.** The original's
-Message-ID is recorded as `X-Forwarded-Message-Id` (see the threading note above), which is
-what `send_draft` reads to mark the original forwarded. A read exposes it as
-`forwardedMessageId`, and `clearFields: ['forwardedMessageId']` is the deliberate way to
-de-forward a draft: it stops `send_draft` marking the original, and on a forward draft it
-drops the recorded `sourceEmailId` with it (the pointer refines the marking it rides on; on a
-*reply* draft it stays, because the draft is still a reply to that instance). A malformed or
-hostile Message-ID is deliberately treated as absent — Fastmail rejects CRLF/non-ASCII header
-values and mangles embedded angle brackets, probed 2026-07-05 — so forwarding such an original
-records no header at all.
+**The forwarded-message header, and how a draft stops being a forward.** `send_draft` reads
+`X-Forwarded-Message-Id` (see the threading note above) to mark the original forwarded. A
+read exposes it as `forwardedMessageId`, and `clearFields: ['forwardedMessageId']` is the
+deliberate way to de-forward a draft: it stops `send_draft` marking the original, and on a
+forward draft it drops the recorded `sourceEmailId` with it (the pointer refines the marking
+it rides on; on a *reply* draft it stays, because the draft is still a reply to that
+instance). A malformed or hostile Message-ID is deliberately treated as absent (Fastmail
+rejects or mangles such values; see the live-probed forward facts below), so forwarding such
+an original records no header at all.
 
 Recovering a forwarded original across sessions is one lookup: `forwardedMessageId` from
-`get_email`, then `search_emails` on the **bare** id (the full-text lookup matches the
-bracket-less form; both probed working 2026-07-05, as is the RFC 8621 §4.4.1 `header` filter,
-which stays unused).
+`get_email`, then `search_emails` on the **bare** id (see the live-probed forward facts
+below; the RFC 8621 §4.4.1 `header` filter also works and stays unused).
 
 **No guard recognises a forwarded block on edit**, for the reason given for the reply guard.
 A forwarded block survives an edit because the caller sent it back,
@@ -584,13 +574,11 @@ JMAP email body properties are immutable and server-set (RFC 8621 §4.1.4); only
 `keywords` and `mailboxIds` are mutable. So editing a draft's subject or body is done
 by recreating the email, not patching it.
 
-This was confirmed live against Fastmail (see the server-behaviour facts below): an
-in-place `Email/set update` of `subject` / `bodyStructure` / `bodyValues` returns
-`updated: {id: null}` (i.e. success) but silently changes nothing. Recreate is a
-stronger justification than a hard reject would be: an in-place edit falsely reports
-success while leaving the draft unchanged.
+This was confirmed live against Fastmail: an in-place `Email/set update` of `subject` /
+`bodyStructure` / `bodyValues` reports success but changes nothing (see the server-behaviour
+facts below).
 
-The recreate is faithful (`8afbf68`): it carries `In-Reply-To` / `References`,
+The recreate is faithful: it carries `In-Reply-To` / `References`,
 re-references attachments by `blobId`, and preserves keywords. Ordering is
 create-then-dispose (create the new draft, confirm, then dispose of the old one) so there
 is no data-loss window. A draft carrying an inline `cid:` image is carried through the
@@ -601,16 +589,16 @@ multiple same-type text parts, is refused rather than silently mangled (#85).
 ### Disposing of the replaced draft: Trash, never destroy (#65)
 
 The old copy is disposed of by moving it to the mailbox with the `trash` role (an
-`Email/set update` of `mailboxIds` only — `keywords` are left alone, so the copy is still
+`Email/set update` of `mailboxIds` only; `keywords` are left alone, so the copy is still
 a `$draft` and restoring it is a move back to Drafts; Trash retention applies by mailbox,
-not by keyword). It used to be an `Email/set destroy`, which cost real data: an assistant edited
-a draft from a body it had cached earlier, the user had meanwhile rewritten that draft in
-the web UI, and the recreate silently replaced the user's version with the stale one. The
-destroy made that unrecoverable — the previous draft was gone from the account, leaving
-only a support-side backup restore.
+not by keyword). A destroy would leave a replaced draft recoverable only from a
+support-side backup; #65 records the data loss that cost.
 
-The server can never detect this on its own (it cannot know the caller's copy is stale),
-so the mitigation is on the disposal side plus disclosure:
+A body edit from a stale copy is refused: it must carry the `bodyHash` from a read of the
+current body (see "How quoted history survives an edit" above). What the hash cannot catch
+is a caller who read the current body and then deliberately replaced it, or a change that
+lands between the check and the write, so the mitigation for those is on the disposal side
+plus disclosure:
 
 - **Trash, not destroy** turns the overwrite into a one-step undo. How long the copy
   survives is the account's business: Fastmail's Trash retention is a per-account setting
@@ -662,8 +650,7 @@ would silently replace the HTML body recipients render.
 
 ### A part that declares no type: the read widens, the rebuild does not
 
-The two sides disagree here on purpose, and the disagreement is the point rather than an
-inconsistency waiting to be tidied away.
+The two sides disagree here on purpose; do not tidy them into one rule.
 
 **The read counts a typeless part as the type of the list carrying it.** RFC 8621 §4.1.4
 puts a part into `textBody` or `htmlBody` precisely to say a client should display it
@@ -737,10 +724,8 @@ reference.
   property edits. Only `keywords` and `mailboxIds` are mutable. Hence recreate-on-edit;
   the code comment rationale is "server silently no-ops," not "server rejects."
 - **`cid:` inline images surface in `attachments` with `disposition: 'inline'`** (plus
-  `cid`, `partId`, `blobId`; `hasAttachment: false`). So the strict
-  `disposition === 'inline'` reject detector is correct and fires. `bodyStructure`
-  round-trips the full `multipart/related` tree, so the #13 inline-image reconstruction
-  follow-on is feasible, not blocked.
+  `cid`, `partId`, `blobId`; `hasAttachment: false`), and `bodyStructure` round-trips the
+  full `multipart/related` tree.
 - **Composed `text/plain` carries no `format=flowed`** (a bare `Content-Type:
   text/plain`). So uniform `> ` quoting is correct; no RFC 3676 §4 flow handling is
   needed.
