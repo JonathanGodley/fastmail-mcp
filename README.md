@@ -403,13 +403,15 @@ search_emails { "after": "2026-07-01", "limit": 100, "position": 100 }    // Sho
 The rules:
 
 - **The total is always stated**, so a page that happens to fill the `limit` is never mistaken for the complete answer ([#51](https://github.com/JonathanGodley/fastmail-mcp/issues/51)). In the rare case the server declines to compute a total, the summary says the count was not returned rather than passing the page size off as the total.
-- **`nextPosition` appears only while more results remain.** Its absence means the listing is complete — there is no `hasMore: false` to interpret, and no reason to re-run with a larger `position` to check.- **Take `nextPosition` from the response** instead of adding up `limit`s yourself. Both usually agree; the response value is the one that accounts for what the server actually did.
+- **`nextPosition` appears only while more results remain.** Its absence means the listing is complete — there is no `hasMore: false` to interpret, and no reason to re-run with a larger `position` to check.
+- **Take `nextPosition` from the response** instead of adding up `limit`s yourself. Both usually agree; the response value is the one that accounts for what the server actually did.
 - **Filters apply to every page, server-side**, so paging never changes what matches. On the email tools that includes the default Trash/Spam exclusion, and the withheld-count note describes the **whole match set**, not the page: the same count repeats on every page, so don't sum the notes as you page.
 - **`position: 0` is the same as omitting it.** A negative value is **rejected** (JMAP would read it as counting back from the end; on the email tools, read from the oldest end with `ascending: true`), as is a fraction or non-numeric text. A stringified `"40"` is accepted, like every other numeric parameter.
 - **A position past the end is not an error.** It returns an empty page next to the real total, so you can see you overshot; on the email and calendar tools the summary also names the position (`Showing 0 of 137 results from position 500.`).
 - **The summary is identical on the `raw` path**, which already carried one; `raw` callers can also read JMAP's own `total`/`position` by querying directly.
 
 `position` is how you read past the `limit` caps (`search_emails`, `list_emails`, `list_contacts`, `search_contacts` and `list_calendar_events` cap at 100). A tool offers a `nextPosition` only if it takes `position`, so the summary never tells you to pass back a parameter the tool would reject. Contact pages follow one fixed order, by first name and then surname (see `list_contacts`). `list_calendar_events` goes over CalDAV rather than JMAP but pages the same way: its total counts every matching occurrence across every calendar queried, and `nextPosition` walks that one earliest-first list.
+
 ### Mailbox fields
 
 **Default**: `id`, `name`, `path`, `role`, `parentId`, `totalEmails`, `unreadEmails`, `totalThreads`, `unreadThreads`
@@ -1092,7 +1094,9 @@ Fastmail applies rate limits to API requests. **This server does nothing about t
 
 ## CalDAV Calendar Support
 
-All calendar tools use CalDAV (`caldav.fastmail.com`), not JMAP, so they need the app-password credentials below.
+Fastmail does not currently expose calendar access via JMAP API tokens — the `urn:ietf:params:jmap:calendars` scope is not available because the JMAP Calendars specification is still an IETF Internet-Draft ([draft-ietf-jmap-calendars](https://datatracker.ietf.org/doc/draft-ietf-jmap-calendars/)). Fastmail has stated they will add JMAP calendar support once the spec becomes an RFC, but there is no public timeline.
+
+However, Fastmail fully supports **CalDAV** for calendar access via `caldav.fastmail.com`. All calendar tools use CalDAV directly.
 
 ### Setup
 
