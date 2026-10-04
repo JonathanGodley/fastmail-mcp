@@ -38,6 +38,21 @@ function calls(stub: ReturnType<typeof stubClient>) {
   return stub.getEmails.mock.callCount() + stub.searchEmails.mock.callCount();
 }
 
+// Every argument is bad at once; each call must refuse with exactly the error that argument
+// alone produces, and fixing it must move the refusal on to the next one in `order`.
+async function assertCheckOrder(run: typeof listEmailsTool, order: Array<[string, unknown]>) {
+  const stub = stubClient();
+  const bad: Record<string, unknown> = Object.fromEntries(order);
+  for (const [param, value] of order) {
+    let alone = '';
+    await run({ [param]: value }, 20, stub.client).catch((err: Error) => { alone = err.message; });
+    assert.notEqual(alone, '', `${param} alone was not refused`);
+    await assert.rejects(() => run(bad, 20, stub.client), (err: Error) => err.message === alone, param);
+    delete bad[param];
+  }
+  assert.equal(calls(stub), 0);
+}
+
 describe('listEmailsTool', () => {
   it('forwards every option, with the flags false by default and the limit as passed', async () => {
     const stub = stubClient();
@@ -79,6 +94,13 @@ describe('listEmailsTool', () => {
     assert.equal(opts.includeTrash, false);
     assert.equal(opts.includeSpam, false);
     assert.equal(opts.excludeDrafts, false);
+  });
+
+  it('checks its arguments in a fixed order', async () => {
+    await assertCheckOrder(listEmailsTool, [
+      ['ascending', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
+      ['includeTrash', 'x'], ['includeSpam', 'x'], ['excludeDrafts', 'x'],
+    ]);
   });
 });
 
@@ -159,22 +181,25 @@ describe('searchEmailsTool', () => {
     }
   });
 
-  it('checks its arguments in a fixed order: flags, fields, position, then the mailbox arrays', async () => {
-    const stub = stubClient();
-    const bad = {
-      ascending: 'x', raw: 'x', fields: 'nope', position: -1,
-      requiredMailboxes: [1], excludeMailboxes: [1], hasAttachment: 'x',
-    };
-    const order = ['ascending', 'raw', 'fields', 'position', 'requiredMailboxes', 'excludeMailboxes', 'hasAttachment'];
-    for (const param of order) {
+  it('checks its arguments in a fixed order', async () => {
+    await assertCheckOrder(searchEmailsTool, [
+      ['ascending', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
+      ['requiredMailboxes', [1]], ['excludeMailboxes', [1]], ['hasAttachment', 'x'],
+      ['isUnread', 'x'], ['isPinned', 'x'], ['excludeDrafts', 'x'], ['includeTrash', 'x'],
+      ['includeSpam', 'x'],
+    ]);
+  });
+
+  it('names its own argument when refusing a filter flag', async () => {
+    for (const flag of ['hasAttachment', 'isUnread', 'isPinned']) {
+      const stub = stubClient();
       await assert.rejects(
-        () => searchEmailsTool(bad, 20, stub.client),
-        (err: Error) => err.message.includes(param),
-        param,
+        () => searchEmailsTool({ [flag]: 'maybe' }, 20, stub.client),
+        (err: Error) => err.name === 'InvalidInputError' && err.message.startsWith(`${flag} must be true or false`),
+        flag,
       );
-      delete (bad as any)[param];
+      assert.equal(calls(stub), 0, flag);
     }
-    assert.equal(calls(stub), 0);
   });
 });
 
