@@ -54,7 +54,7 @@ describe('listCalendarEventsTool', () => {
     assert.ok(content.text.endsWith(buildBrokenCollectionNote(paths, 'read')), content.text);
   });
 
-  // A call with no arguments at all arrives with `args` undefined.
+  // The switch passes `{}`, but the handler tolerates undefined args, as the contacts handlers do.
   it('reads the first page when called with no arguments', async () => {
     const { client, getCalendarEvents } = stubClient({ events: EVENTS, total: 2, position: 0 });
     const [content] = await listCalendarEventsTool(undefined, 50, client);
