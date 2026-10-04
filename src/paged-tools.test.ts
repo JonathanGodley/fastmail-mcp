@@ -23,9 +23,9 @@ const SERVER_ENTRY = join(SRC_DIR, '..', 'dist', 'index.js');
 // tools/list never reaches Fastmail, so any non-empty value boots the server.
 const FAKE_API_VALUE = 'probe-value-not-a-real-credential';
 
-// The number of tools that declare `position` today, pinned exact so one dropped declaration
-// trips it. Raise it in the same change that pages a new tool.
-const DECLARING_FLOOR = 5;
+// The number of tools that declare `position`, pinned exact so a dropped or added declaration
+// trips it. Change it in the same change that pages or unpages a tool.
+const DECLARING_COUNT = 5;
 
 // Each page holds 2 of 10 results, so every page below leaves more to fetch.
 const POSITIONS = [0, 4];
@@ -50,7 +50,7 @@ function calendarClient(position: number): CalendarListClient {
       total: TOTAL,
       position,
     }),
-  } as CalendarListClient;
+  };
 }
 
 type Runner = (position: number) => Promise<string>;
@@ -118,11 +118,12 @@ describe('every tool that declares position offers nextPosition (#212)', () => {
     }
   });
 
-  it(`reads ${DECLARING_FLOOR} position-declaring tools from the built server`, () => {
+  it(`reads ${DECLARING_COUNT} position-declaring tools from the built server`, () => {
     assert.equal(bootError, undefined, `the built server failed to boot or answer tools/list: ${bootError}`);
-    assert.ok(
-      declaring.length >= DECLARING_FLOOR,
-      `found ${declaring.length} tools declaring position (expected ${DECLARING_FLOOR}): ${declaring.join(', ')}`,
+    assert.equal(
+      declaring.length,
+      DECLARING_COUNT,
+      `found ${declaring.length} tools declaring position (expected ${DECLARING_COUNT}): ${declaring.join(', ')}`,
     );
   });
 
