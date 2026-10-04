@@ -518,7 +518,7 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
   original gets the header block alone. The reproduced html runs through the same sanitiser
   floor as reply quotes (script/style/handlers stripped, real http(s) images kept).
 - **Quotability includes embedded images.** An original whose body is nothing but
-  `<img src="cid:…">` would otherwise have no quotable html, because the sanitiser's collect
+  `<img src="cid:…">` would otherwise have no quotable html, because the sanitiser's first
   pass leaves a visually empty string, and an html `{{forward}}` over it would show the
   header block and nothing below. Such a message is quotable when at least one of its
   references would really embed (resolves to exactly one part, declared an image, carrying a

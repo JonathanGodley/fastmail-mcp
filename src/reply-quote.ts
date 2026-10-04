@@ -26,25 +26,26 @@ function stripSentinels(s: string): string {
   return s.replace(/\n?\[body truncated\]/g, '').replace(/\n?\[encoding issues detected\]/g, '');
 }
 
-// Both block builders run the original's html through the two-pass sanitizer in
-// src/inline-images.ts (the posture is in docs/conventions.md). `collect` reports references
-// and rewrites nothing; `map` rewrites resolved references to the Content-IDs this draft
-// attaches. The order matters: minting an identifier commits the call to attaching a part,
-// so pass one decides whether an html quote ships and pass two runs only when one does.
+// Both block builders sanitize the original's html twice with the `map` pass in
+// src/inline-images.ts (posture in docs/conventions.md). Pass one uses an empty map: it reports
+// references, and its html is what ships less the images pass two embeds. Not `collect`, which
+// keeps a relative src that `map` drops, so an attribution would open over an empty quote.
+// Pass two rewrites resolved references to the Content-IDs this draft attaches, and runs only
+// when pass one decides an html quote ships, since minting commits the call to attaching a part.
 
-// Content-based, NOT a string trim: an embedded-image-only original collects to e.g.
+// Content-based, NOT a string trim: an embedded-image-only original sanitizes to e.g.
 // <div></div>, which must not count or an orphan "On … wrote:" ships over an empty quote
 // (it becomes quotable through the resolvability test instead). Placeholders are suppressed
-// because an unmapped image has already been dropped from sanitized html.
+// because an unmapped image has already been dropped from sanitized html. Links are read
+// without their href, which htmlToText would print for an anchor showing nothing.
 function isQuotable(sanitized: string): boolean {
-  if (!isBlank(htmlToText(sanitized, 'suppress'))) return true;
+  if (!isBlank(htmlToText(sanitized.replace(/<a\b[^>]*>/gi, '<a>'), 'suppress'))) return true;
   return /<img\b[^>]*\bsrc\s*=/i.test(sanitized);
 }
 
 /**
  * What a compose path gives a quote builder so it can resolve the original's embedded images
- * itself. Absent on the edit path, which passes a finished `cidMap` instead, so the builder
- * only rewrites and never mints.
+ * itself. Without it the builder carries no embedded image.
  */
 export interface QuoteImageInput {
   /** The original's parts (the gated union). Their Content-IDs are compared literally. */
@@ -64,8 +65,8 @@ export interface QuoteImageOutcome {
   unresolvedRefs: string[];
   droppedDataImages: number;
   /**
-   * Images whose src was neither a cid reference nor http(s). Non-zero only on a branch that
-   * actually rewrote the quote's html.
+   * Images whose src was neither a cid reference nor http(s), dropped from the html. Zero when
+   * no html ships. Both passes drop the same ones, so pass one counts them.
    */
   droppedUnsupportedImages: number;
   htmlQuoteShips: boolean;
@@ -92,22 +93,18 @@ export function emptyQuoteImages(): QuoteImageOutcome {
 function collectQuoteRefs(
   origHtml: string,
   images: QuoteImageInput | undefined,
-  cidMap: Map<string, string> | undefined,
-): { html: string; refs: string[]; droppedDataImages: number; quotable: boolean; resolvedParts: CidPart[]; unresolvedRefs: string[] } {
+): { html: string; refs: string[]; droppedDataImages: number; droppedUnsupportedImages: number; quotable: boolean; resolvedParts: CidPart[]; unresolvedRefs: string[] } {
   if (!origHtml) {
-    return { html: '', refs: [], droppedDataImages: 0, quotable: false, resolvedParts: [], unresolvedRefs: [] };
+    return { html: '', refs: [], droppedDataImages: 0, droppedUnsupportedImages: 0, quotable: false, resolvedParts: [], unresolvedRefs: [] };
   }
-  const collected = sanitizeQuoteHtml(origHtml, { mode: 'collect' });
+  const collected = sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: new Map() });
   const resolution = images ? resolveCidRefs(collected.refs, images.sourceParts ?? []) : null;
-  // On the edit path the resolution already happened elsewhere: the map holds exactly the
-  // references that resolved to a carriable part, so membership answers the same question.
-  const resolvesSomething = resolution
-    ? resolution.embeddableRefs.length > 0
-    : collected.refs.some((r) => cidMap?.has(r) === true);
+  const resolvesSomething = !!resolution && resolution.embeddableRefs.length > 0;
   return {
     html: collected.html,
     refs: collected.refs,
     droppedDataImages: collected.droppedDataImages,
+    droppedUnsupportedImages: collected.droppedUnsupportedImages,
     quotable: isQuotable(collected.html) || resolvesSomething,
     resolvedParts: resolution?.resolvedParts ?? [],
     unresolvedRefs: resolution?.unresolvedRefs ?? [],
@@ -265,21 +262,21 @@ export function buildQuoteBlocks(input: {
   original: any;            // raw JMAP email from getEmailById (textBody/htmlBody arrays + bodyValues + date)
   htmlShips: boolean;
   timezone?: string;
-  // See QuoteImageInput: the edit path's rewrite-only channel.
-  cidMap?: Map<string, string>;
-  // See QuoteImageInput: the compose path's channel, where this builder runs both passes.
   quoteImages?: QuoteImageInput;
 }): QuoteBlocks {
-  const { original, htmlShips, timezone, cidMap, quoteImages } = input;
+  const { original, htmlShips, timezone, quoteImages } = input;
 
   const bodyValues = original?.bodyValues || {};
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
-  // PASS 1: collect. Nothing is minted here.
-  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
+  // PASS 1: nothing is minted here.
+  const collected = collectQuoteRefs(origHtml, quoteImages);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
+  // The dropped-image notes say the rest of the quote was kept, so with no quote they
+  // count nothing.
+  const quoted = htmlQuotable || textQuotable;
 
   // The text side's image policy follows this: without an html quote, a placeholder would
   // describe an absent image.
@@ -293,7 +290,7 @@ export function buildQuoteBlocks(input: {
         ...(quoteImages.mint && { mint: quoteImages.mint }),
       })
     : null;
-  const quoteMap = resolved ? resolved.cidMap : cidMap;
+  const quoteMap = resolved?.cidMap;
   const mapped = htmlQuotable && quoteMap
     ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
     : null;
@@ -304,14 +301,13 @@ export function buildQuoteBlocks(input: {
     mappings: resolved?.mappings ?? [],
     resolvedParts: collected.resolvedParts,
     unresolvedRefs: collected.unresolvedRefs,
-    droppedDataImages: collected.droppedDataImages,
-    // Only the rewriting pass drops a reference form it cannot carry, and only its output ships.
-    droppedUnsupportedImages: htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0,
+    droppedDataImages: quoted ? collected.droppedDataImages : 0,
+    droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
     htmlQuoteShips,
   };
 
   // No block in either format, so no orphan "On … wrote:" over an empty quote.
-  if (!htmlQuotable && !textQuotable) return { images };
+  if (!quoted) return { images };
 
   const senderRaw = original?.from?.[0]?.name || original?.from?.[0]?.email || '';
   const name = normalizeName(senderRaw);
@@ -352,7 +348,7 @@ function forwardHeaderLines(original: any): string[] {
   const joinAddrs = (list: any[] | undefined | null): string =>
     (list ?? [])
       .filter((a: any) => a && (a.email || a.name))
-      .map((a: any) => normalizeName(formatAddress(a)))
+      .map((a: any) => normalizeName(a.email ? formatAddress(a) : a.name))
       .filter(Boolean)
       .join(', ');
   const lines: string[] = [FORWARD_MARKER_LINE];
@@ -400,22 +396,22 @@ export interface ForwardBlocks {
 export function buildForwardBlocks(input: {
   original: any;      // raw JMAP email from getEmailById (body lists + bodyValues + addresses)
   htmlShips: boolean;
-  // See QuoteImageInput: the edit path's rewrite-only channel.
-  cidMap?: Map<string, string>;
-  // See QuoteImageInput: the compose path's channel, where this builder runs both passes.
   quoteImages?: QuoteImageInput;
 }): ForwardBlocks {
-  const { original, htmlShips, cidMap, quoteImages } = input;
+  const { original, htmlShips, quoteImages } = input;
 
   const bodyValues = original?.bodyValues || {};
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
-  // PASS 1: collect. An image-only original becomes quotable here, so an html block over it
-  // shows the picture rather than the header block alone.
-  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
+  // PASS 1: nothing is minted. An image-only original becomes quotable here, so an html block
+  // over it shows the picture rather than the header block alone.
+  const collected = collectQuoteRefs(origHtml, quoteImages);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
+  // The dropped-image notes say the rest of the quote was kept, so with no quote they
+  // count nothing.
+  const quoted = htmlQuotable || textQuotable;
 
   const lines = forwardHeaderLines(original);
   const headerText = lines.join('\n');
@@ -432,7 +428,7 @@ export function buildForwardBlocks(input: {
         ...(quoteImages.mint && { mint: quoteImages.mint }),
       })
     : null;
-  const quoteMap = resolved ? resolved.cidMap : cidMap;
+  const quoteMap = resolved?.cidMap;
   const mapped = htmlQuotable && quoteMap
     ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
     : null;
@@ -455,8 +451,8 @@ export function buildForwardBlocks(input: {
       mappings: resolved?.mappings ?? [],
       resolvedParts: collected.resolvedParts,
       unresolvedRefs: collected.unresolvedRefs,
-      droppedDataImages: collected.droppedDataImages,
-      droppedUnsupportedImages: htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0,
+      droppedDataImages: quoted ? collected.droppedDataImages : 0,
+      droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
       htmlQuoteShips,
     },
   };

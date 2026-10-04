@@ -251,6 +251,29 @@ describe('buildQuoteBlocks — what it will and will not read', () => {
     assert.match(htmlBlock!, /<img alt="" src="https:\/\/img\.example\/a\.png" \/><\/blockquote>$/);
   });
 
+  it('does not quote an original whose only content is a link around a dropped image', () => {
+    for (const img of ['<img src="foo.png">', '<img src="cid:gone@x.example">']) {
+      const original = makeOriginal({ html: `<a href="https://x.example/">${img}</a>`, name: 'Alex' });
+      const quoteImages = { sourceParts: [] };
+      assert.equal(buildQuoteBlocks({ original, htmlShips: true, quoteImages }).htmlBlock, undefined, img);
+      assert.equal(buildForwardBlocks({ original, htmlShips: true, quoteImages }).htmlQuotable, false, img);
+    }
+    const linked = makeOriginal({ html: '<a href="https://x.example/">site</a>', name: 'Alex' });
+    assert.notEqual(buildQuoteBlocks({ original: linked, htmlShips: true }).htmlBlock, undefined);
+  });
+
+  it('does not quote an original whose only image is one the quote would drop', () => {
+    for (const src of ['foo.png', './a.png', '/a.png', 'mailto:a@example.com']) {
+      const original = makeOriginal({ html: `<img src="${src}">`, name: 'Alex' });
+      for (const htmlShips of [true, false]) {
+        const quoteImages = { sourceParts: [] };
+        const quote = buildQuoteBlocks({ original, htmlShips, quoteImages });
+        assert.equal(quote.htmlBlock, undefined, src);
+        assert.equal(buildForwardBlocks({ original, htmlShips, quoteImages }).htmlQuotable, false, src);
+      }
+    }
+  });
+
   it('builds nothing for a missing original', () => {
     assert.deepEqual(buildQuoteBlocks({ original: undefined, htmlShips: true }), { images: emptyQuoteImages() });
     const forward = buildForwardBlocks({ original: undefined, htmlShips: true });
@@ -307,6 +330,10 @@ describe('buildForwardBlocks — the header block (canonical Fastmail shape)', (
     assert.match(textBlockFor({ to }), /\nTo: Bob <bob@example\.com>, dee@example\.com\n/);
   });
 
+  it('shows an address entry with a name and no email as the name alone', () => {
+    assert.match(textBlockFor({ to: [{ name: 'Bob' }] }), /\nTo: Bob\n/);
+  });
+
   it('puts a text-only original into the html block as escaped text', () => {
     const { htmlBlock } = buildForwardBlocks({ original: fwdOriginal({ htmlBody: [] }), htmlShips: true });
     assert.ok(htmlBlock.endsWith('<div type="cite">original text</div>'), htmlBlock);
@@ -349,13 +376,36 @@ describe('the image outcome the builders report', () => {
     }
   });
 
-  it('counts an unsupported image only when the html was rewritten', () => {
+  it('counts an unsupported image when html ships, with or without an image channel', () => {
     const html = original('<p>x</p><img src="ftp://img.example/a.png">');
-    const rewritten = { htmlShips: true, quoteImages: { sourceParts: [] } };
-    assert.equal(buildQuoteBlocks({ original: html, ...rewritten }).images.droppedUnsupportedImages, 1);
-    assert.equal(buildForwardBlocks({ original: html, ...rewritten }).images.droppedUnsupportedImages, 1);
-    assert.equal(buildQuoteBlocks({ original: html, htmlShips: true }).images.droppedUnsupportedImages, 0);
-    assert.equal(buildForwardBlocks({ original: html, htmlShips: true }).images.droppedUnsupportedImages, 0);
+    for (const quoteImages of [{ sourceParts: [] }, undefined]) {
+      for (const [htmlShips, count] of [[true, 1], [false, 0]] as const) {
+        assert.equal(buildQuoteBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+        assert.equal(buildForwardBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+      }
+    }
+  });
+
+  it('reports an image dropped from html that is not quoted, when html ships', () => {
+    const html = fwdOriginal({ sentAt: undefined, bodyValues: { t: { value: 'plain body' }, h: { value: '<img src="foo.png">' } } });
+    const quoteImages = { sourceParts: [] };
+    for (const [htmlShips, count] of [[true, 1], [false, 0]] as const) {
+      assert.equal(buildQuoteBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+      assert.equal(buildForwardBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+    }
+  });
+
+  it('reports no dropped image when nothing of the original is quoted', () => {
+    for (const img of ['<img src="/logo.png">', '<img src="//cdn.example.com/a.png">', '<img src="data:image/png;base64,AA">']) {
+      const nothing = original(img);
+      const quoteImages = { sourceParts: [] };
+      for (const { images } of [
+        buildQuoteBlocks({ original: nothing, htmlShips: true, quoteImages }),
+        buildForwardBlocks({ original: nothing, htmlShips: true, quoteImages }),
+      ]) {
+        assert.deepEqual([images.droppedDataImages, images.droppedUnsupportedImages], [0, 0], img);
+      }
+    }
   });
 
   it('writes no placeholder in the text form for an image the message does not carry', () => {

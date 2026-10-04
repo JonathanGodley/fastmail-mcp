@@ -2118,6 +2118,15 @@ describe('formatArchiveResult', () => {
     assert.equal(text, 'Archive: 1 email(s), 0 changed.\n- 1 failed: a.');
   });
 
+  it('drops a reason slot that renders empty, so no separator dangles', () => {
+    const zeroWidth = String.fromCharCode(0x200b);
+    const text = build([
+      { id: 'a', action: 'failed', reason: { setErrorType: zeroWidth, description: 'x' } },
+      { id: 'b', action: 'failed', reason: { setErrorType: zeroWidth } },
+    ]);
+    assert.equal(text, 'Archive: 2 email(s), 0 changed.\n- 1 failed (x): a.\n- 1 failed: b.');
+  });
+
   it('renders a failure whose reason slots are not strings as having no reason', () => {
     const text = build([{ id: 'a', action: 'failed', reason: { setErrorType: { p: 1 }, description: 5 } }]);
     assert.equal(text, 'Archive: 1 email(s), 0 changed.\n- 1 failed: a.');

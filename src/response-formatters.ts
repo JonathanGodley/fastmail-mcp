@@ -617,13 +617,13 @@ export function formatArchiveResult(result: ArchiveResult): string {
       const slotOf = (v: any): string => (typeof v === 'string' ? v : '');
       const slots: [string, string] = [slotOf(r.reason?.setErrorType), slotOf(r.reason?.description)];
       const key = JSON.stringify(slots);
-      const parts = slots.filter(Boolean);
       const group = byReason.get(key);
       if (group) group.ids.push(r.id);
       else byReason.set(key, {
         // Display only, and deliberately ambiguous: any separator can occur inside a server
-        // description, and the key above already keeps the groups apart.
-        rendered: parts.map(describeUntrusted).join(' - '),
+        // description, and the key above already keeps the groups apart. Filtered after
+        // describing, since a slot of only invisible characters describes as ''.
+        rendered: slots.map(describeUntrusted).filter(Boolean).join(' - '),
         ids: [r.id],
       });
     }
