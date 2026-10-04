@@ -1046,13 +1046,15 @@ export function startOfLocalDayUtcIso(nowMs: number, zone?: string): string {
 // The pagination offset shared by the list/search tools (JMAP `position`, RFC 8620
 // section 5.5). A string "40" is accepted, but a shape that would page somewhere unmeant
 // is REJECTED rather than repaired, since a wrong offset silently skips messages: a
-// NEGATIVE value (JMAP reads it from the END; `ascending` is the way to do that), a
-// fraction, or a non-safe integer. Blank shapes mean "start at the first result".
+// NEGATIVE value (JMAP reads it from the END), a fraction, or a non-safe integer. Blank
+// shapes mean "start at the first result". `ascendingHint` adds the pointer to
+// `ascending:true` to the negative-value error, for a tool that has that parameter.
 const POSITION_HINT =
   'Pass a whole number of results to skip (0 or greater), e.g. position:20 for the second page of a limit:20 listing.';
 const POSITION_ECHO_LIMIT = 40;
 
-export function coercePosition(value: unknown, paramName = 'position'): number | undefined {
+export function coercePosition(value: unknown, options?: { ascendingHint?: boolean }): number | undefined {
+  const paramName = 'position';
   if (value === undefined || value === null) return undefined;
 
   let n: number;
@@ -1075,7 +1077,7 @@ export function coercePosition(value: unknown, paramName = 'position'): number |
   }
   if (n < 0) {
     throw new InvalidInputError(
-      `${paramName} cannot be negative: "${echoPosition(value)}". It is an offset from the START of the results; to read from the oldest end pass ascending:true. ${POSITION_HINT}`,
+      `${paramName} cannot be negative: "${echoPosition(value)}". It is an offset from the START of the results${options?.ascendingHint ? '; to read from the oldest end pass ascending:true' : ''}. ${POSITION_HINT}`,
     );
   }
   return n;

@@ -467,15 +467,34 @@ describe('coercePosition (#51)', () => {
   // accepting -1 would quietly serve the last page instead of failing.
   it('rejects a negative position and names the alternative', () => {
     assert.throws(
-      () => coercePosition(-1),
+      () => coercePosition(-1, { ascendingHint: true }),
       (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
-        assert.match(err.message, /cannot be negative/);
-        assert.match(err.message, /ascending:true/);
+        assert.equal(
+          err.message,
+          'position cannot be negative: "-1". It is an offset from the START of the results; to read from the oldest end pass ascending:true. ' +
+            'Pass a whole number of results to skip (0 or greater), e.g. position:20 for the second page of a limit:20 listing.',
+        );
         return true;
       },
     );
     assert.throws(() => coercePosition('-20'), InvalidInputError);
+  });
+
+  // A tool with no `ascending` parameter must not be told to pass one.
+  it('names ascending:true only for a caller that opts in', () => {
+    assert.throws(
+      () => coercePosition(-1),
+      (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.equal(
+          err.message,
+          'position cannot be negative: "-1". It is an offset from the START of the results. ' +
+            'Pass a whole number of results to skip (0 or greater), e.g. position:20 for the second page of a limit:20 listing.',
+        );
+        return true;
+      },
+    );
   });
 
   it('rejects a fraction rather than rounding to a guessed offset', () => {

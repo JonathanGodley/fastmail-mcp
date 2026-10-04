@@ -1986,7 +1986,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
-        const position = coercePosition((args as any).position);
+        const position = coercePosition((args as any).position, { ascendingHint: true });
         // clampLimit, not a bare Math.min/max: the drift guard in tool-schema.test.ts
         // matches every `.getEmails(` call site against a literal `clampLimit(` call.
         const validLimit = clampLimit(limit, 20, 100);
@@ -2426,7 +2426,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Validated before the query so a typo'd field name costs no round trip.
         const fields = parseEmailFields((args as any).fields, { raw });
         // Same reason: an unusable paging offset is rejected before the query runs.
-        const position = coercePosition((args as any).position);
+        const position = coercePosition((args as any).position, { ascendingHint: true });
         // STRICT: dropping an uncoercible scope array would silently widen the query.
         const requiredMailboxes = coerceStringArrayStrict((args as any).requiredMailboxes, 'requiredMailboxes');
         const excludeMailboxes = coerceStringArrayStrict((args as any).excludeMailboxes, 'excludeMailboxes');
