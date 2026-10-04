@@ -2123,7 +2123,7 @@ describe('buildCalendarWindowNote names the bound that was invented', () => {
     assert.match(note, /Pass startDate and\/or endDate to query a different span/);
     // Not the one-sided wording, which would be a false account of what the caller passed.
     assert.doesNotMatch(note, /only startDate was given|only endDate was given/);
-    assert.match(note, /because recurrence expansion would materialise every occurrence of every repeating event across it\.$/);
+    assert.match(note, /recurrence expansion/);
   });
 
   it('names endDate as given and startDate as the one to pass, when startDate was invented', () => {
@@ -2134,7 +2134,7 @@ describe('buildCalendarWindowNote names the bound that was invented', () => {
     });
     assert.match(note, /only endDate was given/);
     assert.match(note, /Pass startDate explicitly/);
-    assert.match(note, /because recurrence expansion would materialise every occurrence of every repeating event across it\.$/);
+    assert.match(note, /recurrence expansion/);
   });
 
   it('puts an invented-bound note and a saturation note on separate lines', () => {

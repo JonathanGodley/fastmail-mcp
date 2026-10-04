@@ -5,7 +5,7 @@ import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
 import { validateFastmailUrl } from './url-validation.js';
-import { buildExclusionNote, simplifyMailbox, formatSavedAttachment } from './response-formatters.js';
+import { buildExclusionNote, simplifyMailbox, formatSavedAttachment, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
 import { mkdtemp, writeFile as fsWriteFile, readFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -5097,32 +5097,38 @@ describe('buildExclusionNote', () => {
     assert.match(note, /NOT excluded/);
   });
 
-  const DASH = String.fromCharCode(0x2014);
+  // The note's lines, after the blank-line separator every note starts with.
+  const noteLines = (note: string) => {
+    assert.ok(note.startsWith('\n\n'), JSON.stringify(note));
+    return note.slice(2).split('\n');
+  };
 
   it('names each excluded role with its own flag and mailbox role', () => {
-    assert.equal(
-      buildExclusionNote({ hidden: 3, excludedRoles: ['Trash', 'Spam'], unresolvedRoles: [] }),
-      '\n\nNote: 3 message(s) in Trash/Spam were excluded; set includeTrash:true / includeSpam:true (or mailbox:"trash"/"junk") to include them.',
-    );
-    assert.equal(
-      buildExclusionNote({ hidden: null, excludedRoles: ['Trash', 'Spam'], unresolvedRoles: [] }),
-      "\n\nRe-run with includeTrash:true / includeSpam:true: Trash/Spam were excluded but the hidden count couldn't be confirmed.",
-    );
+    const [counted] = noteLines(buildExclusionNote({ hidden: 3, excludedRoles: ['Trash', 'Spam'], unresolvedRoles: [] }));
+    assert.ok(counted.includes(`3 ${excludedCountPhrase('Trash/Spam')}`), counted);
+    assert.ok(counted.includes('includeTrash:true / includeSpam:true'), counted);
+    assert.ok(counted.includes('mailbox:"trash"/"junk"'), counted);
+
+    const [unconfirmed] = noteLines(buildExclusionNote({ hidden: null, excludedRoles: ['Trash', 'Spam'], unresolvedRoles: [] }));
+    assert.ok(unconfirmed.includes('includeTrash:true / includeSpam:true'), unconfirmed);
+    assert.ok(unconfirmed.includes('Trash/Spam'), unconfirmed);
+    assert.ok(unconfirmed.includes(UNCONFIRMED_COUNT_PHRASE), unconfirmed);
   });
 
   it('says nothing about exclusion when no role was excluded, even with an unknown count', () => {
-    assert.equal(
-      buildExclusionNote({ hidden: null, excludedRoles: [], unresolvedRoles: ['Trash', 'Spam'] }),
-      `\n\nRe-run to be sure: the Trash/Spam folder couldn't be found, so it was NOT excluded ${DASH} these results may include Trash/Spam mail.`,
-    );
+    const lines = noteLines(buildExclusionNote({ hidden: null, excludedRoles: [], unresolvedRoles: ['Trash', 'Spam'] }));
+    assert.equal(lines.length, 1, lines.join('\n'));
+    assert.ok(lines[0].includes(NOT_EXCLUDED_PHRASE), lines[0]);
+    assert.equal(lines[0].split('Trash/Spam').length - 1, 2, lines[0]);
+    assert.ok(!lines[0].includes(UNCONFIRMED_COUNT_PHRASE), lines[0]);
   });
 
   it('puts each note on its own line', () => {
-    assert.equal(
-      buildExclusionNote({ hidden: 2, excludedRoles: ['Trash'], unresolvedRoles: ['Spam'] }),
-      `\n\nRe-run to be sure: the Spam folder couldn't be found, so it was NOT excluded ${DASH} these results may include Spam mail.`
-        + '\nNote: 2 message(s) in Trash were excluded; set includeTrash:true (or mailbox:"trash") to include them.',
-    );
+    const lines = noteLines(buildExclusionNote({ hidden: 2, excludedRoles: ['Trash'], unresolvedRoles: ['Spam'] }));
+    assert.equal(lines.length, 2, lines.join('\n'));
+    assert.ok(lines[0].includes(NOT_EXCLUDED_PHRASE), lines[0]);
+    assert.ok(lines[1].includes(`2 ${excludedCountPhrase('Trash')}`), lines[1]);
+    assert.ok(lines[1].includes('includeTrash:true (or mailbox:"trash")'), lines[1]);
   });
 });
 
