@@ -1003,7 +1003,7 @@ describe('the home .env file', () => {
     assert.equal(result.status, 1, `expected exit 1, got ${result.status}; stderr: ${result.stderr}`);
     const lines = result.stderr.trim().split(/\r?\n/);
     assert.equal(lines.length, 1, `expected one line, got: ${result.stderr}`);
-    assert.ok(lines[0].includes(path), `expected ${path} in: ${lines[0]}`);
+    assert.equal(lines[0], `Fastmail MCP server failed to start: ${path} is a directory, not a file`);
   });
 
   it('is kept from a harness client unless it asks for the home its env names', async () => {

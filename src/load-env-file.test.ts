@@ -74,13 +74,12 @@ describe('loadHomeEnvFile', () => {
     assert.doesNotThrow(() => loadHomeEnvFile(homeWith(null)));
   });
 
-  it('throws naming the path when the path is a directory', () => {
+  it('throws saying plainly that the path is a directory', () => {
     const home = homeWith(null);
     mkdirSync(envFilePath(home), { recursive: true });
-    assert.throws(
-      () => loadHomeEnvFile(home),
-      (err: Error) => err.message.includes(envFilePath(home)),
-    );
+    assert.throws(() => loadHomeEnvFile(home), {
+      message: `${envFilePath(home)} is a directory, not a file`,
+    });
   });
 
   it(
@@ -149,7 +148,7 @@ describe('load order', () => {
   it('imports only Node built-ins, so nothing it pulls in can read a setting first', () => {
     const source = readFileSync(join(SRC_DIR, 'load-env-file.ts'), 'utf8');
     // Every module specifier, in any quote style, static, dynamic or require(), on one line or several.
-    const specifiers = [...source.matchAll(/\b(?:from|import|require)\s*\(?\s*(['"])([^'"]+)\1/g)].map((m) => m[2]);
+    const specifiers = [...source.matchAll(/\b(?:from|import|require)\s*\(?\s*(['"`])([^'"`]+)\1/g)].map((m) => m[2]);
     assert.ok(specifiers.length > 0, 'no imports found in load-env-file.ts');
     for (const specifier of specifiers) {
       assert.ok(specifier.startsWith('node:'), `load-env-file.ts imports ${specifier}`);

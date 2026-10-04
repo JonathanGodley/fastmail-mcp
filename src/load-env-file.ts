@@ -2,8 +2,17 @@
 // other, so the file is in place before any module, dependencies included, reads a setting
 // at import. It therefore imports only Node built-ins.
 
+import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 export function envFilePath(home: string): string {
   return join(home, '.fastmail-mcp', '.env');
@@ -20,6 +29,8 @@ export function loadHomeEnvFile(home: string): void {
     process.loadEnvFile(path);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    // Node's own error for a directory differs by platform, and on Windows misstates the cause.
+    if (isDirectory(path)) throw new Error(`${path} is a directory, not a file`, { cause: err });
     throw new Error(`${path} exists but could not be loaded: ${(err as Error).message}`, { cause: err });
   }
 }
