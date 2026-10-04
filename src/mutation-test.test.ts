@@ -87,10 +87,10 @@ test('MUTATE_ALL excludes the same files isMutable does', () => {
   assert.deepEqual(MUTATE_ALL, ['src/**/*.ts', '!src/index.ts', '!src/**/*.test.ts', '!src/testing/**']);
 });
 
-test('testFiles keeps every src test except the six excluded ones, sorted', () => {
+test('testFiles keeps every src test except the seven excluded ones, sorted', () => {
   const names = ['b.test.ts', 'a.test.ts', 'a.ts', 'index-env.test.ts', 'built-server.test.ts', 'testing'];
   assert.deepEqual(testFiles(names), ['src/a.test.ts', 'src/b.test.ts']);
-  assert.equal(EXCLUDED_TESTS.length, 6);
+  assert.equal(EXCLUDED_TESTS.length, 7);
 });
 
 test('every excluded test file exists, so a rename cannot silently re-include it', () => {
