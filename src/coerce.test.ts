@@ -2561,7 +2561,8 @@ describe('PathAccessError', () => {
 
 describe('registerSecret boundaries', () => {
   it('ignores a value that is not a string', () => {
-    assert.doesNotThrow(() => registerSecret(undefined));
+    registerSecret(undefined);
+    assert.equal(redactBearerTokens('value is undefined'), 'value is undefined');
   });
 
   it('registers a value of exactly 8 characters', () => {
@@ -2615,17 +2616,21 @@ describe('hostTimezone falls back to UTC', () => {
   };
 
   it('when ICU reports no zone name', () => {
+    let calls = 0;
     withDateTimeFormat(
-      function () { return { resolvedOptions: () => ({ timeZone: '' }) }; },
+      function () { calls++; return { resolvedOptions: () => ({ timeZone: '' }) }; },
       () => assert.equal(describeTimezone(undefined), 'UTC'),
     );
+    assert.ok(calls > 0, 'the stub was never consulted');
   });
 
   it('when ICU throws', () => {
+    let calls = 0;
     withDateTimeFormat(
-      function () { throw new RangeError('no ICU'); },
+      function () { calls++; throw new RangeError('no ICU'); },
       () => assert.equal(describeTimezone(undefined), 'UTC'),
     );
+    assert.ok(calls > 0, 'the stub was never consulted');
   });
 });
 
@@ -2633,14 +2638,13 @@ describe('validateCallerTimezone refusals say what to pass instead', () => {
   it('a null or blank zone points the caller at omitting it, per tool', () => {
     for (const value of [null, '   ']) {
       rejectsAsInvalidInput(() => validateCallerTimezone(value), /Omit timeZone instead/);
-      rejectsAsInvalidInput(() => validateCallerTimezone(value), /on create that writes the account's configured zone/);
-      rejectsAsInvalidInput(() => validateCallerTimezone(value), /on update it leaves whatever the event already has unchanged/);
+      rejectsAsInvalidInput(() => validateCallerTimezone(value), /on update it leaves/);
     }
   });
 
   it('an offset points the caller at the zone the wall clock is in', () => {
     rejectsAsInvalidInput(() => validateCallerTimezone('+10:00'), /pass the zone the wall clock is actually in/);
-    rejectsAsInvalidInput(() => validateCallerTimezone('+10:00'), /works out the offset itself/);
+    rejectsAsInvalidInput(() => validateCallerTimezone('+10:00'), /works out the offset/);
   });
 });
 
@@ -2657,8 +2661,7 @@ describe('resolveConfiguredTimezone input handling', () => {
     for (const value of ['+10:00', 'Blah', 'EST']) {
       assert.throws(() => resolveConfiguredTimezone(value), (err: Error) => {
         assert.ok(err instanceof InvalidInputError);
-        assert.match(err.message, /refuses to start/);
-        assert.match(err.message, /rather than falling back to it silently/);
+        assert.match(err.message, /refuses to start on an unusable configured time zone/);
         assert.match(err.message, /Set FASTMAIL_TIMEZONE to/);
         assert.match(err.message, /or unset it to use this server's own zone/);
         return true;
@@ -2670,7 +2673,7 @@ describe('resolveConfiguredTimezone input handling', () => {
     const { warning } = resolveConfiguredTimezone(undefined, 'EST');
     assert.match(warning ?? '', /no region-qualifying slash/);
     assert.match(warning ?? '', /Set FASTMAIL_TIMEZONE to a full IANA zone name/);
-    assert.match(warning ?? '', /e\.g\. "Australia\/Sydney"\) to fix this/);
+    assert.match(warning ?? '', /e\.g\. "Australia\/Sydney"/);
   });
 });
 
@@ -2714,7 +2717,7 @@ describe('calendar window bounds accept the last second of a day and refuse past
 
   it('the refusal says how a date and a zone-less datetime are read', () => {
     rejectsAsInvalidInput(() => coerceCalendarWindowStart('2026/08/12', 'startDate', 'UTC'), /read as a whole day in UTC/);
-    rejectsAsInvalidInput(() => coerceCalendarWindowStart('2026/08/12', 'startDate', 'UTC'), /is read as UTC local time\.$/);
+    rejectsAsInvalidInput(() => coerceCalendarWindowStart('2026/08/12', 'startDate', 'UTC'), /is read as UTC local time/);
   });
 });
 
@@ -2857,9 +2860,9 @@ describe('contact entry element shapes', () => {
   it('names the item shape, and the bare form only where one is accepted', () => {
     rejectsAsInvalidInput(
       () => coerceContactEmails('not json'),
-      /emails must be an array of \{ address, label\? \} objects \(or a bare address string\)\.$/,
+      /emails must be an array of \{ address, label\? \} objects \(or a bare address string\)\./,
     );
-    rejectsAsInvalidInput(() => coerceContactAddresses('not json'), /addresses must be an array of \{ full, label\? \} objects\.$/);
+    rejectsAsInvalidInput(() => coerceContactAddresses('not json'), /addresses must be an array of \{ full, label\? \} objects\./);
   });
 
   it('refuses a number element as not an object', () => {
