@@ -3642,6 +3642,8 @@ export class CalDAVCalendarClient {
     const title = requireNonEmptyText(event.title, 'title', 'pass the event title');
     assertTextType('description', event.description);
     assertTextType('location', event.location);
+    const description = event.description != null ? requireNonEmptyText(event.description, 'description') : undefined;
+    const location = event.location != null ? requireNonEmptyText(event.location, 'location') : undefined;
 
     const client = await this.getClient();
     const { calendars, brokenCollections } = await this.discoverCalendars();
@@ -3718,11 +3720,11 @@ export class CalDAVCalendarClient {
       icalLines.push(transpLine('free'));
     }
 
-    if (event.description) {
-      icalLines.push(foldICalLine(`DESCRIPTION:${escapeICalText(event.description)}`));
+    if (description !== undefined) {
+      icalLines.push(foldICalLine(`DESCRIPTION:${escapeICalText(description)}`));
     }
-    if (event.location) {
-      icalLines.push(foldICalLine(`LOCATION:${escapeICalText(event.location)}`));
+    if (location !== undefined) {
+      icalLines.push(foldICalLine(`LOCATION:${escapeICalText(location)}`));
     }
 
     if (event.participants && event.participants.length > 0) {

@@ -5563,6 +5563,41 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     }
   });
 
+  it('refuses an empty, blank or strip-only description or location, as update does, before any network call', async () => {
+    const base = { calendarId: 'Personal', title: 'T', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' };
+    for (const field of ['description', 'location']) {
+      for (const value of ['', '   ', '\u202E\u0085']) {
+        const label = `${field} ${JSON.stringify(value)}`;
+        const { client, mockDAVClient } = createMockedCreateClient();
+        await assert.rejects(
+          () => client.createCalendarEvent({ ...base, [field]: value }),
+          (err: Error) => {
+            assert.equal(err.name, 'InvalidInputError', label);
+            assert.match(err.message, new RegExp(`^${field} cannot be empty; omit the field to leave it unchanged$`), label);
+            return true;
+          },
+        );
+        assert.equal(mockDAVClient.fetchCalendars.mock.callCount(), 0, label);
+        assert.equal(mockDAVClient.createCalendarObject.mock.calls.length, 0, label);
+      }
+    }
+  });
+
+  it('writes no DESCRIPTION or LOCATION when either is omitted or null, and writes a given one trimmed', async () => {
+    const base = { calendarId: 'Personal', title: 'T', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' };
+    for (const patch of [{}, { description: null, location: null }]) {
+      const { client, mockDAVClient } = createMockedCreateClient();
+      await client.createCalendarEvent({ ...base, ...patch } as Parameters<CalDAVCalendarClient['createCalendarEvent']>[0]);
+      const written = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+      assert.doesNotMatch(written, /\r\n(DESCRIPTION|LOCATION)[:;]/, JSON.stringify(patch));
+    }
+    const { client, mockDAVClient } = createMockedCreateClient();
+    await client.createCalendarEvent({ ...base, description: ' Agenda ', location: ' Room 1 ' });
+    const written = callArguments(mockDAVClient.createCalendarObject)[0].iCalString;
+    assert.ok(written.includes('\r\nDESCRIPTION:Agenda\r\n'), written);
+    assert.ok(written.includes('\r\nLOCATION:Room 1\r\n'), written);
+  });
+
   it('writes the title trimmed, as update does', async () => {
     const { client, mockDAVClient } = createMockedCreateClient();
     await client.createCalendarEvent({ calendarId: 'Personal', title: '  Standup  ', start: '2026-04-07T10:00:00Z', end: '2026-04-07T11:00:00Z' });

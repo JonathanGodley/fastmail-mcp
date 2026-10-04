@@ -1444,7 +1444,7 @@ const TOOLS = [
             },
             description: {
               type: 'string',
-              description: `Event description (optional, max ${MAX_ICAL_FIELD_KB}KB)`,
+              description: `Event description (optional, max ${MAX_ICAL_FIELD_KB}KB). Surrounding whitespace is trimmed, and an empty or whitespace-only description is rejected, as on update_calendar_event.`,
             },
             start: {
               type: 'string',
@@ -1456,7 +1456,7 @@ const TOOLS = [
             },
             location: {
               type: 'string',
-              description: `Event location (optional, max ${MAX_ICAL_FIELD_KB}KB)`,
+              description: `Event location (optional, max ${MAX_ICAL_FIELD_KB}KB). Surrounding whitespace is trimmed, and an empty or whitespace-only location is rejected, as on update_calendar_event.`,
             },
             transparency: {
               type: 'string',
