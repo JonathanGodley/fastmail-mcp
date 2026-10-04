@@ -21,7 +21,8 @@ export async function getSession() {
   if (!res.ok) throw new Error(`session ${res.status}`);
   const s = await res.json();
   const accountId = s.primaryAccounts['urn:ietf:params:jmap:mail'];
-  return { accountId, apiUrl: s.apiUrl, uploadUrl: s.uploadUrl, downloadUrl: s.downloadUrl };
+  const contactsAccountId = s.primaryAccounts['urn:ietf:params:jmap:contacts'];
+  return { accountId, contactsAccountId, apiUrl: s.apiUrl, uploadUrl: s.uploadUrl, downloadUrl: s.downloadUrl };
 }
 
 export async function jmap(session, methodCalls, extraUsing = []) {
