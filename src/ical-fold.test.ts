@@ -166,9 +166,10 @@ describe('foldICalLine exact output', () => {
   it('steps back one unit when a lone low surrogate sits at the cut', () => {
     assert.equal(foldICalLine('X'.repeat(73) + '\uDC00' + 'YZ'),
       'X'.repeat(72) + '\r\n X\uDC00YZ');
-    // The step back lands inside the preceding pair.
-    assert.equal(foldICalLine('X'.repeat(69) + pin + '\uDC00' + 'YZ'),
-      'X'.repeat(69) + '\uD83D\r\n \uDCCD\uDC00YZ');
+    // The step back lands inside the preceding pair, so the continuation opens with an orphaned
+    // low surrogate, which counts 3 octets there.
+    assert.equal(foldICalLine('X'.repeat(69) + pin + '\uDC00' + 'Y'.repeat(80)),
+      'X'.repeat(69) + '\uD83D\r\n \uDCCD\uDC00' + 'Y'.repeat(68) + '\r\n ' + 'Y'.repeat(12));
   });
 
   it('folds a long mixed line to a pinned output', () => {
