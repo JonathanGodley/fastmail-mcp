@@ -13,8 +13,8 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatRawQueryResult, formatEmailQueryResult, buildExclusionNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
+import { buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
 import { composeDraftEmail } from './draft-email-handler.js';
@@ -27,6 +27,7 @@ import { runBulkReadTest } from './bulk-test-handler.js';
 import { listMailboxes, createMailbox } from './mailbox-handler.js';
 import { createContactTool, getContactTool, updateContactTool, deleteContactTool, listContactsTool, searchContactsTool } from './contacts-handler.js';
 import { listCalendarEventsTool } from './calendar-list-handler.js';
+import { listEmailsTool, searchEmailsTool } from './email-list-handler.js';
 import createDebug from 'debug';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
@@ -2000,48 +2001,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'create_mailbox':
         return { content: await createMailbox(args, client) };
 
-      case 'list_emails': {
-        const { mailbox, limit } = args as any;
-        // coerceBool, not !!, on every flag: a lenient client's stringified "false" is
-        // truthy, so `!!` would silently reverse the sort order or flip raw:"false" into
-        // untransformed JMAP. (#54)
-        const ascending = coerceBool((args as any).ascending, 'ascending') ?? false;
-        const raw = coerceBool((args as any).raw, 'raw') ?? false;
-        // Validated before the query so a typo'd field name costs no round trip.
-        const fields = parseEmailFields((args as any).fields, { raw });
-        // Same reason: an unusable paging offset is rejected before the query runs.
-        const position = coercePosition((args as any).position, { ascendingHint: true });
-        // clampLimit, not a bare Math.min/max: the drift guard in tool-schema.test.ts
-        // matches every `.getEmails(` call site against a literal `clampLimit(` call.
-        const validLimit = clampLimit(limit, 20, 100);
-        const result = await client.getEmails({
-          mailbox,
-          limit: validLimit,
-          position,
-          ascending,
-          includeTrash: coerceBool((args as any).includeTrash, 'includeTrash') ?? false,
-          includeSpam: coerceBool((args as any).includeSpam, 'includeSpam') ?? false,
-          excludeDrafts: coerceBool((args as any).excludeDrafts, 'excludeDrafts') ?? false,
-        });
-        // The exclusion note rides after the JSON on both raw and simplified, so the JSON
-        // block stays parseable.
-        const body = raw ? formatRawQueryResult(result) : formatEmailQueryResult(result, { fields });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: body + buildExclusionNote(result.exclusion),
-            },
-          ],
-        };
-      }
+      case 'list_emails':
+        return { content: await listEmailsTool(args, clampLimit((args as any).limit, 20, 100), client) };
 
       case 'get_email': {
         const { emailId, stripQuoted } = args as any;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
-        // Same coercion as list_emails. Here `!!` on raw:"false" would also make
+        // Same coercion as listEmailsTool. Here `!!` on raw:"false" would also make
         // assertStripQuotedNotRaw reject a legitimate stripQuoted read.
         const raw = coerceBool((args as any).raw, 'raw') ?? false;
         const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
@@ -2230,7 +2198,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_identities': {
-        // Same coercion as list_emails - see there for why `!!` was wrong.
+        // Same coercion as listEmailsTool - see there for why `!!` was wrong.
         const raw = coerceBool((args as any).raw, 'raw') ?? false;
         const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
         const client = initializeClient();
@@ -2391,7 +2359,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
         }
-        // Same coercion as list_emails.
+        // Same coercion as listEmailsTool.
         const raw = coerceBool((args as any).raw, 'raw') ?? false;
         const client = initializeClient();
         const result = await client.getEmailAttachments(emailId);
@@ -2436,42 +2404,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
-      case 'search_emails': {
-        const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before, limit } = args as any;
-        // Same coercion as list_emails.
-        const ascending = coerceBool((args as any).ascending, 'ascending') ?? false;
-        const raw = coerceBool((args as any).raw, 'raw') ?? false;
-        // Validated before the query so a typo'd field name costs no round trip.
-        const fields = parseEmailFields((args as any).fields, { raw });
-        // Same reason: an unusable paging offset is rejected before the query runs.
-        const position = coercePosition((args as any).position, { ascendingHint: true });
-        // STRICT: dropping an uncoercible scope array would silently widen the query.
-        const requiredMailboxes = coerceStringArrayStrict((args as any).requiredMailboxes, 'requiredMailboxes');
-        const excludeMailboxes = coerceStringArrayStrict((args as any).excludeMailboxes, 'excludeMailboxes');
-        const client = initializeClient();
-        const validLimit = clampLimit(limit, 20, 100);
-        const result = await client.searchEmails({
-          query, from, to, cc, bcc, subject,
-          hasAttachment: coerceBool(hasAttachment, 'hasAttachment'),
-          isUnread: coerceBool(isUnread, 'isUnread'),
-          isPinned: coerceBool(isPinned, 'isPinned'),
-          mailbox, requiredMailboxes, excludeMailboxes,
-          after, before, limit: validLimit, position,
-          ascending,
-          excludeDrafts: coerceBool((args as any).excludeDrafts, 'excludeDrafts') ?? false,
-          includeTrash: coerceBool((args as any).includeTrash, 'includeTrash') ?? false,
-          includeSpam: coerceBool((args as any).includeSpam, 'includeSpam') ?? false,
-        });
-        const body = raw ? formatRawQueryResult(result) : formatEmailQueryResult(result, { fields });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: body + buildExclusionNote(result.exclusion),
-            },
-          ],
-        };
-      }
+      case 'search_emails':
+        return { content: await searchEmailsTool(args, clampLimit((args as any).limit, 20, 100), client) };
 
       case 'get_thread': {
         const { threadId } = args as any;
