@@ -309,8 +309,9 @@ export function buildQuoteBlocks(input: {
   // No block in either format, so no orphan "On … wrote:" over an empty quote.
   if (!quoted) return { images };
 
-  const senderRaw = original?.from?.[0]?.name || original?.from?.[0]?.email || '';
-  const name = normalizeName(senderRaw);
+  // Normalised before the fallback: a whitespace-only name normalises to ''.
+  const sender = original?.from?.[0];
+  const name = normalizeName(sender?.name ?? '') || normalizeName(sender?.email ?? '') || 'unknown';
   const date = formatReplyDate(original?.sentAt ?? original?.receivedAt, timezone);
   const attribution = date ? `On ${date}, ${name} wrote:` : `${name} wrote:`;
 

@@ -131,11 +131,19 @@ describe('buildQuoteBlocks — the attribution line', () => {
     assert.match(textBlockFor({ text: 'orig', name: '  Alex  ' }), /^Alex wrote:\n/);
   });
 
-  it('names no one when the sender has neither a name nor an email', () => {
-    for (const from of [[], undefined]) {
-      const { textBlock } = buildQuoteBlocks({ original: { ...makeOriginal({ text: 'orig' }), from }, htmlShips: false });
-      assert.match(textBlock!, /^\s*wrote:\n> orig$/);
+  it('names the sender "unknown" when the original has no usable sender', () => {
+    const fromCases = [[], undefined, null, [{ name: ' \n ', email: '' }], [{ name: null, email: null }]];
+    for (const from of fromCases) {
+      const original = { ...makeOriginal({ text: 'orig', sentAt: '2026-06-15T03:29:02Z' }), from };
+      const { textBlock } = buildQuoteBlocks({ original, htmlShips: false, timezone: TZ });
+      assert.equal(textBlock, 'On Mon, Jun 15, 2026, at 1:29 PM, unknown wrote:\n> orig', JSON.stringify(from));
+      const undated = buildQuoteBlocks({ original: { ...makeOriginal({ text: 'orig' }), from }, htmlShips: false });
+      assert.equal(undated.textBlock, 'unknown wrote:\n> orig', JSON.stringify(from));
     }
+  });
+
+  it('falls back to the email when the display name is whitespace only', () => {
+    assert.match(textBlockFor({ text: 'orig', name: ' \t ', email: 'jon@example.com' }), /^jon@example\.com wrote:\n/);
   });
 
   it('collapses a newline in the sender display name', () => {
