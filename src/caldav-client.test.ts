@@ -28,6 +28,7 @@ import {
   regenerateVTimezones,
   removeExceptionVEvents,
   insertBeforeEndVEvent,
+  isRecurringSeriesResource,
   validateAttendeeEmail,
   quoteParamValue,
   sortEventsByStart,
@@ -62,6 +63,11 @@ import { toolJson, isUsableTimezone, resolveCalendarInstantMs, InvalidInputError
 import { buildBrokenCollectionNote, formatCalendarEventList, formatQueryResult } from './response-formatters.js';
 import { generateVTimezone } from './vtimezone.js';
 import { foldICalLine } from './ical-fold.js';
+
+// The fold guard's own message names no component: the scan that throws it runs over the
+// whole payload before any VTIMEZONE has been located, so it must stay true of a payload
+// holding no VTIMEZONE at all, not just a VTIMEZONE-nested case.
+const FOLD_GUARD_MESSAGE = /Stored calendar resource has a component boundary hidden behind a folded line\./;
 
 // The mocked DAVClient methods below declare these parameter lists rather than
 // taking no arguments. A `mock.fn(async () => …)` stub records its arguments as an
@@ -3540,6 +3546,21 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     }
   });
 
+  it('rejects a title, description or location made only of characters the writer strips, without writing', async () => {
+    for (const [field, value] of [
+      ['title', '\u202E'],
+      ['description', '\u0085 \u2067'],
+      ['location', '\u202E'],
+    ] as const) {
+      const { client, mockDAVClient } = createMockedPatchClient([{ data: makeRichIcal('evtA@fm'), url: '/cal/evtA.ics' }]);
+      await assert.rejects(
+        () => client.updateCalendarEvent('evtA@fm', { [field]: value }),
+        new RegExp(`${field} cannot be empty`),
+      );
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0, `wrote for ${field}`);
+    }
+  });
+
   it('empty title throws InvalidInputError so the index maps calendar input to InvalidParams (#41 collateral)', async () => {
     // Pins the class, which the message assertion above cannot: it holds the calendar tools to
     // coerce.ts's requireNonEmpty (#41) rather than a local plain-Error copy.
@@ -3566,6 +3587,20 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.ok(updatedData.includes('SUMMARY:Original Title'));
     assert.ok(updatedData.includes('DESCRIPTION:Original description'));
     assert.ok(updatedData.includes('LOCATION:Room A'));
+  });
+
+  // Pins the end-to-end refusal only: the series guard and every write helper on this path refuse
+  // this payload, so each helper's own call is proved by its direct test.
+  it('end to end: a participants-only update of an event whose VALARM marker is split across a fold is refused and writes nothing', async () => {
+    const ical = makeRichIcal('evtFold@fm').replace(/BEGIN:VALARM(\r?\n)/, 'BEGI$1 N:VALARM$1');
+    assert.ok(ical.includes(' N:VALARM'), 'fixture carries the split fold');
+    const { client, mockDAVClient } = createMockedPatchClient([{ data: ical, url: '/cal/evtFold.ics' }]);
+
+    await assert.rejects(
+      () => client.updateCalendarEvent('evtFold@fm', { participants: [{ email: 'carol@example.com' }] }),
+      FOLD_GUARD_MESSAGE,
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
   });
 
   it('clearFields: ["location"] removes the LOCATION line', async () => {
@@ -4118,6 +4153,32 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     await assert.rejects(() => client.deleteCalendarEvent('lone@fm'), isInvalidInput);
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
+
+  it('isRecurringSeriesResource reads a missing or empty payload as not a series', () => {
+    for (const data of [null, undefined, '']) {
+      assert.equal(isRecurringSeriesResource(data), false, `for ${JSON.stringify(data)}`);
+    }
+  });
+
+  for (const [label, lineEnding] of [['CRLF', '\r\n'], ['LF', '\n']] as const) {
+    it(`refuses to delete a resource whose second VEVENT is hidden behind a folded BEGIN: (${label})`, async () => {
+      const hiddenOverride = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VEVENT',
+        'UID:hidden@fm', 'DTSTAMP:20260401T000000Z',
+        'DTSTART:20260406T100000Z', 'DTEND:20260406T110000Z', 'SUMMARY:Looks single',
+        'END:VEVENT',
+        'BEG', ' IN:VEVENT',
+        'UID:hidden@fm', 'RECURRENCE-ID:20260413T100000Z', 'DTSTAMP:20260401T000000Z',
+        'DTSTART:20260413T100000Z', 'DTEND:20260413T110000Z', 'SUMMARY:Looks single',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join(lineEnding);
+      const { client, mockDAVClient } = createMockedRecurringClient(hiddenOverride, '/cal/hidden.ics');
+      await assert.rejects(() => client.deleteCalendarEvent('hidden@fm'), FOLD_GUARD_MESSAGE);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
+    });
+  }
 
   // A series that LISTS its occurrences as RDATEs instead of stating a rule (RFC 5545
   // §3.8.5.2). One block, no RRULE, no RECURRENCE-ID — so an RRULE-only detector read it as an
@@ -4740,6 +4801,14 @@ describe('escapeICalText control-character hardening', () => {
   it('keeps horizontal tabs (legal in iCal TEXT)', () => {
     assert.equal(escapeICalText('a\tb'), 'a\tb');
   });
+
+  it('strips C1 controls and the bidi overrides and isolates', () => {
+    assert.equal(escapeICalText('a\u0085b\u009Fc\u202Ed\u2067e'), 'abcde');
+  });
+
+  it('keeps LRM and RLM', () => {
+    assert.equal(escapeICalText('a\u200Eb\u200Fc'), 'a\u200Eb\u200Fc');
+  });
 });
 
 describe('parseICalDateAsUTC', () => {
@@ -4831,6 +4900,28 @@ describe('replaceICalProperty insert position with VALARM', () => {
       'END:VEVENT',
       'END:VCALENDAR',
     ]);
+  });
+});
+
+describe('VEVENT write helpers refuse a nested BEGIN: split across a fold', () => {
+  // Neither physical line of `BEGI` / ` N:VALARM` reads as a BEGIN:, so a physical-line depth scan
+  // would take END:VALARM for the end of the VEVENT and write inside the alarm.
+  const splitFoldedAlarm = [
+    'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:split-fold@example.com', 'DTSTART:20260320T093000Z',
+    'BEGI', ' N:VALARM', 'ACTION:EMAIL', 'ATTENDEE:mailto:alarm@example.com', 'TRIGGER:-PT15M',
+    'END:VALARM', 'END:VEVENT', 'END:VCALENDAR',
+  ].join('\n');
+
+  it('insertBeforeEndVEvent refuses rather than inserting inside the alarm', () => {
+    assert.throws(() => insertBeforeEndVEvent(splitFoldedAlarm, 'ATTENDEE:mailto:guest@example.com'), FOLD_GUARD_MESSAGE);
+  });
+
+  it('replaceICalProperty refuses rather than inserting an absent property inside the alarm', () => {
+    assert.throws(() => replaceICalProperty(splitFoldedAlarm, 'LOCATION', 'LOCATION:Room 1'), FOLD_GUARD_MESSAGE);
+  });
+
+  it('removeAllICalProperties refuses rather than removing the alarm\'s own ATTENDEE', () => {
+    assert.throws(() => removeAllICalProperties(splitFoldedAlarm, 'ATTENDEE'), FOLD_GUARD_MESSAGE);
   });
 });
 
@@ -5453,6 +5544,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     for (const [label, patch, message] of [
       ['numeric title', { title: 5 }, /title must be a string; received number/],
       ['whitespace-only title', { title: '   ' }, /title cannot be empty; pass the event title/],
+      ['title of only stripped characters', { title: '\u0085 \u2067' }, /title cannot be empty; pass the event title/],
       ['array description', { description: ['x'] }, /description must be a string; received array/],
       ['numeric description', { description: 5 }, /description must be a string; received number/],
       ['object location', { location: {} }, /location must be a string; received object/],
@@ -7903,10 +7995,6 @@ describe('VTIMEZONE embedding (#166)', () => {
       'END:VEVENT', 'END:VTIMEZONE', 'END:VCALENDAR',
     ].join('\r\n');
 
-    // The fold guard's own message names no component: the scan that throws it runs over the
-    // whole payload before any VTIMEZONE has been located, so it must stay true of a payload
-    // holding no VTIMEZONE at all, not just this VTIMEZONE-nested case.
-    const FOLD_GUARD_MESSAGE = /Stored calendar resource has a component boundary hidden behind a folded line\./;
     // The depth-tracked "malformed" path's own message — what the control below asserts, so the
     // fold is the only difference between it and its folded twin above.
     const MALFORMED_VTIMEZONE_MESSAGE = /Stored calendar resource has a malformed VTIMEZONE block\./;

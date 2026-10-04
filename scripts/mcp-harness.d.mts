@@ -16,9 +16,16 @@
 export interface HarnessOptions {
   /**
    * Environment for the child process. Defaults to `process.env`. The harness
-   * passes it through untouched and never reads or prints an individual value.
+   * changes nothing in it but the home (see `inheritHome`) and never reads or
+   * prints an individual value.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Keep the HOME and USERPROFILE that `env` names. Without it the server runs with
+   * both pointed at a fresh empty temp dir, removed when it exits, so it never reads
+   * ~/.fastmail-mcp/.env and never defaults downloads into the real home.
+   */
+  inheritHome?: boolean;
 }
 
 /** A JSON-RPC client bound to one spawned server process. */
