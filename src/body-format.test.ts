@@ -371,15 +371,22 @@ describe('htmlToText — edges of the converter options', () => {
   });
 });
 
-// The converter recurses per element, so a deeply enough nested body overflows the stack and
-// htmlToText falls back to its tag strip.
 describe('htmlToText — the fallback when the converter throws', () => {
+  // A cid map whose lookup throws makes the image formatter, and so the converter, throw.
+  const throwingMap = { get() { throw new Error('lookup failed'); } } as unknown as ReadonlyMap<string, string>;
+  const html =
+    '<img src="cid:a"><p>A&nbsp;B &amp; &lt;C&gt;  D<style>.x { color: red }</style>E' +
+    '<script>var y = 1</script>F G<br>H</p>';
+
   it('strips tags, style and script, decodes the four entities and collapses whitespace', () => {
+    assert.equal(htmlToText(html, 'resolve', throwingMap), 'A B & <C> D E F G H');
+    assert.notEqual(htmlToText(html, 'resolve', new Map()), 'A B & <C> D E F G H');
+  });
+
+  it('returns rather than throwing on a body nested deep enough to overflow the converter', () => {
     const depth = 20_000;
-    const inner =
-      'A&nbsp;B &amp; &lt;C&gt;  D<style>.x { color: red }</style>E<script>var y = 1</script>F G<br>H';
-    const html = '<div>'.repeat(depth) + inner + '</div>'.repeat(depth);
-    assert.equal(htmlToText(html), 'A B & <C> D E F G H');
+    const nested = '<div>'.repeat(depth) + 'x' + '</div>'.repeat(depth);
+    assert.equal(typeof htmlToText(nested), 'string');
   });
 });
 
