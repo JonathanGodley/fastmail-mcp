@@ -1,8 +1,7 @@
 # Cross-cutting conventions and gotchas
 
-Developer-facing conventions and non-obvious traps that span multiple tools or are
-properties of the toolchain. Per-tool behaviour rationale lives in the relevant GitHub
-issue; this file is the shared stuff a developer reading the code needs to know.
+Conventions and non-obvious traps that span several tools or belong to the toolchain.
+Per-tool rationale lives in the tool's GitHub issue.
 
 ## Where to check what the server actually does
 
@@ -10,9 +9,7 @@ Fastmail runs [Cyrus IMAP](https://github.com/cyrusimap/cyrus-imapd) and employs
 maintainers, and the JMAP implementation lives in that tree. So for any question of the
 form "what will the server do with this", Cyrus is not a proxy for the answer, it is the
 answer — and it outranks the RFC wherever the two disagree, because the RFC says what
-should happen and Cyrus says what will. Several decisions recorded in this file and in the
-issue tracker were reached by reading it after reasoning from the spec produced a wrong
-answer.
+should happen and Cyrus says what will.
 
 The files worth knowing:
 
@@ -90,17 +87,15 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   argument was passed to restrict, and the caller reads the wider answer as complete.
   `search_emails`' `requiredMailboxes` / `excludeMailboxes` are the first users.
 
-  `archive_email`'s `emailIds` is the third, and it widens the rule rather than fitting it:
-  the id list does not *narrow* anything, it IS the operand. The cost of a silently-coerced
-  element is the same shape though — `[null]` would reach `Email/get` as the literal id
+  `archive_email`'s `emailIds` widens the rule: the id list does not *narrow* anything, it IS
+  the operand, but a silently-coerced element costs the same: `[null]` would reach `Email/get` as the literal id
   `"null"` and come back in the `notFound` bucket, so a type error would arrive wearing a
   not-found error's clothes and falsify the tool's promise that `notFound` means the server
   did not know the id. So the real dividing line is **whether a dropped or mangled element
   can be mistaken for a legitimate outcome**, and a narrowing argument is the commonest case
   of it rather than the whole of it.
 
-  `list_calendar_events`' `calendarId` is a scalar version of the same rule, and it is worth
-  reading as one: it names the single calendar to read, so a value that is present but
+  `list_calendar_events`' `calendarId` is a scalar version of the same rule: it names the single calendar to read, so a value that is present but
   matches nothing must be an error rather than a wider read. It is trimmed and tested for
   PRESENCE, so `''` and `'   '` both raise the shared not-found error; a bare
   `if (calendarId)` truthiness test would let `''` through to query **every** calendar in the
@@ -135,10 +130,9 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   "not found". Blanks are still dropped on the comma-split branch, where they are a separator
   artefact (`"a,,b"`) rather than something a caller wrote down.
 - `coerceRecipients` — fans `coerceStringArrayStrict` over `to` / `cc` / `bcc` / `replyTo` so
-  no recipient field can reach `.map(parseAddress)` as a bare string (the original
-  `cc:""` / `bcc:""` crash class). **Strict**, on all four fields and both compose tools, for
-  the reason set out under `coerceStringArrayStrict` above. The whole-value spellings are
-  unchanged: `null`/`undefined` read as absent, `""` and `[]` coerce to the empty list (which
+  no recipient field can reach `.map(parseAddress)` as a bare string. **Strict**, on all
+  four fields and both compose tools, for the reason set out under `coerceStringArrayStrict`
+  above. The whole-value spellings: `null`/`undefined` read as absent, `""` and `[]` coerce to the empty list (which
   `draft_email`'s `bcc` documents as "treated as omitted"), and a comma-separated string
   still splits, but only on a comma outside double quotes and `<…>`, so a quoted display
   name may carry one, and a quote or `<` left open refuses the whole value. In either form,
@@ -301,15 +295,11 @@ has. `resolveCalendarTarget` (`src/caldav-client.ts`) is the one function
 one** calendar or raises: zero matches keeps the shared `calendarNotFoundError`, more than one
 raises `ambiguousCalendarNameError`, which names each match with its url.
 
-**Here the READ refuses as well: the same test as the `eventId` split above, applied to a
-different fact.** The `eventId` read is allowed to
-answer because it damages nothing *and* because it is the only tool that can hand back the
-`url` that makes the ambiguity fixable; refusing there would close the escape hatch. Neither
-holds for a calendar. `list_calendars` already hands back every calendar's url unconditionally,
-so the way out exists without this call, and a read that answered would have to answer from
-*both* calendars. That union is a wrong outcome, not a harmless one: "what is on my Work
-calendar" would come back as two calendars' events with nothing in the response saying so, and
-the caller cannot tell it from one calendar's day.
+**Here the READ refuses as well**, because neither reason that lets the `eventId` read answer
+(see **Why they differ**) holds for a calendar. `list_calendars` already hands back every
+calendar's url, so the way out exists without this call. And a read that answered would answer
+from *both* calendars: "what is on my Work calendar" would come back as two calendars' events
+with nothing in the response saying so, and the caller cannot tell it from one calendar's day.
 
 **A url wins alone, and is tried first, which matters most on the WRITE path.** A single
 url-or-name predicate plus a `find` returns whichever calendar comes first in **discovery
@@ -384,7 +374,6 @@ the *mechanism* and not to the rule: it states the same contract in its own word
 worked JSON example of the object shape that neither constant can carry, so replacing it
 with a constant would say less.
 
-
 ### Verifying coercion
 
 The normal MCP tool harness validates the declared `inputSchema` before the call
@@ -408,13 +397,12 @@ principle: **recover a clear intent, but refuse to guess at an unclear one.** A
 stringified `"true"` or a comma-joined list is unambiguous, so coerce it; a misspelled
 `mailbox` for `mailboxId` or a hallucinated `folder` is not, so reject it. A silently
 dropped key is worse than a coerced value — the tool runs with defaults and returns
-confident wrong results (the original `list_emails {mailbox:'drafts'}` listed *every*
+confident wrong results (an unrecognised scope key on `list_emails` would list *every*
 mailbox).
 
 - The allowed-key set is derived from the live `TOOLS` catalog (`TOOL_SCHEMAS` in
   `src/index.ts`), so it never drifts from what clients see via `ListTools`.
-- A per-tool `additionalProperties: true` opts that tool out (none set today;
-  future-proofing).
+- A per-tool `additionalProperties: true` opts that tool out.
 - Like coercion, this is unreachable through the normal harness (a compliant client
   cannot send an undeclared key), so verify it with the same raw-JSON-RPC harness.
 
@@ -468,13 +456,10 @@ saying the delete is irreversible. The general rule: an echo's documented promis
 by what the tool can actually write back, not by what the echo contains.
 
 **Where that bound turns into a refusal.** An echo that cannot rebuild a *field* is a
-documented limit; a destroy aimed at a record the create surface cannot produce **at all** is
-refused outright, because there the echo is worth nothing. That is why `delete_contact` rejects
-every card whose kind is not `individual` (a group, an org, ...): `create_contact` has no `kind`
-and no `members` parameter, so such a card destroyed here is gone for good, `deletedCard`
-included. `update_contact` refuses the same kinds, and both raise it through one shared message. The test is the record KIND, not its fields; the
-general rule and its granularity are in `CONTRIBUTING.md` ("A destroy must not remove what the
-server cannot recreate") because it governs delete paths not yet written.
+documented limit; a destroy aimed at a record KIND the create surface cannot produce at all is
+refused outright, because there the echo is worth nothing. The rule, with `delete_contact` and
+`update_contact` as its example, is in `CONTRIBUTING.md` ("A destroy must not remove what the
+server cannot recreate").
 
 **The override is scoped to the field that was actually ambiguous**, not to the call.
 `allowEntryReplace` is checked per entry array, after that array's own merge has run — so a
@@ -541,9 +526,8 @@ The walk lives in `findMailboxExact` rather than in its throwing wrapper, and th
 is the point: both callers inherit it. The label tools' `mailboxes` arrays (`add_labels` /
 `remove_labels` / `bulk_add_labels` / `bulk_remove_labels`) call the matcher directly, and
 `search_emails`' `requiredMailboxes` / `excludeMailboxes` entries go through `resolveMailbox`,
-so a form accepted on `move_email` but not in one of those arrays would rebuild the split
-vocabulary that #50 closed and that made this fork decline upstream's separate
-`get_mailbox_by_name` tool. `resolveMailbox` is the throwing single-input wrapper over the
+so every form `move_email` accepts is accepted in those arrays too (#50). That shared
+vocabulary is why this fork has no separate `get_mailbox_by_name` tool. `resolveMailbox` is the throwing single-input wrapper over the
 same core, and `list_mailboxes` publishes the same paths it accepts, so a path read out of a
 listing goes straight back into any mailbox parameter.
 
@@ -553,9 +537,9 @@ throws on the spot, while the array resolver collects failures across the whole 
 shapes are resolved, ambiguous (a flat name matched several mailboxes - candidates are given
 as full paths, the form that disambiguates them), a name/path collision (the same text named
 one folder and the path to a *different* mailbox), unwalkable (some mailbox's `parentId` chain
-never reaches a top-level mailbox, so no path can be computed), and a genuine miss. Upstream's
-path lookup silently truncates its bounded parent walk into "not found"; reporting the
-unwalkable tree instead is what lets a caller stop hunting for a typo that was never there.
+never reaches a top-level mailbox, so no path can be computed), and a genuine miss. Reporting
+the unwalkable tree, rather than folding it into "not found", is what lets a caller stop hunting
+for a typo that was never there.
 
 The collision is a *separate* shape from the plain ambiguity for the same reason a typo is:
 the correction differs. A duplicated name is fixed by picking one of the candidate paths, but
@@ -574,12 +558,10 @@ so folding an ambiguity into "not found" would send a caller to re-spell a name 
 already right, costing a retry the split buckets save. When every failure is a plain miss the
 message keeps its original single-bucket wording verbatim.
 
-Sharing it rather than giving the read path its own first-failure loop is deliberate: the
-single-retry property is a property of resolving a **list**, not of what the list is then
-used for, and a read is cheaper to retry than a write, not harder - so there is no version of
-"reads can afford to be worse here" that survives being written down. The caller passes in
-the mailbox list when it already holds one (`searchEmails` fetches it to resolve `mailbox`
-and compute the exclusion), so the sharing costs no extra round trip.
+Sharing it with the read path is deliberate: the single-retry property belongs to resolving a
+**list**, whatever the list is then used for. The caller passes in the mailbox list when it
+already holds one (`searchEmails` fetches it to resolve `mailbox` and compute the exclusion), so
+the sharing costs no extra round trip.
 
 The `path` a mailbox is listed under is computed by walking its `parentId` chain up to a
 top-level mailbox, bounded so a corrupt chain terminates. A mailbox whose chain does not
@@ -647,13 +629,14 @@ messages that were written.
 - the server did not report a readable current filing for some message in the batch, which is the
   state a removal destroys a message from.
 
+The third is a per-message condition that aborts the whole batch, the opposite of `archive_email`,
+which reports an unreadable filing as that message's `failed` entry and writes the rest. The label
+tools abort only because they have no per-message report (`applyLabelRemoval`, `src/jmap-client.ts`).
+
 There is no refusal, and no backstop, for a removal that empties a message *and* takes Archive
 away with it: that cannot happen once Archive can never be named as a label. For the same reason
 the patch's null-then-true ordering, which lets a rescue win a key collision with a removal, is
 not needed here: removed ids and kept ids cannot overlap.
-
-One of the three is a per-message condition aborting a whole batch, which is the opposite of the split
-`archive_email` draws.
 
 The two forms lose different races, and that is what decides it. Whole-value strips a mailbox added
 between our read and our write; the patch form resurrects one removed in that window. For a move,
@@ -765,8 +748,7 @@ Left as-is deliberately: the only way to suppress it is to match the caller's ex
 against the role's *name*, which is exactly the substring/name inference the exact-role rule
 above exists to forbid (a "Junk mail rules" folder must never be read as the junk role), and
 here it would be inference used to **silence** a fail-loud signal — the worse direction to be
-wrong in. The cost of keeping it is one redundant "re-run to be sure" in a rare account
-shape; the cost of suppressing it is a missing warning on a fuzzy match.
+wrong in.
 
 **What disables the default exclusion is decided in two places, and they must agree**:
 `computeExclusion`'s `hasExplicitScope` input, and the `exclusionIntended` expression each
@@ -851,19 +833,7 @@ Two conditions on that, both consequences of archiving not being a move:
   to the no-Inbox branch and the tool becomes a universal no-op reporting success, or the patch key
   becomes the literal `mailboxIds/undefined`).
 
-### `archive_email` reports per-message failures with no error code at all
-
-`archive_email` takes an array and **never throws on a partial failure**: an unknown id comes back
-as a `notFound` entry inside a successful response, not as `InvalidParams`, because a batch tool
-that threw on one bad id would discard the outcome of every other id in the call.
-
-The cost is that a caller branching on `error.code` to detect a bad id sees none on this tool, and
-has to read the `notFound` bucket instead. The residual is recorded here rather than
-fixed locally because it is not specific to archiving: the same question applies to every tool the
-array-parameter family will cover, including whether a batch containing *only* failures should
-still be success-shaped. Fork issue #120 is where that gets settled.
-
-This rule is **tool-family-agnostic.** Because the calendar tools share the same
+The classification is **tool-family-agnostic.** Because the calendar tools share the same
 `requireNonEmpty` / `validateClearFields` helpers from `src/coerce.ts`, their input
 rejects (`create_calendar_event` / `update_calendar_event`) are `InvalidParams` too — the
 classification is a property of the shared helpers, not of email specifically. The
@@ -970,6 +940,17 @@ groups. A capped group ends in its own `…and N more`; the message additionally
 list is **partial** when a group or the reason count was cut, so a truncated list never reads
 as a complete one.
 
+### `archive_email` reports per-message failures with no error code at all
+
+`archive_email` takes an array and **never throws on a partial failure**: an unknown id comes back
+as a `notFound` entry inside a successful response, not as `InvalidParams`, because a batch tool
+that threw on one bad id would discard the outcome of every other id in the call.
+
+The cost is that a caller branching on `error.code` to detect a bad id sees none on this tool, and
+has to read the `notFound` bucket instead. The question is not specific to archiving: it applies to
+every array-parameter tool, including whether a batch containing *only* failures should still be
+success-shaped, and it is open on #120.
+
 ### The JMAP set-error split
 
 When the server refuses a write, `throwSingleSetError` decides the MCP code from the
@@ -1007,8 +988,7 @@ its message from `describeSetError` alone throws a plain `Error` whatever the ty
 `draft_email` failing on `invalidProperties` would report a server bug where `create_contact`
 failing the same way reports a caller-fixable error.
 
-The messages are identical on both sides of the split — only the code differs — so a client
-that reads `error.message` sees no change.
+The messages are identical on both sides of the split; only the code differs.
 
 ## Bounding calendar text
 
@@ -1046,8 +1026,8 @@ which attach `_mailboxNames`, `_mailboxRoles`, and `_unresolvedMailboxIds` non-e
 and ride along the email object through every read path — with **zero signature changes**
 to `simplifyEmail` / `formatEmailQueryResult`, keeping the formatter pure and testable.
 `attachMailboxInfo` is **never-silent but non-throwing**: an id that can't be resolved to a
-name is surfaced as a raw id in `_unresolvedMailboxIds` rather than dropped (the #53 fix);
-see its in-code comment for why it neither throws nor omits. The convention for the next
+name is surfaced as a raw id in `_unresolvedMailboxIds` rather than dropped (#53);
+its in-code comment says why it neither throws nor omits. The convention for the next
 computed field: resolve in the client layer, attach non-enumerably under a
 leading-underscore name, and read it in the simplifier via `addIf` (so it is omitted when
 absent). Do not thread it through function signatures, and do not make it enumerable — it
@@ -1102,8 +1082,8 @@ call — a 66-message sweep measured 84KB (~47% RFC threading plumbing, ~23% pre
 past the same wall (#79, #69). `limit` is not a substitute: per-message size varies by
 more than an order of magnitude, so no limit value is both safe and useful.
 
-Four properties define the convention, and a fifth tool adding `fields` should keep all of
-them:
+Four properties define the convention, and any further tool adding `fields` should keep all
+of them:
 
 - **One seam, post-simplification.** `parseEmailFields` / `projectEmail`
   (`src/field-projection.ts`) run on the *simplified* object, so `raw: true` stays pure
@@ -1160,6 +1140,12 @@ Every JSON payload this server returns is serialised **compact**, through one of
   descriptions, mailbox names). See its own comment for why redaction has to run per value
   rather than over the finished document.
 
+The reason is that indentation is bytes the caller pays for and nothing parses. Every payload
+here is machine-read — an MCP client parses it, or a model reads it as data — and neither
+needs the whitespace. It also scales with the number of JSON *tokens* rather than with the
+content, so it costs most on exactly the payloads that are already the largest. Compacting
+removes no field and alters no value (#40).
+
 **Neither takes an indent argument**, so the seams cannot pretty-print even by accident, and
 TypeScript rejects a second argument to either. The way back to indented output is a handler
 reaching past them for its own `JSON.stringify`, so the drift guard in
@@ -1175,7 +1161,7 @@ reaching past them for its own `JSON.stringify`, so the drift guard in
   shipped file (with a plain dot or an optional one) must either go through a seam or be one of
   the enumerated non-payload uses, with its exact count pinned; referencing `JSON.stringify`
   without calling it is reported too, since an alias would be invoked out of the scan's sight.
-  This half is not about bytes either. What it buys is that serialisation stays in **one place**:
+  This half is not about bytes. What it buys is that serialisation stays in **one place**:
   because neither seam takes an indent, keeping every payload on them makes "no payload can be
   pretty-printed" a property of two function signatures rather than of a text scan that has to
   keep finding every call site forever.
@@ -1188,18 +1174,10 @@ redaction. `redactedJson` is the only serialiser that redacts, and it has one ca
 is redacted centrally in `index.ts`'s CallTool catch, which is where a bearer token in a server
 error description is caught.
 
-The reason is that indentation is bytes the caller pays for and nothing parses. Every payload
-here is machine-read — an MCP client parses it, or a model reads it as data — and neither
-needs the whitespace. It also scales with the number of JSON *tokens* rather than with the
-content, so it costs most on exactly the payloads that are already the largest. Compacting
-removes no field and alters no value (#40).
-
 **A payload inside a prose frame is still a payload.** A list result is a summary line, a
 newline, then the JSON array; the bulk-operations diagnostic wraps its JSON in a heading and a
 follow-up instruction. In both, the prose stays prose and only the JSON is compacted.
 
-The rule is about **payloads**, not about every `JSON.stringify` in the tree - which is why the
-in-`src/` exceptions are enumerated in the test rather than left to each reader's judgement.
 Two things outside `src/` stay indented on purpose, because their output is not a tool result:
 `scripts/dump-official-surface.mjs` writes a checked-in JSON document, where indentation is
 what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a human
@@ -1257,18 +1235,7 @@ agent acts on.
 **The second echo helper: `echoCallerText`.** The date, timezone and calendar rejections echo
 through `echoCallerText` rather than `describeUntrusted`, because they need a *per-message*
 bound (a calendar URL offered back as a working `calendarId` cannot be cut at 64 code points)
-and the value they quote must be the trimmed one the coercion actually judged.
-
-**The path spelling: `echoPath`.** A filesystem path needs both halves — the redaction
-`describeUntrusted` runs, and a bound wider than its 64 code points — so `echoPath` is
-`redactBearerTokens` then `echoCallerText` at `PATH_ECHO_LIMIT`. Not a third policy, the same
-two steps in the same order at a bound a path survives: a path refusal names the resolved path
-AND the allowed directory in one sentence, and two paths sharing a long ancestor cut to the
-same prefix at 64 would leave a refusal saying a path is outside a directory it cannot be told
-apart from. `echoPath` is a name rather than the expression repeated at each refusal because a dozen
-inline copies is a set that can disagree with itself (#190). **A new helper goes into the drift guard's `ECHO_HELPERS` the day it is written** —
-that list is the guard's subject, not an exemption list, so leaving a name off it silently
-narrows the scan rather than excusing a site. It carries the
+and the value they quote must be the trimmed one the coercion actually judged. It carries the
 same neutralisation for the same reason: it strips control characters and U+2028/U+2029, and it
 turns a double quote into a single one, so that a value cannot close the `"…"` span at the
 callers that render one. **A caller that quotes therefore quotes with `"…"` and never `'…'`**,
@@ -1287,19 +1254,26 @@ the bound because nothing in a status line or a collection href on this account 
 account's token. A value that could carry one belongs in `describeUntrusted`, which redacts
 before it truncates.
 
+**The path spelling: `echoPath`.** A filesystem path needs both halves — the redaction
+`describeUntrusted` runs, and a bound wider than its 64 code points — so `echoPath` is
+`redactBearerTokens` then `echoCallerText` at `PATH_ECHO_LIMIT`. Not a third policy, the same
+two steps in the same order at a bound a path survives: a path refusal names the resolved path
+AND the allowed directory in one sentence, and two paths sharing a long ancestor cut to the
+same prefix at 64 would leave a refusal saying a path is outside a directory it cannot be told
+apart from. `echoPath` is a name rather than the expression repeated at each refusal because a dozen
+inline copies is a set that can disagree with itself (#190).
+
 **A caller that quotes NOTHING is judged on the whole sentence, not on its own call site.**
-Both helpers have a set of callers that render the value bare, and "bare" is not a synonym for
+`describeUntrusted` and `echoCallerText` both have a set of callers that render the value bare, and "bare" is not a synonym for
 "safe": a value dropped unquoted into a sentence that single-quotes something *else* breaks
 that sentence's quote parity just as surely, and everything after it reads as prose outside any
 span. So the class that is genuinely inert is not "renders it bare" but **"renders into a
 sentence carrying no `'…'` span anywhere in it"** — which is a property of the finished message,
-and has to be re-checked whenever a span is added to one. Both helpers' doc comments state that
-criterion; only `echoCallerText`'s also classifies its bare callers, because there are five of
-them and they are a closed set that was checked one message at a time. `describeUntrusted` and
-`describePart` deliberately keep **no** list: their bare renders run past four files through
-`.map(describeUntrusted)` alone, and a list there would read as a completed audit while being
-wrong. What both comments carry instead is the trigger (**a new `'…'` span in any sentence
-that renders a bare value reopens this**), which is the durable form of the rule either way.
+and has to be re-checked whenever a span is added to one. The doc comments on `echoCallerText`
+and `describePart` state that criterion as its trigger (**a new `'…'` span in any sentence that
+renders a bare value reopens this**), and `describeUntrusted`'s defers to `describePart`'s. None
+of them keeps a list of bare callers: `.map(describeUntrusted)` alone renders bare across more
+than four files, and a list would read as a completed audit while going stale.
 The three refusals `validateDateConsistency` raises show why it matters: each echoes a
 DTSTART/DTEND, and only a side the caller actually supplied is the caller's own validated
 input. A side they left alone is read from the stored VEVENT, where `formatICalDate` hands
@@ -1313,20 +1287,19 @@ as text — **recursively**, so the "anywhere in the sources" the helpers' comme
 it actually scans — drops comments so a doc can quote the wrong spelling in order to warn
 against it, and fails on a single-quoted render of any helper it knows — `echoCallerText`,
 `describeUntrusted`, `describeUntrustedAt`, `describePart`, `echoPath`, `echoRecipients` —
-in any of them. Two assertions sit beside
-it: a floor, so a pattern that silently stops matching cannot make it pass vacuously, and a
+in any of them. **A new helper goes into the drift guard's `ECHO_HELPERS` the day it is
+written**: that list is the guard's subject, not an exemption list, so leaving a name off it
+silently narrows the scan rather than excusing a site. Two assertions sit beside the scan: a floor, so a pattern that silently stops matching cannot make it pass vacuously, and a
 reach pin, because a scan that quietly stopped at the top level would still clear that floor.
 What it does NOT cover is the whole-sentence half above: a value described into a local and
 quoted on another line, or rendered bare into a sentence that single-quotes something else,
 both read as clean to it. That half is a reading, which is why the criterion is written into
 both helpers' doc comments rather than left to the guard.
 
-**Nor can it see a value that reached the message through no helper at all**, which is the
-wider hole.
-
-**State this one by what the helper DOES, not by how the value is quoted.** Quoting answers
-exactly one of the three: whether a value can close the span around it. The other two — scrubbing
-control characters and U+2028/U+2029, and bounding the length — are things only the helper
+**Nor can the guard see a value that reached the message through no helper at all**, which is
+the wider hole, and it turns on what the helper DOES, not on how the value is quoted. A helper
+does three things, and quoting answers exactly one of them: whether a value can close the span
+around it. The other two — scrubbing control characters and U+2028/U+2029, and bounding the length — are things only the helper
 does, and **a value that reaches a message through no helper loses both of them however it is
 quoted, and whether or not it is quoted at all**. So an unquoted unhelped render is not the
 inert case the whole-sentence criterion above describes; that criterion is about span parity
@@ -1394,8 +1367,8 @@ placement decides everything else about them. They live in the summary line buil
 `formatQuerySummary` (`src/response-formatters.ts`), which both the simplified and the
 raw path render, so the two cannot drift — and, like the Trash/Spam exclusion note,
 they are never projected away by `fields` (see the out-of-band rule above). The raw
-path is not a pure JMAP passthrough here: it already carried a summary line, so the
-signals belong on it too; a `raw` caller additionally has the JMAP response's own
+path is not a pure JMAP passthrough here: it carries the summary line too, so the
+signals ride on it; a `raw` caller additionally has the JMAP response's own
 `total`/`position` if it re-queries.
 
 - **`total` is always stated.** A bare `20 results.` on a page that happens to fill reads
@@ -1456,7 +1429,7 @@ re-reads every calendar and slices the sorted set at `position`, so `sortEventsB
 breaks ties between rows sharing an instant on fixed keys, and an unchanged calendar is cut
 at the same place on every read. The count is load-bearing here rather than cosmetic: recurrence expansion
 turns one fortnightly series across a quarter into seven rows, so the cap is reached far
-sooner than it was when a series counted once, and a caller reading a capped page as the
+sooner than the number of series suggests, and a caller reading a capped page as the
 whole answer is exactly the false negative this section exists to prevent (#64, #100).
 
 Its sibling failure is disclosed by refusing to answer at all. A server failure in calendar
@@ -1467,8 +1440,12 @@ calendars there is nothing that could have matched.
 
 ## `hasAttachment` is a server heuristic — passed through by design
 
-`hasAttachment` in simplified output is the server's value, untouched. This is a
-deliberate decision (#59), not an oversight; do not "fix" it by deriving our own boolean
+`hasAttachment` in simplified output is the server's value, never one derived here, and like
+the other flags it is omitted when false. It appears only on a read that did not fetch the
+parts: list and search results, and a default `get_thread`. A read that fetched `attachments`
+(`get_email`, `get_thread` with `includeBodies`) omits it, because the listing beside it is
+authoritative (`simplifyEmail`, `src/email-formatter.ts`). Passing the server's value through
+is a deliberate decision (#59), not an oversight; do not "fix" it by deriving our own boolean
 from the `attachments` list.
 
 **What the server actually does.** RFC 8621 leaves `hasAttachment` to server discretion
@@ -1490,13 +1467,8 @@ question "is this part content or decoration?" (`jmap_email_hasattachment` in Cy
 considered and declined: it would flag every corporate reply carrying an `image001.png`
 signature logo as `hasAttachment: true` — amplifying exactly the decoration noise the
 Cyrus heuristic is built to filter, and burying the signal (#59: two signature logos read
-as attachments). No vendor does better: MS Graph excludes
-inline-only by design (a documented complaint generator), Gmail and Thunderbird have
-their own long-standing inline-image gray zones. There is no industry-standard answer;
-Fastmail's dimension heuristic is the most thoughtful of the lot, and passthrough also
-keeps the field consistent with the server-side `hasAttachment` **search filter** (RFC
-8621 §4.4.1 defines the filter as a direct comparison against this property) and with
-what Fastmail's own UI shows.
+as attachments). Passthrough also keeps the field consistent with Fastmail's own UI and
+with the server-side `hasAttachment` search filter (below).
 
 **The residual accepted:** the value can change if Fastmail evolves the heuristic, and a
 sub-256px image that IS content (a small but meaningful figure) reads as false. Both are
@@ -1505,9 +1477,9 @@ body to read regardless) and `get_email`/`get_email_attachments` for ground trut
 
 **Ground truth includes embedded images, and the divergence is expected.** The part
 listing is the union of the JMAP `attachments` array and the media parts routed into the
-body lists, so a message reporting `hasAttachment: false` can list an inline logo. That
-is the two fields answering different questions, not a bug — do NOT "reconcile" them by
-deriving the flag from the listing, which is precisely the declined derivation above.
+body lists, so a message whose `hasAttachment` is false (absent from a simplified list
+result) can still list an inline logo when read with `get_email`. That is the two fields
+answering different questions, not a bug — do NOT "reconcile" them by deriving the flag from the listing, which is precisely the declined derivation above.
 The consequence worth stating in consumer docs (and stated in the tool descriptions) is
 that the **search filter** inherits the heuristic: RFC 8621 §4.4.1 defines
 `hasAttachment` as a direct comparison against this property, so `hasAttachment: true`
@@ -1684,8 +1656,6 @@ Message-ID, interoperable, set by other clients too) and **which stored copy of 
 
 Platform facts behind the design (live-probed 2026-08-14 against Fastmail):
 
-- **Fastmail's own reply marks the exact instance**, not every copy of the Message-ID —
-  the behaviour the exact-instance header replicates.
 - **A Fastmail-UI reply draft records nothing richer than `In-Reply-To`/`References`**,
   plus a private `X-PersonalityId` (an internal sending-identity id). There is no
   platform-provided exact-instance record to reuse, so this server writes its own.
@@ -1884,8 +1854,9 @@ Second, **a floating timed value that has been through expansion.** The server r
 `Z` and destroys the floating marker, so nothing on this side can tell it apart from a genuine
 UTC instant, let alone relocate it to the caller's clock. It is judged on UTC and can land in
 the wrong day for an account far from UTC. That residual is DOCUMENTED rather than fixed —
-there is no information left to fix it with — and #157's write-side changes stop this server
-creating new floating values.
+there is no information left to fix it with. `create_calendar_event` never writes a floating
+value, and `update_calendar_event` writes one only on an event whose stored `DTSTART` is already
+floating (#157).
 
 **A third row is lost before this filter ever sees it, and it is not one of those two.** For a
 resource whose recurrence is stated only as `RDATE` — no `RRULE` — Fastmail's `time-range`
@@ -1923,9 +1894,9 @@ day" below.
 
 ### Writing a zone: `timeZone`, and why create and update disagree on the default
 
-The read half above restored the NAME on the way out; `timeZone` on `create_calendar_event`
-and `update_calendar_event` ([#157](https://github.com/JonathanGodley/fastmail-mcp/issues/157))
-is its write-side counterpart, and it keeps to the same rule: this server never puts an offset
+`timeZone` on `create_calendar_event` and `update_calendar_event`
+([#157](https://github.com/JonathanGodley/fastmail-mcp/issues/157)) is the read path's
+write-side counterpart, and keeps to the same rule: this server never puts an offset
 in a calendar value and never asks a caller to compute one. `timeZone` only ever qualifies a
 **designator-less** `start`/`end` — a value already carrying `Z` or a numeric offset names its
 own instant and `timeZone` would be redundant at best and contradictory at worst, so it is
@@ -2036,8 +2007,7 @@ error text says "applied because you named none" for a `'default'` source instea
   `end` elsewhere, and updating `end` alone with the stored `start` elsewhere) — writing only
   one side into the caller's zone while the other stays wherever it was stored would silently
   strand the pair across two zones the caller never asked to create. The comparison uses
-  `zoneNamesEqual` (case- and separator-normalising, the same helper the read-half's
-  provenance/comparison machinery already uses — `Australia/Sydney` and `australia/sydney` are
+  `zoneNamesEqual` (case- and separator-normalising: `Australia/Sydney` and `australia/sydney` are
   the same zone here), so this rule is never tripped by a spelling difference alone.
   `validateDateConsistency`'s zoned/zoned branch reads `zoneNamesEqual` too, so two spellings
   of one zone are ordered as one zone rather than as a cross-zone pair.
@@ -2069,9 +2039,8 @@ zone }` / `{ kind: 'utc' }` / `{ kind: 'floating' }` / `{ kind: 'allday' }`, pro
 `classifyWrittenLine` reading back the very line just written — rather than the caller having to
 re-derive it from what they sent; `create`'s result
 always names both sides (both are always written), `update`'s names only the side(s) actually
-touched. This closes the same gap a caller hits without it: a designator-less create silently
-landing in the configured zone, or an update silently inheriting a stored zone, would otherwise
-be discoverable only by reading the event back.
+touched. Without it, a designator-less create landing in the configured zone, or an update inheriting a
+stored zone, would be discoverable only by reading the event back.
 
 **The VTIMEZONE residual.** `createCalendarEvent` and `updateCalendarEvent` write
 `DTSTART;TZID=<name>` / `DTEND;TZID=<name>` together with a `VTIMEZONE` component defining every
@@ -2245,7 +2214,7 @@ by `MAX_UTC_OFFSET_MS` (14 hours, the widest UTC offset any IANA zone has used) 
 The reason is Cyrus's UTC-day matching (see the all-day case above); the extra rows the
 widening pulls in are trimmed by the exact re-filter above.
 
-Three consequences worth stating, because each is a place this could go quietly wrong:
+Three consequences:
 
 - **The caller-facing window is never the widened one.** `windowClamp.start`/`end` report the
   bounds the caller's arguments resolved to, and the re-filter judges against those same
@@ -2587,15 +2556,6 @@ latency) is in the README's embedding section.
   'sanitize-html'` (works under the repo's NodeNext / esModuleInterop), not
   `import * as`.
 - **The URL normalisation is reimplemented, not imported.** `launderUrlValue` in
-  `src/inline-images.ts` mirrors what `sanitize-html` does to a URL attribute before its
-  scheme gate runs: strip every character of code 0x20 and below (browsers ignore those
-  inside URLs in more places than is comfortable), then clobber embedded `<!--…-->`
-  comments. That logic lives in `launder`, which reaches this project only as a
-  **transitive dependency** of `sanitize-html` — `package.json` declares `sanitize-html`
-  alone — so importing it directly would take a hard dependency on another package's
-  dependency tree. The mirror can therefore drift when either package updates. The
-  tripwire is the obfuscated-spelling property tests, which assert that `c id:x`,
-  `cid&#9;:x` and `c<!--z-->id:x` classify the same way a plain `cid:x` does and that no
-  such spelling survives sanitisation unmapped. Do not weaken them, and do not "simplify"
-  the character class to `\s` — that excludes NUL and the other C0 controls, which are
-  exactly what an obfuscated spelling would use.
+  `src/inline-images.ts` mirrors `launder`, which reaches this project only as a transitive
+  dependency of `sanitize-html`, so the two can drift when either package updates. Its doc
+  comment names the tripwire tests and the character class not to "simplify".
