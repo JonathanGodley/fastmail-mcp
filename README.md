@@ -941,7 +941,7 @@ Omit `participants` on create to write an event without notifying anyone. On upd
 
 - **Two forms, and both are always tried.** An `eventId` may be the event's `id` (its `UID`) or the `url` from a `list_calendar_events` row; the lookup asks every calendar for that UID **and** resolves the url form, then unions what comes back.
 - **The UID is asked of the server**, one CalDAV `calendar-query` per calendar. If the server refuses that query, **the call fails**; there is no fallback to a full scan.
-- **A url is resolved against this account's own calendars, and nothing else.** A url pointing anywhere else is never requested and comes back as not-found. See [Path-confinement security model](docs/security-model.md).
+- **A url is resolved against this account's own calendars, and nothing else.** A url pointing anywhere else is never requested and comes back as not-found. See [Security model](docs/security-model.md).
 - **An empty or whitespace-only `eventId` is rejected** rather than searched for.
 - **A record the server describes incompletely does not resolve.** A resource with no payload, nothing parseable in it, or no entity tag to write against reads as not-found, so this server never changes or destroys a record it could not read whole.
 - **What a resource is NAMED does not affect whether it is visible** ([#191](https://github.com/JonathanGodley/fastmail-mcp/issues/191)): a `.ICS`, extensionless or bare-UUID resource is listed, read, updated and deleted like a `.ics` one.
