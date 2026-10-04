@@ -126,7 +126,8 @@ describe('contacts reads', () => {
     });
     const listed = await client.getContacts(2, 4);
     const searched = await client.searchContacts('ada', 2, 4);
-    const first = await client.getContacts(2);
+    const firstListed = await client.getContacts(2);
+    const firstSearched = await client.searchContacts('ada', 2);
     for (const result of [listed, searched]) {
       assert.equal(result.position, 4);
       assert.ok(
@@ -134,7 +135,20 @@ describe('contacts reads', () => {
         formatContactQueryResult(result).split('\n')[0],
       );
     }
-    assert.equal(first.position, 0);
+    assert.equal(firstListed.position, 0);
+    assert.equal(firstSearched.position, 0);
+  });
+
+  it('keeps the position the server served over the one requested', async () => {
+    // A start past the end can come back as position 0; the summary must report what was served.
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['ContactCard/query', { ids: [], total: 10, position: 0 }, 'query'],
+        ['ContactCard/get', { list: [] }, 'contacts'],
+      ],
+    });
+    assert.equal((await client.getContacts(2, 500)).position, 0);
+    assert.equal((await client.searchContacts('ada', 2, 500)).position, 0);
   });
 
   it('addresses the contacts account from getContactById', async () => {

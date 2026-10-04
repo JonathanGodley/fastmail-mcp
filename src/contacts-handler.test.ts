@@ -424,4 +424,68 @@ describe('searchContactsTool', () => {
     );
     assert.equal(queries.length, 0);
   });
+
+  it('refuses no arguments at all as a missing query, not a TypeError', async () => {
+    const { client, queries } = makeReadClient({ ids: [], total: 0, position: 0 });
+    await assert.rejects(
+      () => searchContactsTool(undefined, 20, client),
+      (err: Error) => err instanceof InvalidInputError && /query is required/.test(err.message),
+    );
+    assert.equal(queries.length, 0);
+  });
 });
+
+describe('listContactsTool', () => {
+  it('lists the first page when called with no arguments at all', async () => {
+    const { client, queries } = makeReadClient({ ids: ['C1'], total: 1, position: 0 });
+    const content = await listContactsTool(undefined, 20, client);
+    assert.equal(content[0].text.split('\n')[0], 'Showing 1 of 1 results.');
+    assert.deepEqual(queries, [{ limit: 20, position: undefined }]);
+  });
+});
+
+for (const { tool, run } of READ_TOOLS) {
+  describe(`${tool} rendering`, () => {
+    const page = { ids: ['C1', 'C2'], total: 10, position: 0 };
+    const cards = page.ids.map((id) => ({ ...CARD, id }));
+    const SUMMARY = 'Showing 2 of 10 results. nextPosition: 2 (pass position:2 for the next page).';
+    const simplified = cards.map((c) => simplifyContact(c, { verbose: false }));
+    const verbose = cards.map((c) => simplifyContact(c, { verbose: true }));
+
+    async function render(args: any): Promise<{ summary: string; body: any }> {
+      const content = await run(args, 20, makeReadClient(page).client);
+      assert.equal(content.length, 1);
+      assert.deepEqual(Object.keys(content[0]).sort(), ['text', 'type']);
+      assert.equal(content[0].type, 'text');
+      const [summary, ...rest] = content[0].text.split('\n');
+      return { summary, body: JSON.parse(rest.join('\n')) };
+    }
+
+    it('renders the simplified cards under the paged summary by default', async () => {
+      assert.deepEqual(await render({}), { summary: SUMMARY, body: simplified });
+    });
+
+    it('renders the cards untransformed under raw, with the same summary', async () => {
+      assert.notDeepEqual(cards, simplified);
+      assert.deepEqual(await render({ raw: true }), { summary: SUMMARY, body: cards });
+      assert.deepEqual(await render({ raw: 'true' }), { summary: SUMMARY, body: cards });
+      assert.deepEqual(await render({ raw: 'false' }), { summary: SUMMARY, body: simplified });
+    });
+
+    it('renders the verbose shape under verbose', async () => {
+      assert.notDeepEqual(verbose, simplified);
+      assert.deepEqual((await render({ verbose: true })).body, verbose);
+      assert.deepEqual((await render({ verbose: 'true' })).body, verbose);
+      assert.deepEqual((await render({ verbose: 'false' })).body, simplified);
+    });
+
+    for (const flag of ['raw', 'verbose']) {
+      it(`names ${flag} when it cannot read it`, async () => {
+        await assert.rejects(
+          () => run({ [flag]: 'garbage' }, 20, makeReadClient(page).client),
+          (err: Error) => err instanceof InvalidInputError && err.message.startsWith(`${flag} must be true or false`),
+        );
+      });
+    }
+  });
+}
