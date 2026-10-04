@@ -2902,6 +2902,12 @@ describe('parseICalDuration from a zoned start', () => {
     assert.equal(parseICalDuration('-P400D', '0001-01-01T10:00:00', SYDNEY), undefined);
   });
 
+  it('gives no end when the wall clock passes year 9999 though the instant does not', () => {
+    // Kiritimati is UTC+14: 08:00 on 31 December 9999 is 18:00Z the day before, and 26 hours
+    // on is 20:00Z on the 31st, which is 10:00 on 1 January 10000 there.
+    assert.equal(parseICalDuration('PT26H', '9999-12-31T08:00:00', 'Pacific/Kiritimati'), undefined);
+  });
+
   it('gives no end, rather than throwing, when the exact part passes the end beyond Date\'s range', () => {
     assert.equal(parseICalDuration('PT2400000000H', '2026-11-01T00:30:00', 'America/New_York'), undefined);
   });
