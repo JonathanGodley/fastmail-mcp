@@ -1374,8 +1374,10 @@ export function unescapeICalText(value: string): string {
  * writer handles CR and LF first), DEL, C1, and the bidi overrides and isolates, which let a
  * title display as different text and a name as a different address. LRM/RLM are deliberately
  * kept: they cannot reorder surrounding text and occur legitimately in Arabic and Hebrew names.
+ * Also lone UTF-16 surrogates, which have no UTF-8 encoding; under the `u` flag the surrogate
+ * range matches only an unpaired one, so an emoji survives whole.
  */
-const UNSAFE_ICAL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g;
+const UNSAFE_ICAL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069\uD800-\uDFFF]/gu;
 
 /**
  * `requireNonEmpty`, judged on what `escapeICalText` will leave: a value made only of stripped
