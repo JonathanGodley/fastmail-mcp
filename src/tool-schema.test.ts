@@ -378,39 +378,81 @@ function collectRequiredParams(): Map<string, Set<string>> {
   return required;
 }
 
+// A source line and where it sits, so a line two cases reach is still one site.
+interface SourceLine {
+  site: string;
+  text: string;
+}
+
 // The CallTool switch in index.ts, split into one body per `case '<tool>':`. A case runs
 // until the next case label, which is exact here because no case in that switch falls
 // through into another (the label-only ones are single-line delegations to a handler
 // module). Comment lines are dropped, so prose quoting a call is never mistaken for one.
 //
-// This attribution is by POSITION, which is its known limit: logic extracted out of the
-// switch into an injected-client handler module — the refactor CONTRIBUTING.md's testing section
-// pushes toward — leaves no line under the case label to find. Every assertion built on
-// this therefore carries a floor on how many sites it matched, so the extraction shows up
-// as a failure here instead of as silent coverage loss.
-function collectCaseBodies(): Map<string, string[]> {
-  const bodies = new Map<string, string[]>();
+// Attribution is by POSITION: logic in a handler module leaves no line under the case
+// label. An assertion that must see such logic reads collectResolvedCaseBodies instead, and
+// every assertion carries a floor on how many sites it matched.
+function collectCaseLines(): Map<string, SourceLine[]> {
+  const bodies = new Map<string, SourceLine[]>();
   let current: string | undefined;
-  for (const line of readLines('index.ts')) {
+  readLines('index.ts').forEach((line, i) => {
     const trimmed = line.trim();
-    if (trimmed.startsWith('//')) continue;
+    if (trimmed.startsWith('//')) return;
     const caseLabel = /^case '([a-z][a-z0-9_]*)':/.exec(trimmed);
     if (caseLabel) {
       current = caseLabel[1];
       if (!bodies.has(current)) bodies.set(current, []);
-      continue;
+      return;
     }
-    if (current) bodies.get(current)!.push(trimmed);
-  }
+    if (current) bodies.get(current)!.push({ site: `src/index.ts:${i + 1}`, text: trimmed });
+  });
   return bodies;
+}
+
+function collectCaseBodies(): Map<string, string[]> {
+  return new Map([...collectCaseLines()].map(([tool, lines]) => [tool, lines.map((l) => l.text)]));
+}
+
+// Each exported top-level function in the handler modules other than index.ts, by name: from
+// its `export function` line to the first `}` in column 0, comment lines dropped.
+function collectHandlerFunctions(): Map<string, SourceLine[]> {
+  const functions = new Map<string, SourceLine[]>();
+  for (const file of HANDLER_FILES) {
+    if (file === 'index.ts') continue;
+    let current: SourceLine[] | undefined;
+    readLines(file).forEach((line, i) => {
+      const start = /^export (?:async )?function ([A-Za-z_][A-Za-z0-9_]*)\(/.exec(line);
+      if (start) functions.set(start[1], (current = []));
+      if (!current) return;
+      if (!line.trimStart().startsWith('//')) current.push({ site: `src/${file}:${i + 1}`, text: line.trim() });
+      if (line === '}') current = undefined;
+    });
+  }
+  return functions;
+}
+
+// Each case body plus the body of every handler-module function the case calls by name, so a
+// tool whose logic lives in a module is checked where that logic is. One level only: a
+// function that calls on into another is not followed.
+function collectResolvedCaseBodies(): Map<string, SourceLine[]> {
+  const functions = collectHandlerFunctions();
+  const resolved = new Map<string, SourceLine[]>();
+  for (const [tool, lines] of collectCaseLines()) {
+    const body = [...lines];
+    for (const [name, fnLines] of functions) {
+      if (lines.some((l) => new RegExp(`\\b${name}\\(`).test(l.text))) body.push(...fnLines);
+    }
+    resolved.set(tool, body);
+  }
+  return resolved;
 }
 
 // The tools whose handler appends buildExclusionNote to its response. Read from the source
 // rather than listed here so a tool that starts emitting notes is covered the moment it
 // does.
 function collectNoteEmittingTools(): string[] {
-  return [...collectCaseBodies()]
-    .filter(([, body]) => body.some((line) => line.includes('buildExclusionNote(')))
+  return [...collectResolvedCaseBodies()]
+    .filter(([, body]) => body.some((line) => line.text.includes('buildExclusionNote(')))
     .map(([tool]) => tool);
 }
 
@@ -440,23 +482,12 @@ function collectNoteParams(): string[] {
 describe('recovery notes name only parameters the tool has', () => {
   it('declares every parameter the Trash/Spam exclusion note prescribes', () => {
     const emitters = collectNoteEmittingTools();
-    // The floor has TWO jobs, and the second is the less obvious one.
-    //
-    // It stops a scan that has silently stopped matching from passing against an empty
-    // set. And it is the only thing that notices a note emitter this scan can no longer
-    // see: attribution is positional (see collectCaseBodies), so moving a handler into an
-    // injected-client module removes it from `emitters` and the subset assertion below
-    // would then hold vacuously for it. Raise this number with each emitter added; lower it
-    // only for an emitter that is deleted outright (as #92 did), never to make a failure go
-    // away without checking which of the two it is.
-    //
-    // The subset assertion is not carried by the floor: hold `emitters` fixed, delete
-    // includeTrash from one of those tools' schemas, and `missing` is non-empty.
+    // Stops a scan that has silently stopped matching from passing against an empty set. An
+    // emitter the scan has lost is the next test's job.
     assert.ok(
       emitters.length >= 2,
-      `found only ${emitters.length} tools appending buildExclusionNote; either the handler ` +
-        `scan has stopped matching, or an emitter moved out of the CallTool switch and is ` +
-        `no longer being checked`,
+      `found only ${emitters.length} tools appending buildExclusionNote; the handler scan has ` +
+        `probably stopped matching`,
     );
     const noteParams = collectNoteParams();
     assert.ok(
@@ -480,6 +511,28 @@ describe('recovery notes name only parameters the tool has', () => {
       `this tool emits a note prescribing a parameter it does not declare, so following the ` +
         `note is rejected as an unknown parameter: ${missing.join(', ')}. Declare the ` +
         `parameter, or stop the tool emitting the note`,
+    );
+  });
+
+  // A tool that declares includeTrash hides Trash by default, and the note is how it says so.
+  // This is also what notices an emitter the scan has lost: emitters are found in a case body
+  // and the handler-module functions it calls by name (see collectResolvedCaseBodies), so a
+  // note appended in a module missing from HANDLER_FILES, or one call further down, drops out
+  // of `emitters`, and the test above would then hold vacuously for it.
+  it('appends the exclusion note in every tool that declares includeTrash', () => {
+    const emitters = collectNoteEmittingTools();
+    const declaring = [...collectToolParams()].filter(([, declared]) => declared.has('includeTrash')).map(([tool]) => tool);
+    assert.ok(
+      declaring.length >= 2,
+      `found only ${declaring.length} tools declaring includeTrash; the schema scan has probably stopped matching`,
+    );
+    const silent = declaring.filter((tool) => !emitters.includes(tool));
+    assert.deepEqual(
+      silent,
+      [],
+      `these tools declare includeTrash but no buildExclusionNote call was found for them: ` +
+        `${silent.join(', ')}. Either the tool hides Trash without saying so, or its note is ` +
+        `appended where this scan cannot see it`,
     );
   });
 });
@@ -599,47 +652,52 @@ function collectClamps(): Map<string, { fallback: number; max: number }> {
 }
 
 // The limit bound belongs to the handler, not to the JMAP client (#29). getEmails passes
-// `limit` to JMAP exactly as given — it carries no clamp of its own — so every caller must
-// clamp BEFORE calling in, so it is asserted at the call sites.
+// `limit` to JMAP exactly as given, and searchEmails bounds only a numeric one (`"abc" || 20`
+// is still "abc"), so every caller must clamp BEFORE calling in, and it is asserted at the
+// call sites.
 //
 // An unclamped non-numeric limit reaches JMAP as `"limit": null`, which is no bound at all:
 // a whole-mailbox metadata dump. The client-level tests deliberately assert the unclamped
 // passthrough, so they would stay green through exactly this regression.
 describe('the limit bound is owned by the handlers', () => {
-  it('clamps in every handler that calls getEmails', () => {
-    // Every call site, across the files that read tool arguments — not index.ts alone. A
-    // call from a handler module would have no case body to clamp in, so it must show up
-    // as a failure rather than as a site this scan never looked at.
+  it('clamps in every handler that calls getEmails or searchEmails', () => {
+    // Every call site, across the files that read tool arguments, not index.ts alone. A site
+    // no case reaches through collectResolvedCaseBodies has no case to clamp in, so it shows
+    // up as a failure rather than as a site this scan never looked at.
+    const queryCall = /\.(?:getEmails|searchEmails)\(/;
     const callSites: string[] = [];
     for (const file of HANDLER_FILES) {
       readLines(file).forEach((line, i) => {
         if (line.trimStart().startsWith('//')) return;
-        if (/\.getEmails\(/.test(line)) callSites.push(`src/${file}:${i + 1}`);
+        if (queryCall.test(line)) callSites.push(`src/${file}:${i + 1}`);
       });
     }
     assert.ok(
-      callSites.length >= 2,
-      `found only ${callSites.length} getEmails call sites; the scan has probably ` +
-        `stopped matching`,
+      callSites.length >= 3,
+      `found only ${callSites.length} getEmails/searchEmails call sites; the scan has ` +
+        `probably stopped matching`,
     );
 
-    const clamping = new Set(
-      [...collectCaseBodies()]
-        .filter(([, body]) => body.some((l) => l.includes('.getEmails(')))
-        .filter(([tool]) => collectClamps().has(tool))
-        .map(([tool]) => tool),
-    );
-    const clampedSites = [...collectCaseBodies()]
-      .filter(([tool]) => clamping.has(tool))
-      .reduce((n, [, body]) => n + body.filter((l) => l.includes('.getEmails(')).length, 0);
+    // A site is clamped when some case reaches it and every case that reaches it clamps.
+    const clamps = collectClamps();
+    const reachedBy = new Map<string, string[]>();
+    for (const [tool, body] of collectResolvedCaseBodies()) {
+      for (const line of body) {
+        if (queryCall.test(line.text)) reachedBy.set(line.site, [...(reachedBy.get(line.site) ?? []), tool]);
+      }
+    }
+    const unclamped = callSites.filter((site) => {
+      const tools = reachedBy.get(site) ?? [];
+      return tools.length === 0 || tools.some((tool) => !clamps.has(tool));
+    });
 
-    assert.equal(
-      clampedSites,
-      callSites.length,
-      `${callSites.length} call site(s) of getEmails exist (${callSites.join(', ')}) but ` +
-        `only ${clampedSites} sit in a handler that calls clampLimit. The client does not ` +
-        `bound its own limit, so an unclamped call sends "limit": null — no bound at all. ` +
-        `Clamp with clampLimit(value, default, max) in the handler`,
+    assert.deepEqual(
+      unclamped,
+      [],
+      `these getEmails/searchEmails call sites are not reached only from cases that call ` +
+        `clampLimit: ${unclamped.map((site) => `${site} (from ${(reachedBy.get(site) ?? ['no case']).join(', ')})`).join('; ')}. ` +
+        `The client does not fully bound its own limit, so an unclamped call can send ` +
+        `"limit": null, no bound at all. Clamp with clampLimit(value, default, max) in the case`,
     );
   });
 
