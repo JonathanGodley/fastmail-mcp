@@ -1283,14 +1283,30 @@ export function unescapeICalText(value: string): string {
 }
 
 /**
+ * Stripped from every text and parameter value written: controls (HTAB is legal in both; each
+ * writer handles CR and LF first), DEL, C1, and the bidi overrides and isolates, which let a
+ * title display as different text and a name as a different address. LRM/RLM are deliberately
+ * kept: they cannot reorder surrounding text and occur legitimately in Arabic and Hebrew names.
+ */
+const UNSAFE_ICAL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g;
+
+/**
+ * `requireNonEmpty`, judged on what `escapeICalText` will leave: a value made only of stripped
+ * characters survives `trim()` but would be written as an empty property.
+ */
+function requireNonEmptyText(value: unknown, fieldName: string, hint?: string): string {
+  if (typeof value === 'string') requireNonEmpty(value.replace(UNSAFE_ICAL_CHARS, ''), fieldName, hint);
+  return requireNonEmpty(value, fieldName, hint);
+}
+
+/**
  * Escape a text value for use in an iCalendar property (RFC 5545 §3.3.11).
  */
 export function escapeICalText(value: string): string {
   return value
     // A bare CR would otherwise pass through and act as a line terminator downstream.
     .replace(/\r\n?/g, '\n')
-    // HTAB is legal in iCal TEXT; LF is escaped below.
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(UNSAFE_ICAL_CHARS, '')
     .replace(/\\/g, '\\\\')
     .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')
@@ -1469,10 +1485,7 @@ function validateOrganizerUsername(username: string): void {
  */
 export function quoteParamValue(value: string): string {
   let cleaned = value.replace(/[\r\n]+/g, ' ');
-  // Controls (HTAB is legal here), DEL, C1, and the bidi overrides and isolates, which let a
-  // name display as a different address. LRM/RLM are deliberately kept: they cannot reorder
-  // surrounding text and occur legitimately in Arabic and Hebrew names.
-  cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g, '');
+  cleaned = cleaned.replace(UNSAFE_ICAL_CHARS, '');
   cleaned = cleaned.replace(/"/g, "'");
   if (/[,;:]/.test(cleaned) || value.includes('"')) {
     return `"${cleaned}"`;
@@ -3588,7 +3601,7 @@ export class CalDAVCalendarClient {
   }): Promise<CreateCalendarEventResult> {
     // Before discovery, and by update's rules.
     assertTextType('title', event.title);
-    const title = requireNonEmpty(event.title, 'title', 'pass the event title');
+    const title = requireNonEmptyText(event.title, 'title', 'pass the event title');
     assertTextType('description', event.description);
     assertTextType('location', event.location);
 
@@ -3835,12 +3848,12 @@ export class CalDAVCalendarClient {
 
     if (fields.title !== undefined) {
       assertTextType('title', fields.title);
-      const title = requireNonEmpty(fields.title, 'title');
+      const title = requireNonEmptyText(fields.title, 'title');
       data = replaceICalProperty(data, 'SUMMARY', fold(`SUMMARY:${escapeICalText(title)}`));
     }
 
     if (fields.description !== undefined) {
-      const description = requireNonEmpty(fields.description, 'description');
+      const description = requireNonEmptyText(fields.description, 'description');
       data = replaceICalProperty(data, 'DESCRIPTION', fold(`DESCRIPTION:${escapeICalText(description)}`));
     }
 
@@ -3908,7 +3921,7 @@ export class CalDAVCalendarClient {
     }
 
     if (fields.location !== undefined) {
-      const location = requireNonEmpty(fields.location, 'location');
+      const location = requireNonEmptyText(fields.location, 'location');
       data = replaceICalProperty(data, 'LOCATION', fold(`LOCATION:${escapeICalText(location)}`));
     }
 

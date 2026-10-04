@@ -3539,6 +3539,21 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     }
   });
 
+  it('rejects a title, description or location made only of characters the writer strips, without writing', async () => {
+    for (const [field, value] of [
+      ['title', '\u202E'],
+      ['description', '\u0085 \u2067'],
+      ['location', '\u202E'],
+    ] as const) {
+      const { client, mockDAVClient } = createMockedPatchClient([{ data: makeRichIcal('evtA@fm'), url: '/cal/evtA.ics' }]);
+      await assert.rejects(
+        () => client.updateCalendarEvent('evtA@fm', { [field]: value }),
+        new RegExp(`${field} cannot be empty`),
+      );
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0, `wrote for ${field}`);
+    }
+  });
+
   it('empty title throws InvalidInputError so the index maps calendar input to InvalidParams (#41 collateral)', async () => {
     // Pins the class, which the message assertion above cannot: it holds the calendar tools to
     // coerce.ts's requireNonEmpty (#41) rather than a local plain-Error copy.
@@ -4739,6 +4754,14 @@ describe('escapeICalText control-character hardening', () => {
   it('keeps horizontal tabs (legal in iCal TEXT)', () => {
     assert.equal(escapeICalText('a\tb'), 'a\tb');
   });
+
+  it('strips C1 controls and the bidi overrides and isolates', () => {
+    assert.equal(escapeICalText('a\u0085b\u009Fc\u202Ed\u2067e'), 'abcde');
+  });
+
+  it('keeps LRM and RLM', () => {
+    assert.equal(escapeICalText('a\u200Eb\u200Fc'), 'a\u200Eb\u200Fc');
+  });
 });
 
 describe('parseICalDateAsUTC', () => {
@@ -5452,6 +5475,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     for (const [label, patch, message] of [
       ['numeric title', { title: 5 }, /title must be a string; received number/],
       ['whitespace-only title', { title: '   ' }, /title cannot be empty; pass the event title/],
+      ['title of only stripped characters', { title: '\u0085 \u2067' }, /title cannot be empty; pass the event title/],
       ['array description', { description: ['x'] }, /description must be a string; received array/],
       ['numeric description', { description: 5 }, /description must be a string; received number/],
       ['object location', { location: {} }, /location must be a string; received object/],
