@@ -10552,8 +10552,8 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
     ] as any[];
     sortEventsByStart(events, 'Australia/Sydney');
     // Read in the same (Sydney) fallback zone, identical wall-clock digits are simultaneous,
-    // so the pre-existing stable order is preserved rather than either one jumping ahead.
-    assert.deepEqual(events.map(e => e.id), ['windows', 'sydney']);
+    // so the tiebreak orders them: neither has a url, and 'sydney' sorts before 'windows'.
+    assert.deepEqual(events.map(e => e.id), ['sydney', 'windows']);
   });
 
   it('reads a leading-slash TZID the same way the window filter does (#162)', () => {
@@ -10568,8 +10568,51 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
     ] as any[];
     sortEventsByStart(events, 'Australia/Sydney');
     // New York is behind Sydney, so the same wall-clock digits there are a LATER instant.
-    // Falling back to Sydney would make the two simultaneous and leave the input order.
+    // Falling back to Sydney would make the two simultaneous, and the tiebreak would then put
+    // 'newyork' first.
     assert.deepEqual(events.map(e => e.id), ['sydney', 'newyork']);
+  });
+
+  // Each page is a fresh read sliced at `position` (#169), so rows that share an instant must
+  // land in the same order on every read, or one repeats across a page boundary and another
+  // is never shown.
+  it('orders rows sharing an instant the same way whatever order they arrive in', () => {
+    const rows = [
+      // One UID held in two calendars.
+      { id: 'dup@fm', url: '/cal/work/dup.ics', title: 'Dup', start: '2027-03-02T09:00:00Z' },
+      { id: 'dup@fm', url: '/cal/personal/dup.ics', title: 'Dup', start: '2027-03-02T09:00:00Z' },
+      // A series' first occurrence and an override moved onto the same instant: same id, url
+      // and start, told apart only by the override's recurrenceId.
+      { id: 's@fm', url: '/cal/work/s.ics', title: 'S', start: '2027-03-02T09:00:00Z', isRecurring: true },
+      { id: 's@fm', url: '/cal/work/s.ics', title: 'S', start: '2027-03-02T09:00:00Z', isRecurring: true, recurrenceId: '2027-03-05T09:00:00Z' },
+      // The same instant spelled as a Sydney wall clock (AEDT, UTC+11).
+      { id: 'solo@fm', url: '/cal/work/solo.ics', title: 'Solo', start: '2027-03-02T20:00:00' },
+      // The unreadable group ties too.
+      { id: 'bad-b@fm', url: '/cal/work/bad-b.ics', title: 'Untitled' },
+      { id: 'bad-a@fm', url: '/cal/personal/bad-a.ics', title: 'Untitled', start: 'not a date' },
+      // One record's two blocks, told apart only by their raw start.
+      { id: 'bad-c@fm', url: '/cal/work/bad-c.ics', title: 'Untitled', start: 'garbage 2' },
+      { id: 'bad-c@fm', url: '/cal/work/bad-c.ics', title: 'Untitled', start: 'garbage 1' },
+    ];
+    const keyOf = (e: any) => `${e.url}|${e.id}|${e.recurrenceId ?? ''}|${e.start ?? ''}`;
+    const orders: any[][] = [];
+    for (let shift = 0; shift < rows.length; shift++) {
+      const rotated = [...rows.slice(shift), ...rows.slice(0, shift)];
+      orders.push(rotated, [...rotated].reverse());
+    }
+    const seen = orders.map((order) => {
+      const events = order.map(e => ({ ...e })) as any[];
+      sortEventsByStart(events, 'Australia/Sydney');
+      return events.map(keyOf);
+    });
+    for (const order of seen) assert.deepEqual(order, seen[0]);
+    // Unreadable first, as before.
+    assert.deepEqual(seen[0].slice(0, 4).map(k => k.split('|')[1]).sort(), ['bad-a@fm', 'bad-b@fm', 'bad-c@fm', 'bad-c@fm']);
+    // The occurrence the server sent without a recurrenceId comes before the override.
+    assert.ok(
+      seen[0].indexOf('/cal/work/s.ics|s@fm||2027-03-02T09:00:00Z') < seen[0].indexOf('/cal/work/s.ics|s@fm|2027-03-05T09:00:00Z|2027-03-02T09:00:00Z'),
+      seen[0].join('\n'),
+    );
   });
 });
 

@@ -2045,6 +2045,9 @@ export function eventIntersectsWindow(
  * with the window filter (#139, #162).
  *
  * An unreadable or absent start sorts FIRST: last is where `limit` truncates.
+ *
+ * Rows sharing an instant (and the unreadable group) fall to `compareEventTiebreak`, so every
+ * read orders them the same way and a page boundary cuts the same place each time (#169).
  */
 export function sortEventsByStart(events: CalendarEvent[], zone: string | undefined): void {
   const instants = new Map<CalendarEvent, number>();
@@ -2054,12 +2057,30 @@ export function sortEventsByStart(events: CalendarEvent[], zone: string | undefi
   events.sort((a, b) => {
     const aMs = instants.get(a)!;
     const bMs = instants.get(b)!;
-    if (Number.isNaN(aMs) || Number.isNaN(bMs)) {
-      if (Number.isNaN(aMs) && Number.isNaN(bMs)) return 0;
-      return Number.isNaN(aMs) ? -1 : 1;
-    }
-    return aMs - bMs;
+    const aNaN = Number.isNaN(aMs);
+    const bNaN = Number.isNaN(bMs);
+    if (aNaN !== bNaN) return aNaN ? -1 : 1;
+    if (!aNaN && aMs !== bMs) return aMs - bMs;
+    return compareEventTiebreak(a, b);
   });
+}
+
+// `url` separates one UID held in two calendars; `recurrenceId` (absent first) an override
+// from the occurrence it shares an instant with; the raw `start` two spellings of one instant
+// and the unreadable group. Code-unit comparison, so the order does not depend on the host's
+// locale. Rows equal on all four stay in arrival order.
+const EVENT_TIEBREAK_KEYS = ['url', 'id', 'recurrenceId', 'start'] as const;
+
+function compareEventTiebreak(a: CalendarEvent, b: CalendarEvent): number {
+  for (const key of EVENT_TIEBREAK_KEYS) {
+    const x = a[key];
+    const y = b[key];
+    if (x === y) continue;
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    return x < y ? -1 : 1;
+  }
+  return 0;
 }
 
 /**
