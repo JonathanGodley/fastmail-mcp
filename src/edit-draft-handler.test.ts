@@ -5,6 +5,7 @@ import { assertDraftEditValues } from './jmap-client.js';
 import type { EditDraftClient } from './edit-draft-handler.js';
 import { InvalidInputError, PathAccessError } from './coerce.js';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
+import { REJECT_BODY_EDITS_WITH_BODY } from './body-edits.js';
 
 const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
 
@@ -174,6 +175,50 @@ describe('editDraft — coercion and delegation', () => {
       assert.ok(calls.upload);
       assert.ok(calls.update);
     }
+  });
+
+  it('coerces bodyEdits and passes them to updateDraft, strings untouched', async () => {
+    const { client, calls } = spyClient();
+    await editDraft(
+      { emailId: 'd1', bodyEdits: '[{"find":" Friday ","replace":""}]', bodyHash: 'bh1-deadbeef' },
+      client, undefined, false,
+    );
+    assert.deepEqual(calls.update.updates.bodyEdits, [{ find: ' Friday ', replace: '' }]);
+  });
+
+  it('refuses a malformed bodyEdits before the client is touched', async () => {
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      () => editDraft({ emailId: 'd1', bodyEdits: [{ find: 'a', with: 'b' }], attachments: [{ path: 'a.pdf' }] }, client, '/attach/root', false),
+      (e: unknown) => e instanceof McpError && /bodyEdits\[0\] has unknown key\(s\): with/.test((e as Error).message),
+    );
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.update, undefined);
+  });
+
+  it('refuses bodyEdits with no bodyHash before any attachment is uploaded', async () => {
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      () => editDraft(
+        { emailId: 'd1', bodyEdits: [{ find: 'a', replace: 'b' }], attachments: [{ path: 'a.pdf' }] },
+        client, '/attach/root', false,
+      ),
+      (e: unknown) => e instanceof InvalidInputError && /needs bodyHash/.test((e as Error).message),
+    );
+    assert.equal(calls.upload, undefined);
+    assert.equal(calls.update, undefined);
+  });
+
+  it('refuses bodyEdits beside a whole body before any attachment is uploaded', async () => {
+    const { client, calls } = spyClient();
+    await assert.rejects(
+      () => editDraft(
+        { emailId: 'd1', bodyEdits: [{ find: 'a', replace: 'b' }], htmlBody: '<p>x</p>', bodyHash: 'bh1-deadbeef', attachments: [{ path: 'a.pdf' }] },
+        client, '/attach/root', false,
+      ),
+      (e: unknown) => e instanceof InvalidInputError && e.message === REJECT_BODY_EDITS_WITH_BODY,
+    );
+    assert.equal(calls.upload, undefined);
   });
 
   it('requires an emailId', async () => {

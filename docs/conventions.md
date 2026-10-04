@@ -186,6 +186,12 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   `participants`, a blank string reads as the empty list rather than omitted: `[]` is
   already refused on these arrays, so the blank string meets that refusal instead of passing
   as a silent no-op.
+- `coerceBodyEdits`: `edit_draft`'s
+  `bodyEdits` to `{ find, replace }[]`, on `coerceAttachments`' rules: the whole value or any
+  element may arrive JSON-encoded, a blank string reads as omitted, and an unknown key, a
+  bare-string element or a non-string `find`/`replace` is refused by index. `find` and
+  `replace` are **never trimmed**, since whitespace is part of an exact match, and `[]` is
+  refused rather than read as a no-op body edit.
 - `requireNonEmpty` / `validateClearFields` — the loud-reject + `clearFields` machinery
   shared by `update_calendar_event`, `edit_draft` and `update_contact`.
 
@@ -368,8 +374,8 @@ its lenient shape: `type: ['array', 'string']` with `items` kept (JSON Schema ap
 `items` to array instances only, so the union is well-formed). The accepted string forms
 are NOT one set, which is why `src/index.ts` carries two description constants rather than
 one: `coerceStringArray` takes a single bare value, a comma-separated list or a
-JSON-encoded array, while the OBJECT-item lists behind `coerceAttachments` and the contact
-entry coercers read a whole-value string **only** as a JSON-encoded array and reject
+JSON-encoded array, while the OBJECT-item lists behind `coerceAttachments`, `coerceBodyEdits`
+and the contact entry coercers read a whole-value string **only** as a JSON-encoded array and reject
 anything else naming the parameter — promising those a comma-separated form would
 advertise a shape that errors, so the object-list constant denies the comma-joined form in
 so many words rather than leaving a caller to infer it from an omission. Every list
@@ -887,10 +893,8 @@ might work, and it never will: the event repeats, and it will still repeat next 
 `assertICalTextLimits` (`src/ical-limits.ts`) follows the same rule from the other end of
 the call chain: it runs in the `create_calendar_event` / `update_calendar_event` handlers,
 before anything measures or serializes the values, and throws `InvalidInputError` naming
-the field, its size and the limit. The classification matters more than usual there. The
-whole point of the bound is that the work it refuses is expensive (see **Bounding a
-quadratic serializer** below), so an `InternalError` would not merely be inaccurate, it
-would invite the bare retry that repeats the cost.
+the field, its size and the limit (see **Bounding calendar text** below). A shorter value
+succeeds and a bare retry never will, so an `InternalError` would invite the wrong retry.
 
 **`download_attachment` follows the rule with no exception.** A bad `emailId`/`attachmentId`
 is caller-fixable input there exactly as it is on `get_email`/`get_thread`, whichever way it
@@ -1006,32 +1010,23 @@ failing the same way reports a caller-fixable error.
 The messages are identical on both sides of the split — only the code differs — so a client
 that reads `error.message` sees no change.
 
-## Bounding a quadratic serializer
+## Bounding calendar text
 
-`foldICalLine` (`src/ical-fold.ts`) folds an iCalendar content line to 75 octets per
-RFC 5545 §3.1 by repeatedly re-slicing the remainder of the line, allocating a fresh copy
-of the tail each time. Its cost therefore grows with the square of the field length:
-roughly 135ms to fold a 200KB value, and out of memory somewhere near 800KB. Every
-caller-supplied calendar text field reaches it, on both the create and the update path
-(SUMMARY, DESCRIPTION, LOCATION, and each ORGANIZER/ATTENDEE line, whose `CN=` parameter
-carries a participant name). One oversized value would stall or kill the process for every
-other request sharing it.
-
-The guard lives in `src/ical-limits.ts`, ahead of the handlers' own checks, and takes
-three bounds rather than one: a per-field cap (64KB), a participant-count cap (500), and
-a cap on the combined text of the whole call (256KB). The third is not redundant. A
-per-field cap on its own is defeated by many fields each sitting just under it, which is
-trivial to arrange through the participants array. Sizes are measured in UTF-8 bytes, not
-JS characters, because the fold is defined on octets.
+Every caller-supplied calendar text field is written into the event, on both the create
+and the update path (SUMMARY, DESCRIPTION, LOCATION, and each ORGANIZER/ATTENDEE line,
+whose `CN=` parameter carries a participant name). The guard lives in
+`src/ical-limits.ts` (which says why the caps exist), runs ahead of the handlers' own
+checks, and takes three bounds rather than one: a per-field cap (64KB), a
+participant-count cap (500), and a cap on the combined text of the whole call (256KB).
+The third is not redundant. A per-field cap on its own is defeated by many fields each
+sitting just under it, which is trivial to arrange through the participants array.
+Sizes are measured in UTF-8 bytes, not JS characters, because what is sent and stored
+is UTF-8.
 
 It **rejects and never truncates.** Trimming an over-long description would produce an
 event that reads as successfully created while quietly missing content, and the caller
 would have no signal at all. The rejection names the field, its actual size and the
 limit, which is everything needed to fix it in one retry.
-
-The bounds are properties of that serializer, not of iCalendar or of Fastmail. If the
-folding is ever made linear, they are the thing to revisit; until then, removing them
-re-opens a denial of service reachable from ordinary tool input.
 
 ## Surfacing computed fields without leaking into `raw: true`
 
@@ -1526,10 +1521,10 @@ staged differently. Do not "unify" them.
 
 - **A reference in HTML** (`<img src="cid:...">`) is a URL, so per RFC 2392 its value is
   percent-encoded. It must be DECODED FIRST and the decoded key compared against part
-  Content-IDs. `cidKey` (`src/inline-images.ts`) is that key function; the collecting
-  sanitizer pass reports references already in that decoded form, so the compose and edit
-  paths that match body references to parts inherit the staging rather than re-deriving
-  it. `cidKey`'s other production caller is the download path below, as its fallback.
+  Content-IDs. `cidKey` (`src/inline-images.ts`) is that key function; `sanitizeQuoteHtml`
+  reports references already in that decoded form in both modes, so the compose and edit
+  paths (which run it in `collect` mode) and the quote builders (`map` mode) match body
+  references to parts without re-deriving the staging. `cidKey`'s other production caller is the download path below, as its fallback.
 - **`download_attachment`'s `cid:<value>` parameter** is a handle that round-tripped from
   `get_email`'s output, where the `cid` is echoed VERBATIM. It is therefore compared
   LITERALLY first, and only falls back to the same `cidKey` decode when the literal
@@ -2496,11 +2491,12 @@ incidental config:
 
 Embedded (`cid:`) images die in a single sanitising pass: `cid` is not an allowed scheme, so
 the `src` is stripped to empty and `exclusiveFilter` removes the element. Carrying those
-images into the quote (#13) means the same html has to be sanitised twice, in two modes:
+images into the quote (#13) means the same html has to be sanitised twice. The sanitiser has
+two modes:
 
 - **`collect`** reports which references the html makes and rewrites nothing. Its output is
-  byte-for-byte what the sanitiser alone would emit — `cid` is still not admitted — so it is
-  exactly the string a quotability check should read.
+  byte-for-byte what the sanitiser alone would emit — `cid` is still not admitted. The quote
+  builders do not use it: it keeps an `<img>` with a relative src, which `map` drops.
 - **`map`** rewrites each reference that resolved to a part into the Content-ID this draft
   attaches for it, with `allowedSchemesByTag` admitting `cid` **on `<img>` and nowhere
   else** (a per-tag list replaces the global one for that tag, so no other attribute can
@@ -2509,7 +2505,10 @@ images into the quote (#13) means the same html has to be sanitised twice, in tw
 The order is the whole point: minting an identifier commits the call to attaching a part,
 and a part nothing references is a stray file on the finished message. So pass one decides
 whether an html quote ships at all, and pass two runs only on a branch that really ships
-one. A text-only reply mints nothing.
+one. Both passes run `map`. Pass one maps with an empty map: it reports the references, and
+its html is what ships less the images pass two embeds. Pass two maps with the identifiers
+just minted, and runs whenever an html quote ships, even with nothing minted. Pass one's html
+ships itself only when the caller passes no image channel. A text-only reply mints nothing.
 
 `map` mode is **default-deny**: an `<img>` survives only when the transform affirmatively
 emits a `src` — a mapped identifier, or a value whose normalised scheme is http/https.
@@ -2524,18 +2523,20 @@ admitting it would mean trusting the classifier's *negative* answer, which is th
 this design refuses to do. The drop is counted, never silent: `droppedUnsupportedImages` is
 its own counter with its own sentence, kept apart from a `data:` image (content this server
 declines to re-encode) and from an unmatched embedded-image reference (which named a part
-that was not there). It is a **map-mode-only** count, because the collecting pass drops none
-of these — it leaves them to the sanitiser, which passes a relative URL through. That
-asymmetry is precisely why the count exists: the pass that ships the quote loses an image
-the other pass would have kept. An `<img>` with no `src` at all is not counted; there was no
-image to lose.
+that was not there). It is a **map-mode-only** count, because `collect` drops none of these
+— it leaves them to the sanitiser, which passes a relative URL through. The count is
+reported whenever the message ships html and quotes the original, including as text
+because nothing in its html survived. With no quote at all nothing is counted, since
+the note says the rest of the quote was kept. An `<img>` with no `src` at all is not
+counted; there was no image to lose.
 
-Quotability follows from the same pass. An original whose only content is embedded images
-sanitises in `collect` mode to something visually empty (`<div></div>`), so it is judged
-quotable by whether at least one of its references would really embed — resolved to exactly
-one part, that part declaring itself an image and carrying a blob. Testing mere *resolution*
-would open an attribution over a quote showing nothing; testing the sanitised string would
-call an image-only message unquotable.
+Quotability is read from pass one's html, so an image counts only if it would ship. An
+original whose only image has a relative src is therefore not quotable. An original whose
+only content is embedded images sanitises in pass one to something visually empty
+(`<div></div>`), so it is judged quotable by whether at least one of its references would
+really embed — resolved to exactly one part, that part declaring itself an image and
+carrying a blob. Testing mere *resolution* would open an attribution over a quote showing
+nothing; testing the sanitised string would call an image-only message unquotable.
 
 Accepted threat floor (documented in README): `sanitize-html` is a string-to-string
 sanitiser (roughly the bar Gmail / Apple Mail emit) and does not fully eliminate exotic

@@ -1,8 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { composeDraftEmail, sanitizeEmlFilename } from './draft-email-handler.js';
+import { composeDraftEmail, isSettableMessageId, sanitizeEmlFilename } from './draft-email-handler.js';
 import type { DraftEmailClient } from './draft-email-handler.js';
 import { InvalidInputError } from './coerce.js';
+import {
+  CAUSE_SENTENCE, noteAttachmentsExcluded, noteDroppedQuoteImages, noteTokenEmpty,
+} from './inline-notes.js';
 import { EMAIL_BODY_PROPERTIES } from './jmap-client.js';
 import { normalizeBodies } from './body-format.js';
 import { noteComposeSubjectPrefix } from './subject-prefix.js';
@@ -2068,9 +2071,11 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, withId.client);
     assert.equal(withId.calls.draft.sourceEmailId, 'o1');
 
-    const withoutId = plainClient(makeOriginal({ id: undefined }));
-    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, withoutId.client);
-    assert.equal(withoutId.calls.draft.sourceEmailId, undefined);
+    for (const id of [undefined, '']) {
+      const withoutId = plainClient(makeOriginal({ id }));
+      await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, withoutId.client);
+      assert.equal('sourceEmailId' in withoutId.calls.draft, false, `id ${JSON.stringify(id)}`);
+    }
   });
 });
 
@@ -3543,5 +3548,252 @@ describe('draft_email boolean flags', () => {
   it('names the parameter when a boolean flag cannot be read', async () => {
     await assert.rejects(() => composeDraftEmail({ mode: 'forward', asAttachment: 'yes' }, {} as any, undefined, false), /asAttachment must be true or false/);
     await assert.rejects(() => composeDraftEmail({ mode: 'forward', includeOriginalAttachments: 'yes' }, {} as any, undefined, false), /includeOriginalAttachments must be true or false/);
+  });
+});
+
+describe('draft_email — what a refusal tells the caller to do', () => {
+  it('says what it got in place of a mode: nothing, or the value as sent', async () => {
+    const { client } = spyClient();
+    assert.match(await messageFrom(() => compose({ textBody: 'hi' }, client)), /\(got nothing\)\. /);
+    assert.match(
+      await messageFrom(() => compose({ mode: 'Reply', textBody: 'hi' }, client)), /\(got "Reply"\)\. /,
+    );
+  });
+
+  it('names both remedies when a forward places neither {{forward}} nor asAttachment', async () => {
+    const { client } = spyClient();
+    const message = await messageFrom(() => compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], htmlBody: '<p>FYI</p>' }, client,
+    ));
+    assert.match(message, /or pass asAttachment:true to send the original whole as a \.eml\./);
+    assert.match(message, /The minimal spelling is htmlBody: "\{\{forward\}\}"\.$/);
+  });
+
+  it('ends a non-string subject refusal on what omitting it does in this mode', async () => {
+    const { client } = plainClient();
+    const subjectRefusal = (args: any) => messageFrom(() => compose({ ...args, subject: 42 }, client));
+    assert.match(
+      await subjectRefusal({ mode: 'new', textBody: 'x' }),
+      /received number\. Omit it for a subject-less draft\.$/,
+    );
+    assert.match(
+      await subjectRefusal({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }),
+      /received number\. Omit it to inherit "Re: <original subject>"\.$/,
+    );
+    assert.match(
+      await subjectRefusal({ mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], textBody: 'x\n{{forward}}' }),
+      /received number\. Omit it to inherit "Fwd: <original subject>"\.$/,
+    );
+  });
+
+  it('joins two causes when a part was nothing but tokens and both came up empty', async () => {
+    const { client, calls } = plainClient(makeOriginal({ textBody: undefined, htmlBody: undefined, bodyValues: {} }));
+    const message = await messageFrom(() => compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: '{{signature}}{{quote}}' }, client,
+    ));
+    assert.ok(
+      message.includes(`, and ${CAUSE_SENTENCE['no-signature']}; ${CAUSE_SENTENCE['nothing-quotable']}. `),
+      message,
+    );
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('still names a cause when the token expanded but its block displays nothing', async () => {
+    // Non-blank markup that displays nothing: the token expands, so no site carries a cause.
+    const invisible = { ...UNSIGNED_IDENTITY, mayDelete: false, htmlSignature: '<div><br></div>' };
+    const { client, calls } = plainClient(makeOriginal(), { getIdentities: async () => [invisible] });
+    const message = await messageFrom(() => compose(
+      { mode: 'new', to: ['sam@example.com'], htmlBody: '{{signature}}' }, client,
+    ));
+    assert.match(message, /it was nothing but tokens, and the block had no content for this part\. Write prose/);
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('refuses a draft whose body references an image the upload did not return', async () => {
+    // The upload hands back the part without the Content-ID the body displays.
+    const { client, calls } = plainClient(makeOriginal(), {}, [
+      { blobId: 'blob-logo', type: 'image/png', name: 'logo.png', disposition: 'attachment' },
+    ]);
+    const message = await messageFrom(() => compose(
+      {
+        mode: 'new', to: ['a@b.example'], htmlBody: '<p>See:</p><img src="cid:logo">',
+        attachments: [{ path: 'logo.png', cid: 'logo' }],
+      },
+      client, '/attach/root',
+    ));
+    assert.match(message, /references embedded image "logo"/);
+    assert.equal(calls.draft, undefined);
+  });
+
+  it('does not blame the signature for its image when no {{signature}} was placed', async () => {
+    // The <img> sits inside an attribute, where the pre-expansion plan does not see it; the
+    // quote's own double quote closes the attribute, so after expansion it is a real image.
+    const signed = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards <img src="cid:sig"></div>' };
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => [signed] });
+    const message = await messageFrom(() => compose(
+      { mode: 'reply', originalEmailId: 'o1', htmlBody: `<p title="{{quote}} <img src='cid:sig'>">hi</p>` },
+      client,
+    ));
+    assert.match(message, /references embedded image "sig", but no part of the assembled message supplies it/);
+    assert.doesNotMatch(message, /signature/);
+    assert.equal(calls.draft, undefined);
+  });
+});
+
+describe('draft_email — fields a reply or forward reads off an incomplete original', () => {
+  it('threads a reply to an original with no References and no subject', async () => {
+    const { client, calls } = plainClient(makeOriginal({ references: null, subject: null }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.references, ['orig-msg@example.com']);
+    assert.match(calls.draft.subject, /^Re:\s*$/);
+  });
+
+  it('refuses with its own message when the original could not be fetched at all', async () => {
+    const { client, calls } = plainClient(undefined, { getEmailById: async () => undefined });
+    await assert.rejects(
+      () => compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client),
+      /Original email does not have a Message-ID; cannot thread reply/,
+    );
+    await assert.rejects(
+      () => compose({ mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], asAttachment: true }, client),
+      /Original email has no blobId; cannot attach it as \.eml/,
+    );
+    assert.equal(calls.draft, undefined);
+  });
+
+  it("carries two bcc addresses that only upper-case to the same string as two", async () => {
+    // "ß" upper-cases to "SS", so an upper-cased dedupe key would merge these.
+    const { client, calls } = plainClient(selfBccOriginal({
+      bcc: [{ email: 'ss@example.com' }, { email: 'ß@example.com' }],
+    }));
+    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
+    assert.deepEqual(calls.draft.bcc, ['ss@example.com', 'ß@example.com']);
+  });
+});
+
+describe('draft_email — what a {{forward}} carries, part by part', () => {
+  const FORWARD = { mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], htmlBody: '<p>FYI</p>{{forward}}' };
+
+  it('skips an original part with no blobId', async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      attachments: [{ partId: '5', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }],
+    }));
+    await compose(FORWARD, client);
+    assert.equal('attachments' in calls.draft, false);
+  });
+
+  it('writes no name or disposition the original part did not have', async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      attachments: [{ partId: '5', blobId: 'blob-doc', type: 'application/pdf' }],
+    }));
+    await compose(FORWARD, client);
+    assert.deepEqual(calls.draft.attachments, [{ blobId: 'blob-doc', type: 'application/pdf' }]);
+  });
+
+  it('carries a disposition other than inline as it was', async () => {
+    const { client, calls } = plainClient(makeOriginal({
+      attachments: [{ partId: '5', blobId: 'blob-doc', type: 'application/pdf', disposition: 'x-unknown' }],
+    }));
+    await compose(FORWARD, client);
+    assert.equal(calls.draft.attachments[0].disposition, 'x-unknown');
+  });
+
+  it('says nothing about an unreferenced attachment that merely carries a Content-ID', async () => {
+    const { client } = plainClient(makeOriginal({
+      attachments: [{
+        partId: '5', blobId: 'blob-doc', type: 'application/pdf', name: 'a.pdf',
+        disposition: 'attachment', cid: 'file-1',
+      }],
+    }));
+    const r = await compose(FORWARD, client);
+    assert.equal(r.notes, undefined);
+  });
+
+  it('does not call the images a text-form forward carries dropped', async () => {
+    const { client } = spyClient(withInlineImage());
+    const r = await compose(
+      { mode: 'forward', originalEmailId: 'o1', to: ['sam@example.com'], textBody: 'FYI\n{{forward}}' },
+      client,
+    );
+    assert.equal(r.notes!.includes(noteDroppedQuoteImages(1)), false, JSON.stringify(r.notes));
+  });
+
+  it('counts every attachment left behind by includeOriginalAttachments:false', async () => {
+    const { client } = plainClient(makeOriginal({
+      attachments: [
+        { partId: '5', blobId: 'blob-a', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' },
+        { partId: '6', blobId: 'blob-b', type: 'application/pdf', name: 'b.pdf', disposition: 'attachment' },
+      ],
+    }));
+    const r = await compose({ ...FORWARD, includeOriginalAttachments: false }, client);
+    assert.deepEqual(r.notes, [noteAttachmentsExcluded(2, 0, false)]);
+  });
+});
+
+describe('draft_email — the result and notes, at their edges', () => {
+  it('reports no to and no subject on a new draft that has neither', async () => {
+    const { client, calls } = plainClient();
+    const r = await compose({ mode: 'new', to: [], textBody: 'hi' }, client);
+    assert.equal('to' in r, false);
+    assert.equal('subject' in r, false);
+    assert.equal('to' in calls.draft, false);
+  });
+
+  it('signs a body whose only other part is blank, and does not call it unsigned', async () => {
+    const { client, calls } = spyClient();
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: '', htmlBody: '<p>hi</p>{{signature}}' }, client,
+    );
+    assert.match(calls.draft.htmlBody, /Kind regards,/);
+    assert.ok((r.notes ?? []).every((n) => !/has a signature; this body has no/.test(n)), JSON.stringify(r.notes));
+  });
+
+  it('names no address when the identity with the signature has none', async () => {
+    const addressless = { ...SIGNED_IDENTITY, email: '' };
+    const { client } = spyClient(makeOriginal(), { getIdentities: async () => [addressless] });
+    const r = await compose({ mode: 'new', textBody: 'hi' }, client);
+    assert.ok(r.notes!.some((n) => n.startsWith('Identity has a signature; ')), JSON.stringify(r.notes));
+  });
+
+  it('names no part when a dropped quoted image has no filename', async () => {
+    const { name: _unnamed, ...nameless } = inlinePng;
+    const { client } = plainClient(withInlineImage({ attachments: [nameless] }));
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', htmlBody: '<p>hi</p><!-- {{quote}} -->' }, client,
+    );
+    assert.ok(
+      r.notes!.some((n) => n.startsWith('1 image(s) the quoted original displayed were dropped: ')),
+      JSON.stringify(r.notes),
+    );
+  });
+
+  it('reports two empty tokens in one part as two notes and two receipt rows', async () => {
+    const { client } = plainClient(makeOriginal({ textBody: undefined, htmlBody: undefined, bodyValues: {} }));
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'Hi {{signature}} {{quote}}' }, client,
+    );
+    assert.deepEqual(r.tokens!.parts[0].removed, [
+      { token: 'signature', count: 1, cause: 'no-signature' },
+      { token: 'quote', count: 1, cause: 'nothing-quotable' },
+    ]);
+    assert.deepEqual(r.notes!.filter((n) => / was removed: /.test(n)), [
+      noteTokenEmpty('signature', 'textBody', 'no-signature'),
+      noteTokenEmpty('quote', 'textBody', 'nothing-quotable'),
+    ]);
+  });
+});
+
+describe('sanitizeEmlFilename and isSettableMessageId, at their bounds', () => {
+  it('trims before the length cap, so leading spaces do not spend it', () => {
+    assert.equal(sanitizeEmlFilename(' '.repeat(10) + 'y'.repeat(80)), 'y'.repeat(80) + '.eml');
+  });
+
+  it('trims a space the length cap leaves at the end', () => {
+    assert.equal(sanitizeEmlFilename('y'.repeat(79) + ' z'), 'y'.repeat(79) + '.eml');
+  });
+
+  it('accepts a Message-ID of exactly 998 characters and refuses 999', () => {
+    assert.equal(isSettableMessageId('x'.repeat(998)), true);
+    assert.equal(isSettableMessageId('x'.repeat(999)), false);
   });
 });

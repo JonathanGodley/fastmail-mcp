@@ -44,6 +44,12 @@ describe('toLocalIso', () => {
     assert.equal(toLocalIso('2026-07-15T12:00:00Z', 'America/New_York'), '2026-07-15T08:00:00-04:00');
   });
 
+  it('renders an instant whose zone offset has seconds in UTC instead (Monrovia 1920, -00:44:30)', () => {
+    const out = toLocalIso('1920-05-01T00:00:00Z', 'Africa/Monrovia');
+    assert.equal(out, '1920-05-01T00:00:00+00:00');
+    assert.equal(new Date(out).toISOString(), '1920-05-01T00:00:00.000Z');
+  });
+
   it('falls back gracefully on an invalid timezone (never throws)', () => {
     let out: string | undefined;
     assert.doesNotThrow(() => {
@@ -792,6 +798,25 @@ describe('simplifyEmail — forwardedMessageId (#30)', () => {
   it('omits it when the header is absent or null (never an empty field)', () => {
     assert.equal(simplifyEmail({ id: 'e1', subject: 's', from: [] }).forwardedMessageId, undefined);
     assert.equal(simplifyEmail({ id: 'e1', subject: 's', from: [], 'header:X-Forwarded-Message-Id:asMessageIds': null }).forwardedMessageId, undefined);
+  });
+});
+
+describe('simplifyEmail sentAt (#84)', () => {
+  it('renders sentAt in local ISO with the timezone option, right after date', () => {
+    const raw = {
+      id: 'e1', subject: 's', from: [],
+      receivedAt: '2026-03-01T12:00:00Z',
+      sentAt: '2026-03-01T11:58:30Z',
+    };
+    // Brisbane is UTC+10 year-round, so the expected value holds on any host.
+    const result = simplifyEmail(raw, { timezone: 'Australia/Brisbane' });
+    assert.equal(result.sentAt, '2026-03-01T21:58:30+10:00');
+    const keys = Object.keys(result);
+    assert.equal(keys.indexOf('sentAt'), keys.indexOf('date') + 1);
+  });
+  it('omits it when the message has no Date header (sentAt null or absent)', () => {
+    assert.equal('sentAt' in simplifyEmail({ id: 'e1', subject: 's', from: [], sentAt: null }), false);
+    assert.equal('sentAt' in simplifyEmail({ id: 'e1', subject: 's', from: [] }), false);
   });
 });
 

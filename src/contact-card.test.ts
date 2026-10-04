@@ -422,3 +422,97 @@ describe('refusedContactKind', () => {
     }
   });
 });
+
+// ---------- stored values of the wrong shape ----------
+
+describe('contact-card helpers over a stored value of the wrong shape', () => {
+  it('resolveEntryLabel reads no label from a null entry or a null or string contexts', () => {
+    assert.equal(resolveEntryLabel(null), undefined);
+    assert.equal(resolveEntryLabel({ contexts: null }), undefined);
+    assert.equal(resolveEntryLabel({ contexts: 'w' }), undefined);
+  });
+
+  it('simplifyEntryMap reads a null map as absent', () => {
+    assert.equal(simplifyEntryMap(null, 'address'), undefined);
+  });
+
+  it('mergeContactName ignores a stored name that is a string', () => {
+    assert.deepEqual(mergeContactName('Ann Example', { given: 'Ann' }), {
+      components: [{ kind: 'given', value: 'Ann' }],
+    });
+  });
+
+  it('mergeContactName carries a null or string component through as it was', () => {
+    const merged = mergeContactName({ components: [null, 'x'] }, { given: 'Ann' });
+    assert.deepEqual(merged.components, [null, 'x', { kind: 'given', value: 'Ann' }]);
+  });
+
+  it('mergeContactNotes writes a fresh note over a null, string or empty notes value', () => {
+    for (const existing of [null, 'ab', {}]) {
+      assert.deepEqual(mergeContactNotes(existing, 'hi'), { n0: { note: 'hi' } }, JSON.stringify(existing));
+    }
+  });
+
+  it('mergeContactNotes keeps the key of a stored note that is a string, but not its characters', () => {
+    assert.deepEqual(mergeContactNotes({ k: 'x' }, 'hi'), { k: { note: 'hi' } });
+  });
+
+  it('mergeEntryMap reads a null or string map as empty', () => {
+    for (const existing of [null, 'ab']) {
+      const outcome = mergeEntryMap(existing, [{ address: 'a@example.com' }], 'address');
+      assert.deepEqual(outcome.map, { e0: { address: 'a@example.com' } }, JSON.stringify(existing));
+    }
+  });
+});
+
+describe('mergeEntryMap — a fresh entry', () => {
+  it('keys a fresh phone under p, and keeps the label it was given', () => {
+    const outcome = mergeEntryMap({}, [{ number: '555-0100', label: 'mobile' }], 'number');
+    assert.deepEqual(outcome.map, { p0: { number: '555-0100', label: 'mobile' } });
+  });
+});
+
+describe('mergeContactNotes — the several-notes refusal', () => {
+  it('counts the notes it would delete and names the two steps', () => {
+    assert.throws(
+      () => mergeContactNotes({ a: { note: '1' }, b: { note: '2' }, c: { note: '3' } }, 'hello'),
+      (err: Error) => {
+        assert.match(err.message, /the other 2\b/);
+        assert.match(err.message, /get_contact \(verbose or raw\)/);
+        assert.match(err.message, /two deliberate steps/);
+        assert.match(err.message, /clearFields:\['notes'\] first, then set notes/);
+        return true;
+      },
+    );
+  });
+});
+
+describe('assertUnambiguousEntryEdit — what the refusal tells the caller', () => {
+  it('lists each dropped and added entry, counts the additions, and names both remedies', () => {
+    assert.throws(
+      () => assertUnambiguousEntryEdit('emails', {
+        map: {},
+        dropped: [
+          { key: 'k0', entry: { address: 'a@b.example' } },
+          { key: 'k1', entry: { address: 'b@b.example' } },
+        ],
+        added: ['x@b.example', 'y@b.example'],
+      }),
+      (err: Error) => {
+        assert.match(err.message, /drops 2 existing entry\(ies\) and adds 2\b/);
+        assert.match(
+          err.message,
+          /Dropped: \{"address":"a@b\.example"\}, \{"address":"b@b\.example"\}\. Added: "x@b\.example", "y@b\.example"\./,
+        );
+        assert.match(err.message, /resend it under its existing value/);
+        assert.match(err.message, /REPLACE the emails outright/);
+        assert.match(err.message, /allowEntryReplace:true/);
+        assert.match(err.message, /contexts, pref/);
+        assert.match(err.message, /NOT carry over/);
+        assert.match(err.message, /applies to emails alone/);
+        assert.match(err.message, /still merges/);
+        return true;
+      },
+    );
+  });
+});

@@ -5,6 +5,7 @@ import {
   buildUnionParts,
   checkInlineClosure,
   cidKey,
+  classifyImgSrc,
   collectImgCidRefs,
   decodeCidSrc,
   describePart,
@@ -55,6 +56,11 @@ describe('buildUnionParts gating', () => {
 });
 
 describe('buildUnionParts membership and order', () => {
+  it('reads a body type with a space before its parameters as body text', () => {
+    const part = { partId: '1', type: 'text/plain ; charset=utf-8' };
+    assert.deepEqual(buildUnionParts({ attachments: [], textBody: [part] }), []);
+  });
+
   it('keeps attachments in server order, then body-list additions', () => {
     const other = { partId: '5', type: 'image/gif', size: 5, blobId: 'B5' };
     const union = buildUnionParts({
@@ -213,6 +219,7 @@ describe('cidKey', () => {
 
   it('is a no-op on a value that carries no scheme', () => {
     assert.equal(cidKey('logo@host'), 'logo@host');
+    assert.equal(cidKey('logo-cid:x'), 'logo-cid:x');
   });
 
   it('does not decode the part side: a literal %78 cid is not the same as x', () => {
@@ -278,6 +285,10 @@ describe('describePart', () => {
 });
 
 describe('sanitizeDownloadFilename', () => {
+  it('trims a space the length cap leaves at the end', () => {
+    assert.equal(sanitizeDownloadFilename(`${'a'.repeat(79)} b.png`), 'a'.repeat(79));
+  });
+
   it('runs in linear time on a long whitespace run inside a name', () => {
     const n = 100_000;
     const started = performance.now();
@@ -484,6 +495,10 @@ describe('mintCid and the reserved shape', () => {
     assert.equal(isOurMint(cid), true);
   });
 
+  it('never recognizes a non-string, even one that stringifies to the shape', () => {
+    assert.equal(isReservedCid([mintCid()]), false);
+  });
+
   it('mints a distinct identifier each time', () => {
     const seen = new Set(Array.from({ length: 50 }, () => mintCid()));
     assert.equal(seen.size, 50);
@@ -570,6 +585,12 @@ describe('stripCidSpelling', () => {
     assert.equal(stripCidSpelling('<'), '<');
     assert.equal(stripCidSpelling('>'), '>');
     assert.equal(stripCidSpelling('a>b<c'), 'a>b<c');
+    assert.equal(stripCidSpelling('<logo'), '<logo');
+    assert.equal(stripCidSpelling('logo-cid:x'), 'logo-cid:x');
+  });
+
+  it('strips an empty pair of brackets', () => {
+    assert.equal(stripCidSpelling('<>'), '');
   });
 
   it('canonicalizes two spellings of one identifier to one value', () => {
@@ -597,6 +618,11 @@ describe('launderUrlValue and urlScheme', () => {
 
   it('leaves an unterminated comment marker in place, as a browser would', () => {
     assert.equal(launderUrlValue('c<!--id:x'), 'c<!--id:x');
+    assert.equal(launderUrlValue('abc-->def'), 'abc-->def');
+  });
+
+  it('looks for the close marker only after the whole open marker, as launder does', () => {
+    assert.equal(launderUrlValue('<!-->x-->y'), 'y');
   });
 
   it('leaves an ordinary value untouched', () => {
@@ -619,7 +645,20 @@ describe('launderUrlValue and urlScheme', () => {
   });
 });
 
+describe('classifyImgSrc', () => {
+  it('classifies a missing, empty, scheme-less or unsupported src as other', () => {
+    for (const src of [undefined, '', 'logo.png', 'ftp://img.example/a.png']) {
+      assert.deepEqual(classifyImgSrc(src), { kind: 'other' });
+    }
+  });
+});
+
 describe('sanitizeQuoteHtml, collecting pass', () => {
+  it('drops a protocol-relative link', () => {
+    const out = sanitizeQuoteHtml('<a href="//evil.example/x">l</a>', { mode: 'collect' });
+    assert.equal(out.html, '<a>l</a>');
+  });
+
   it('reports the references an <img> carries, in first-seen order', () => {
     const out = sanitizeQuoteHtml('<img src="cid:b"><img src="cid:a"><img src="cid:b">', {
       mode: 'collect',
@@ -673,6 +712,22 @@ describe('sanitizeQuoteHtml, collecting pass', () => {
 });
 
 describe('sanitizeQuoteHtml, mapping pass', () => {
+  it('keeps an http image', () => {
+    const out = sanitizeQuoteHtml('<img src="http://img.example/a.png">', { mode: 'map', cidMap: new Map() });
+    assert.equal(out.html, '<img src="http://img.example/a.png" />');
+  });
+
+  it('drops a cid image when no map is given', () => {
+    const out = sanitizeQuoteHtml('<p>x</p><img src="cid:logo">', { mode: 'map' });
+    assert.equal(out.html, '<p>x</p>');
+    assert.equal(out.droppedCidImages, 1);
+  });
+
+  it('does not count a src that is only whitespace as an unsupported image', () => {
+    const out = sanitizeQuoteHtml('<img src="&nbsp;">', { mode: 'map', cidMap: new Map() });
+    assert.equal(out.droppedUnsupportedImages, 0);
+  });
+
   const cidMap = new Map([['logo', MINT_A]]);
 
   it('rewrites a resolved reference to the identifier being attached', () => {
@@ -831,6 +886,12 @@ describe('sanitizeQuoteHtml obfuscation properties', () => {
 // these call it the same way. Anything a test added beyond those two would be
 // discarded before the transform saw it, and would prove nothing about the hook.
 describe('collectImgCidRefs', () => {
+  it('accepts an observer that wants neither report', () => {
+    const transform = collectImgCidRefs({});
+    assert.doesNotThrow(() => transform('img', { src: 'cid:logo' }));
+    assert.doesNotThrow(() => transform('img', { src: 'data:image/png;base64,AA' }));
+  });
+
   it('reports a reference and returns the tag untouched', () => {
     const seen: string[] = [];
     const transform = collectImgCidRefs({ onCidRef: (key) => seen.push(key) });
@@ -873,6 +934,18 @@ describe('collectImgCidRefs', () => {
 });
 
 describe('extractCidRefs', () => {
+  it('decodes decimal, hex and named entities once before matching', () => {
+    assert.deepEqual(extractCidRefs('&#99;id:a &#x63;id:b &#X63;id:c cid&colon;d cid&COLON;e'), ['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('leaves an unknown entity and one past the last code point as written', () => {
+    assert.deepEqual(extractCidRefs('cid:a&bogus;b cid:c&#1114112;d'), ['a&bogus;b', 'c&#1114112;d']);
+  });
+
+  it('reports no reference for a cid: followed only by punctuation', () => {
+    assert.deepEqual(extractCidRefs('see cid:.'), []);
+  });
+
   it('runs in linear time on a long punctuation run inside a reference', () => {
     const n = 100_000;
     const started = performance.now();
@@ -969,6 +1042,22 @@ describe('resolveCidRefs', () => {
     assert.deepEqual(out.resolvedParts, [logo]);
   });
 
+  it('never resolves an empty reference to a part with an empty Content-ID', () => {
+    const out = resolveCidRefs([''], [{ cid: '', blobId: 'B9', type: 'image/png' }]);
+    assert.deepEqual(out.unresolvedRefs, ['']);
+    assert.deepEqual(out.resolvedParts, []);
+  });
+
+  it('maps a shared Content-ID to the first part carrying it', () => {
+    const one = { cid: 'dup', blobId: 'B1', type: 'image/png' };
+    const two = { cid: 'dup', blobId: 'B2', type: 'image/png' };
+    assert.equal(resolveCidRefs(['dup'], [one, two]).byRef.get('dup'), one);
+  });
+
+  it('lists a part given twice once', () => {
+    assert.deepEqual(resolveCidRefs(['logo'], [logo, logo]).resolvedParts, [logo]);
+  });
+
   it('handles empty inputs', () => {
     const out = resolveCidRefs([], []);
     assert.deepEqual(out.distinctRefs, []);
@@ -994,6 +1083,14 @@ describe('buildCidMap', () => {
     assert.equal(out.mappings[0].reused, false);
     assert.equal(out.mappings[0].source, logoPart);
     assert.equal(out.resolvedPartCount, 1);
+  });
+
+  it('gives a minted part no name when its source has none, and reports nothing unembeddable', () => {
+    for (const name of [undefined, null, '']) {
+      const out = buildCidMap({ refs: ['logo'], sourceParts: [{ ...logoPart, name }], mint: sequentialMint() });
+      assert.deepEqual(out.minted, [{ blobId: 'B1', type: 'image/png', cid: MINT_0, disposition: 'inline' }]);
+      assert.deepEqual(out.unembeddableParts, []);
+    }
   });
 
   it('reports a reference that matched no part, without minting for it', () => {
@@ -1219,6 +1316,11 @@ describe('reconcileInlineParts', () => {
     blobId: 'B', type: 'image/png', ...over,
   });
 
+  it('keeps an unreferenced foreign part whose disposition is null', () => {
+    const part = stored({ cid: 'logo@host', disposition: null });
+    assert.deepEqual(reconcileInlineParts({ storedParts: [part], referencedCids: [] }).kept, [part]);
+  });
+
   it('keeps a part the final bodies still reference', () => {
     const part = stored({ cid: MINT_A, disposition: 'inline' });
     const out = reconcileInlineParts({ storedParts: [part], referencedCids: [MINT_A] });
@@ -1297,6 +1399,20 @@ describe('reconcileInlineParts', () => {
 });
 
 describe('checkInlineClosure', () => {
+  it('fails when a minted part is attached and no body was written', () => {
+    assert.throws(
+      () => checkInlineClosure({ htmlBodies: [], attachedMintedCids: [MINT_A] }),
+      InlineClosureError,
+    );
+  });
+
+  it('does not let an empty part Content-ID supply an empty reference', () => {
+    assert.throws(
+      () => checkInlineClosure({ htmlBodies: ['<img src="cid:">'], finalPartCids: [''] }),
+      InlineClosureError,
+    );
+  });
+
   it('passes when every reference resolves and every minted part is referenced', () => {
     assert.doesNotThrow(() =>
       checkInlineClosure({

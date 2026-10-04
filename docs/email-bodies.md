@@ -170,6 +170,7 @@ in `src/jmap-client.ts` (the textBody-alone-while-html and clearFields:['textBod
 while-html rejects, plus the no-body-result reject):
 
 - Edit `htmlBody` alone: the text fallback is regenerated from the new HTML. No throw.
+  `bodyEdits` on an html draft is this case.
 - Edit `textBody` alone while a non-empty `htmlBody` survives: rejected. Editing the
   text alone "won't change what most recipients see" (they render `htmlBody`).
 - `clearFields: ['textBody']` while `htmlBody` is present: rejected. The text fallback
@@ -251,7 +252,9 @@ cannot. The consequence is the intended one: a stored `{{signature}}`, planted a
 time or escaped on purpose, is stable under every unflagged edit, with no rule for the caller
 to re-apply. Passing the flag is the caller claiming the written part as its own, so the
 compose-side refusals apply to it: a flagged edit that wrote no `{{signature}}` anywhere is
-refused, and so is a part carrying more than one.
+refused, and so is a part carrying more than one. On a `bodyEdits` edit the caller's own text
+is the `replace` strings alone, so only tokens in those are counted and expanded; a token in
+the untouched stored bytes is neither.
 
 **A token that expands to nothing is reported, never dropped in silence.** `{{signature}}`
 is an input the caller cannot verify without re-reading the draft, so a token that quietly
@@ -312,11 +315,20 @@ HTML part and an attribution plus a `> `-prefixed block into the text part. Afte
 substitution the quoted history is ordinary body text. Nothing marks it as ours, and nothing
 on the edit path looks for it.
 
-**Because a body edit replaces the whole body, an edit that rewrites the body drops the
+**Because a whole-body edit replaces the whole body, an edit that rewrites the body drops the
 quote.**
 `edit_draft` stores what it is handed, character for character. To keep a reply's quoted
 original, read the draft and hand the whole body back with the edits made in it; the history
 survives because the caller sent it, not because this server detected it.
+
+**`bodyEdits` changes part of the body without handing the rest back (#177).** Each op's
+`find` is matched raw and exactly against the governing stored part (the html when the draft
+has one, else the text) and must occur exactly once; all ops are located in the stored bytes
+and applied together. Nothing outside the matches is touched, so the history survives
+because the caller never sent a replacement for it. This still identifies no quoted region:
+the caller names the exact bytes to change. The spliced part then takes every path a
+whole-body write of it would: the text fallback regenerates from spliced html, and embedded
+images are reconciled against the result.
 
 **Why no guard recognises the quote.** Shape recognition is lossy both ways: a foreign-shaped
 quote is dropped silently, and quote-shaped prose gets challenged.
@@ -506,7 +518,7 @@ Date: 2026-07-01T09:14:00-04:00      (the JMAP sentAt string verbatim)
   original gets the header block alone. The reproduced html runs through the same sanitiser
   floor as reply quotes (script/style/handlers stripped, real http(s) images kept).
 - **Quotability includes embedded images.** An original whose body is nothing but
-  `<img src="cid:…">` would otherwise have no quotable html, because the sanitiser's collect
+  `<img src="cid:…">` would otherwise have no quotable html, because the sanitiser's first
   pass leaves a visually empty string, and an html `{{forward}}` over it would show the
   header block and nothing below. Such a message is quotable when at least one of its
   references would really embed (resolves to exactly one part, declared an image, carrying a

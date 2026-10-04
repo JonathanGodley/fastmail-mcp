@@ -1,11 +1,12 @@
 import { simplifyEmail } from './email-formatter.js';
-import { projectEmail } from './field-projection.js';
+import { projectListEmail } from './field-projection.js';
 import { describeUntrusted, describeUntrustedAt, echoCallerText, parseAddress, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
 import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
 import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
+import type { BodyEditsReceipt } from './body-edits.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
 import { buildIdCollapseNote } from './id-collapse-note.js';
 
@@ -54,7 +55,7 @@ export function formatRawQueryResult(result: QueryResult): string {
 // drift between them. The summary and exclusion note are never projected away: losing them
 // under a narrower shape would be a scope lie.
 export function formatEmailQueryResult(result: QueryResult, options?: { fields?: ReadonlySet<string> }): string {
-  const simplified = result.items.map(e => projectEmail(simplifyEmail(e), options?.fields));
+  const simplified = result.items.map(e => projectListEmail(simplifyEmail(e), options?.fields));
   return `${formatQuerySummary(result, { paged: true })}\n${toolJson(simplified)}`;
 }
 
@@ -145,7 +146,17 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
     : result.bodyHashWithheld
       ? ` No body hash was issued: ${describeUntrusted(result.bodyHashWithheld)}`
       : '';
-  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}${formatInlineNotes(result.notes)}`;
+  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}` +
+    `${formatBodyEditsReceipt(result.bodyEdits)}${formatInlineNotes(result.notes)}`;
+}
+
+/** The bodyEdits receipt as one result line, sizes in the `chars` the replaced-draft sizes use. */
+export function formatBodyEditsReceipt(receipt: BodyEditsReceipt | undefined): string {
+  if (!receipt) return '';
+  const ops = receipt.ops.map(
+    (op, i) => `[${i}] at offset ${op.offset}, ${op.matchedSize} chars replaced with ${op.replacementSize}`,
+  );
+  return `\nbodyEdits applied to ${receipt.part}: ${ops.join('; ')}.`;
 }
 
 // Reports what happened to the message the draft was composed from (#60).
@@ -606,19 +617,19 @@ export function formatArchiveResult(result: ArchiveResult): string {
       const slotOf = (v: any): string => (typeof v === 'string' ? v : '');
       const slots: [string, string] = [slotOf(r.reason?.setErrorType), slotOf(r.reason?.description)];
       const key = JSON.stringify(slots);
-      const parts = slots.filter(Boolean);
       const group = byReason.get(key);
       if (group) group.ids.push(r.id);
       else byReason.set(key, {
         // Display only, and deliberately ambiguous: any separator can occur inside a server
-        // description, and the key above already keeps the groups apart.
-        rendered: parts.map(describeUntrusted).join(' - '),
+        // description, and the key above already keeps the groups apart. Filtered after
+        // describing, since a slot of only invisible characters describes as ''.
+        rendered: slots.map(describeUntrusted).filter(Boolean).join(' - '),
         ids: [r.id],
       });
     }
     const groups = [...byReason.values()];
     for (const { rendered, ids } of groups.slice(0, ARCHIVE_REASON_CAP)) {
-      lines.push(`${ids.length} failed (${rendered}): ${listIds(ids)}.`);
+      lines.push(`${ids.length} failed${rendered ? ` (${rendered})` : ''}: ${listIds(ids)}.`);
     }
     if (groups.length > ARCHIVE_REASON_CAP) {
       const rest = groups.slice(ARCHIVE_REASON_CAP);

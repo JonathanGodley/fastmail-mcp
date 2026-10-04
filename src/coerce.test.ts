@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, etcGmtOffsetNote, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, zoneCanonicalizationCacheHas, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, etcGmtOffsetNote, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, zoneCanonicalizationCacheHas, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceBodyEdits, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError, PathAccessError, utcMsFromComponents } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -2535,5 +2535,461 @@ describe('echo-quoting convention', () => {
   it('still finds the double-quoted renders it is scanning for', () => {
     const quoted = findRenders('"');
     assert.ok(quoted.length >= 40, `expected the scan to still find echo renders, found ${quoted.length}`);
+  });
+});
+
+const rejectsAsInvalidParams = (fn: () => unknown, message: RegExp) =>
+  assert.throws(fn, (err: unknown) => {
+    assert.ok(err instanceof McpError, `expected an McpError, got ${String(err)}`);
+    assert.equal(err.code, ErrorCode.InvalidParams);
+    assert.match(err.message, message);
+    return true;
+  });
+
+const rejectsAsInvalidInput = (fn: () => unknown, message: RegExp) =>
+  assert.throws(fn, (err: unknown) => {
+    assert.ok(err instanceof InvalidInputError, `expected an InvalidInputError, got ${String(err)}`);
+    assert.match(err.message, message);
+    return true;
+  });
+
+describe('PathAccessError', () => {
+  it('names itself, so a logged or stringified error says which kind it is', () => {
+    assert.equal(new PathAccessError('outside the allowed directory').name, 'PathAccessError');
+  });
+});
+
+describe('registerSecret boundaries', () => {
+  it('ignores a value that is not a string', () => {
+    registerSecret(undefined);
+    assert.equal(redactBearerTokens('value is undefined'), 'value is undefined');
+  });
+
+  it('registers a value of exactly 8 characters', () => {
+    registerSecret('Zq7Wk2Xv');
+    assert.equal(redactBearerTokens('id Zq7Wk2Xv end'), 'id [REDACTED] end');
+  });
+
+  it('matches a registered value literally, regex metacharacters included', () => {
+    registerSecret('zz.syn+thetic*(registered)?value');
+    assert.equal(redactBearerTokens('a zz.syn+thetic*(registered)?value b'), 'a [REDACTED] b');
+  });
+
+  it('redacts every occurrence of a registered value, not just the first', () => {
+    registerSecret('zz-repeated-synthetic-value');
+    assert.equal(
+      redactBearerTokens('x zz-repeated-synthetic-value y zz-repeated-synthetic-value'),
+      'x [REDACTED] y [REDACTED]',
+    );
+  });
+});
+
+describe('echoCallerText bound', () => {
+  it('marks a value only when it is longer than the limit', () => {
+    assert.equal(echoCallerText('x'.repeat(60)), 'x'.repeat(60));
+    assert.equal(echoCallerText('abcde', 5), 'abcde');
+    assert.equal(echoCallerText('abcdef', 5), 'abcde\u2026');
+  });
+});
+
+describe('coerceStringArrayStrict unwraps a padded JSON array', () => {
+  it('type-checks the elements of a JSON-string array that carries surrounding whitespace', () => {
+    rejectsAsInvalidInput(() => coerceStringArrayStrict('  [null]  ', 'ids'), /ids\[0\] must be a string; received null/);
+  });
+});
+
+describe('coerceRecipients refuses a second angle-addr wherever the last "<" sits', () => {
+  it('refuses a "<" before the angle-addr even when the last "<" is at index 1', () => {
+    rejectsAsInvalidInput(() => coerceRecipients({ to: ['<<a@b.example>'] }), /to\[0\].*more than one <address>/);
+  });
+});
+
+describe('hostTimezone falls back to UTC', () => {
+  const OriginalDateTimeFormat = Intl.DateTimeFormat;
+  const withDateTimeFormat = (stub: unknown, fn: () => void) => {
+    Intl.DateTimeFormat = stub as typeof Intl.DateTimeFormat;
+    try {
+      fn();
+    } finally {
+      Intl.DateTimeFormat = OriginalDateTimeFormat;
+    }
+  };
+
+  it('when ICU reports no zone name', () => {
+    let calls = 0;
+    withDateTimeFormat(
+      function () { calls++; return { resolvedOptions: () => ({ timeZone: '' }) }; },
+      () => assert.equal(describeTimezone(undefined), 'UTC'),
+    );
+    assert.ok(calls > 0, 'the stub was never consulted');
+  });
+
+  it('when ICU throws', () => {
+    let calls = 0;
+    withDateTimeFormat(
+      function () { calls++; throw new RangeError('no ICU'); },
+      () => assert.equal(describeTimezone(undefined), 'UTC'),
+    );
+    assert.ok(calls > 0, 'the stub was never consulted');
+  });
+});
+
+describe('validateCallerTimezone refusals say what to pass instead', () => {
+  it('a null or blank zone points the caller at omitting it, per tool', () => {
+    for (const value of [null, '   ']) {
+      rejectsAsInvalidInput(() => validateCallerTimezone(value), /Omit timeZone instead/);
+      rejectsAsInvalidInput(() => validateCallerTimezone(value), /on update it leaves/);
+    }
+  });
+
+  it('an offset points the caller at the zone the wall clock is in', () => {
+    rejectsAsInvalidInput(() => validateCallerTimezone('+10:00'), /pass the zone the wall clock is actually in/);
+    rejectsAsInvalidInput(() => validateCallerTimezone('+10:00'), /works out the offset/);
+  });
+});
+
+describe('resolveConfiguredTimezone input handling', () => {
+  it('trims the configured value', () => {
+    assert.deepEqual(resolveConfiguredTimezone('  Australia/Sydney  '), { zone: 'Australia/Sydney' });
+  });
+
+  it('strips a leading "/" (RFC 5545 TZID spelling)', () => {
+    assert.deepEqual(resolveConfiguredTimezone('/Australia/Sydney'), { zone: 'Australia/Sydney' });
+  });
+
+  it('every refusal tells the operator the server will not start and how to fix it', () => {
+    for (const value of ['+10:00', 'Blah', 'EST']) {
+      assert.throws(() => resolveConfiguredTimezone(value), (err: Error) => {
+        assert.ok(err instanceof InvalidInputError);
+        assert.match(err.message, /refuses to start on an unusable configured time zone/);
+        assert.match(err.message, /Set FASTMAIL_TIMEZONE to/);
+        assert.match(err.message, /or unset it to use this server's own zone/);
+        return true;
+      }, value);
+    }
+  });
+
+  it('the host-zone warning says why the zone was rejected and how to fix it', () => {
+    const { warning } = resolveConfiguredTimezone(undefined, 'EST');
+    assert.match(warning ?? '', /no region-qualifying slash/);
+    assert.match(warning ?? '', /Set FASTMAIL_TIMEZONE to a full IANA zone name/);
+    assert.match(warning ?? '', /e\.g\. "Australia\/Sydney"/);
+  });
+});
+
+describe('the zone offset formatter cache', () => {
+  it('does not cache a zone ICU cannot resolve', () => {
+    const before = zoneOffsetFormatterCacheSize();
+    assert.throws(() => zoneOffsetMsAt(0, 'Not/AZoneAnywhere'), /cannot resolve/);
+    assert.equal(zoneOffsetFormatterCacheSize(), before);
+  });
+
+  it('keys the host zone as undefined, without canonicalising a name for it', () => {
+    zoneOffsetMsAt(0, undefined);
+    assert.equal(zoneCanonicalizationCacheHas(undefined as unknown as string), false);
+  });
+});
+
+describe('utcMsFromComponents year mapping', () => {
+  it('reads year 99 as the year 99, not 1999', () => {
+    assert.equal(utcMsFromComponents(99, 1, 1, 0, 0, 0), Date.parse('0099-01-01T00:00:00Z'));
+  });
+
+  it('reads a negative year directly, without the two-digit shift', () => {
+    assert.equal(utcMsFromComponents(-350, 1, 1, 0, 0, 0), Date.parse('-000350-01-01T00:00:00Z'));
+  });
+
+  it('reads a year near the top of the Date range directly, without the cycle shift', () => {
+    assert.equal(utcMsFromComponents(275500, 1, 1, 0, 0, 0), Date.parse('+275500-01-01T00:00:00Z'));
+  });
+});
+
+describe('calendar window bounds accept the last second of a day and refuse past 24:00:00', () => {
+  it('accepts 23:59:59', () => {
+    assert.equal(coerceCalendarWindowStart('2026-08-12T23:59:59', 'startDate', 'UTC'), '2026-08-12T23:59:59Z');
+  });
+
+  it('refuses 24:30:00 and 24:00:30', () => {
+    for (const value of ['2026-08-12T24:30:00', '2026-08-12T24:00:30']) {
+      rejectsAsInvalidInput(() => coerceCalendarWindowStart(value, 'startDate', 'UTC'), /startDate is not a valid date/);
+    }
+  });
+
+  it('the refusal says how a date and a zone-less datetime are read', () => {
+    rejectsAsInvalidInput(() => coerceCalendarWindowStart('2026/08/12', 'startDate', 'UTC'), /read as a whole day in UTC/);
+    rejectsAsInvalidInput(() => coerceCalendarWindowStart('2026/08/12', 'startDate', 'UTC'), /is read as UTC local time/);
+  });
+});
+
+describe('resolveCalendarInstantMs reads padded and seconds-bearing values', () => {
+  it('trims before matching', () => {
+    assert.equal(resolveCalendarInstantMs('  2026-08-12T10:00:00Z  ', 'UTC'), Date.parse('2026-08-12T10:00:00Z'));
+  });
+
+  it('keeps the seconds of a wall-clock value', () => {
+    assert.equal(resolveCalendarInstantMs('2026-08-12T10:00:30', 'UTC'), Date.parse('2026-08-12T10:00:30Z'));
+  });
+});
+
+describe('coercePosition refusals', () => {
+  it('names the wrong type', () => {
+    rejectsAsInvalidInput(() => coercePosition(true), /position must be a number, not a boolean/);
+    rejectsAsInvalidInput(() => coercePosition([1]), /position must be a number, not an array/);
+  });
+
+  it('echoes at most 40 characters of the value, marking a cut', () => {
+    rejectsAsInvalidInput(() => coercePosition('1'.repeat(40)), new RegExp(`"${'1'.repeat(40)}"`));
+    assert.throws(() => coercePosition('1'.repeat(50)), (err: Error) => {
+      assert.ok(err.message.includes(`"${'1'.repeat(40)}..."`), err.message);
+      assert.ok(!err.message.includes('1'.repeat(41)), err.message);
+      return true;
+    });
+  });
+});
+
+describe('parseAddress edge shapes', () => {
+  it('trims a bare address', () => {
+    assert.deepEqual(parseAddress('  a@b.example  '), { email: 'a@b.example' });
+  });
+
+  it('reads an angle-addr only when a ">" follows the last "<"', () => {
+    assert.deepEqual(parseAddress('Name <a@b.example'), { email: 'Name <a@b.example' });
+    assert.deepEqual(parseAddress('a@b.example>'), { email: 'a@b.example>' });
+    assert.deepEqual(parseAddress('x> <a@b.example'), { email: 'x> <a@b.example' });
+    assert.deepEqual(parseAddress('x<a@b.example>'), { name: 'x', email: 'a@b.example' });
+  });
+
+  it('unquotes a name only when it both starts and ends with a double quote', () => {
+    assert.deepEqual(parseAddress('"Bob <a@b.example>'), { name: '"Bob', email: 'a@b.example' });
+    assert.deepEqual(parseAddress('Bob" <a@b.example>'), { name: 'Bob"', email: 'a@b.example' });
+    assert.deepEqual(parseAddress('" <a@b.example>'), { name: '"', email: 'a@b.example' });
+    assert.deepEqual(parseAddress('"" <a@b.example>'), { email: 'a@b.example' });
+  });
+});
+
+describe('coerceAttachments shape refusals', () => {
+  it('reads a blank string as not supplied', () => {
+    assert.equal(coerceAttachments(''), undefined);
+    assert.equal(coerceAttachments('   '), undefined);
+  });
+
+  it('refuses a string that is not JSON', () => {
+    rejectsAsInvalidParams(() => coerceAttachments('not json'), /attachments must be an array of \{ path \| blobId/);
+  });
+
+  it('refuses a blank source value, saying what to give', () => {
+    for (const path of ['', '   ']) {
+      rejectsAsInvalidParams(() => coerceAttachments([{ path }]), /attachments\[0\] is missing a non-empty 'path'; give the file to attach/);
+    }
+    rejectsAsInvalidParams(
+      () => coerceAttachments([{ blobId: '  ', name: 'a.txt' }]),
+      /missing a non-empty 'blobId'; give the blobId of content already in the account/,
+    );
+  });
+
+  it('parses a JSON-object string element that carries surrounding whitespace', () => {
+    assert.deepEqual(coerceAttachments(['  {"path":"a.txt"}  ']), [{ path: 'a.txt' }]);
+  });
+
+  it('refuses a string element with only one brace as a bare string', () => {
+    for (const element of ['a.txt}', '{a.txt']) {
+      rejectsAsInvalidParams(() => coerceAttachments([element]), /attachments\[0\] must be an object naming a source, not a bare string/);
+    }
+  });
+
+  it('refuses a braced string element that is not valid JSON as such', () => {
+    rejectsAsInvalidParams(() => coerceAttachments(['{bad}']), /attachments\[0\] is a string that isn't valid JSON/);
+  });
+
+  it('refuses a null, number or array element as not an object', () => {
+    for (const element of [null, 5, ['path']]) {
+      rejectsAsInvalidParams(() => coerceAttachments([element]), /attachments\[0\] must be an object shaped/);
+    }
+  });
+
+  it('lists every unknown key and every valid one', () => {
+    rejectsAsInvalidParams(
+      () => coerceAttachments([{ path: 'a.txt', foo: 1, bar: 2 }]),
+      /unknown key\(s\): foo, bar\. Valid: path, blobId, emailId, attachmentId, name, contentType, cid$/,
+    );
+  });
+
+  it('refuses a non-string name or contentType', () => {
+    rejectsAsInvalidParams(() => coerceAttachments([{ path: 'a.txt', name: 5 }]), /attachments\[0\]\.name must be a string/);
+    rejectsAsInvalidParams(() => coerceAttachments([{ path: 'a.txt', contentType: 5 }]), /attachments\[0\]\.contentType must be a string/);
+  });
+
+  it('refuses a non-string cid', () => {
+    rejectsAsInvalidParams(() => coerceAttachments([{ path: 'a.txt', cid: ['a', 'b'] }]), /attachments\[0\]\.cid/);
+  });
+});
+
+describe('coerceParticipants element shapes', () => {
+  it('reads a string element with only one brace as an address', () => {
+    assert.deepEqual(coerceParticipants(['a@b.example}', '{c@d.example']), [{ email: 'a@b.example}' }, { email: '{c@d.example' }]);
+  });
+
+  it('refuses a number element as neither an address nor an object', () => {
+    rejectsAsInvalidInput(() => coerceParticipants([5]), /participants\[0\] must be an email address or an object/);
+  });
+
+  it('lists every unknown key and every valid one', () => {
+    rejectsAsInvalidInput(
+      () => coerceParticipants([{ email: 'a@b.example', foo: 1, bar: 2 }]),
+      /unknown key\(s\): foo, bar\. Valid: email, name$/,
+    );
+  });
+});
+
+describe('contact entry element shapes', () => {
+  it('parses a JSON-object string element', () => {
+    assert.deepEqual(
+      coerceContactEmails(['{"address":"a@b.example","label":"work"}']),
+      [{ address: 'a@b.example', label: 'work' }],
+    );
+  });
+
+  it('reads a string element with only one brace as a bare value', () => {
+    assert.deepEqual(coerceContactEmails(['a@b.example}', '{c@d.example']), [{ address: 'a@b.example}' }, { address: '{c@d.example' }]);
+  });
+
+  it('refuses a braced string element that is not valid JSON as such', () => {
+    rejectsAsInvalidInput(() => coerceContactEmails(['{bad}']), /emails\[0\] is a string that isn't valid JSON/);
+  });
+
+  it('names the item shape, and the bare form only where one is accepted', () => {
+    rejectsAsInvalidInput(
+      () => coerceContactEmails('not json'),
+      /emails must be an array of \{ address, label\? \} objects \(or a bare address string\)\./,
+    );
+    rejectsAsInvalidInput(() => coerceContactAddresses('not json'), /addresses must be an array of \{ full, label\? \} objects\./);
+  });
+
+  it('refuses a number element as not an object', () => {
+    rejectsAsInvalidInput(() => coerceContactEmails([5]), /emails\[0\] must be an object shaped/);
+  });
+
+  it('names the wrong type of a key field and a label', () => {
+    rejectsAsInvalidInput(() => coerceContactEmails([{ address: [] }]), /emails\[0\]\.address must be a string, not an array/);
+    rejectsAsInvalidInput(() => coerceContactEmails([{ address: 5 }]), /emails\[0\]\.address must be a string, not a number/);
+    rejectsAsInvalidInput(() => coerceContactEmails([{ address: 'a@b.example', label: [] }]), /emails\[0\]\.label must be a string, not an array/);
+    rejectsAsInvalidInput(() => coerceContactEmails([{ address: 'a@b.example', label: 5 }]), /emails\[0\]\.label must be a string, not a number/);
+  });
+});
+
+describe('coerceContactName shapes', () => {
+  it('reads a string with only one brace as the full name', () => {
+    assert.deepEqual(coerceContactName('Bob}'), { full: 'Bob}' });
+    assert.deepEqual(coerceContactName('{Bob'), { full: '{Bob' });
+  });
+
+  it('refuses a braced string that is not valid JSON, and a non-object value', () => {
+    for (const value of ['{bad}', 5]) {
+      rejectsAsInvalidInput(() => coerceContactName(value), /name must be a full-name string or an object shaped \{ given\?, surname\?, full\? \}/);
+    }
+  });
+
+  it('lists every unknown key and every valid one', () => {
+    rejectsAsInvalidInput(() => coerceContactName({ foo: 1, bar: 2 }), /unknown key\(s\): foo, bar\. Valid: given, surname, full$/);
+  });
+
+  it('names the wrong type of a part', () => {
+    rejectsAsInvalidInput(() => coerceContactName({ given: [] }), /name\.given must be a string, not an array/);
+    rejectsAsInvalidInput(() => coerceContactName({ given: 5 }), /name\.given must be a string, not a number/);
+  });
+
+  it('names every part when none is set', () => {
+    rejectsAsInvalidInput(() => coerceContactName({}), /must set at least one of given, surname, full\.$/);
+  });
+});
+
+/** Asserts `fn` throws an InvalidParams McpError whose message ends with `message`. */
+function refusesParams(fn: () => unknown, message: string) {
+  assert.throws(fn, (err: unknown) => {
+    assert.ok(err instanceof McpError && err.code === ErrorCode.InvalidParams, `got ${String(err)}`);
+    assert.ok(err.message.endsWith(message), `message was: ${err.message}`);
+    return true;
+  });
+}
+describe('coerceBodyEdits', () => {
+  it('reads an absent, null or blank value as omitted', () => {
+    assert.equal(coerceBodyEdits(undefined), undefined);
+    assert.equal(coerceBodyEdits(null), undefined);
+    assert.equal(coerceBodyEdits(''), undefined);
+    assert.equal(coerceBodyEdits('  \n '), undefined);
+  });
+
+  it('passes a well-formed array through', () => {
+    assert.deepEqual(coerceBodyEdits([{ find: 'a', replace: 'b' }, { find: 'c', replace: '' }]), [
+      { find: 'a', replace: 'b' },
+      { find: 'c', replace: '' },
+    ]);
+  });
+
+  it('never trims find or replace', () => {
+    assert.deepEqual(coerceBodyEdits([{ find: ' a\n', replace: '\tb ' }]), [{ find: ' a\n', replace: '\tb ' }]);
+    assert.deepEqual(coerceBodyEdits(['  {"find":" x ","replace":"  "}  ']), [{ find: ' x ', replace: '  ' }]);
+  });
+
+  it('accepts a JSON-encoded array, padded', () => {
+    assert.deepEqual(coerceBodyEdits(' [{"find":"a","replace":"b"}] '), [{ find: 'a', replace: 'b' }]);
+  });
+
+  it('accepts JSON-encoded object elements', () => {
+    assert.deepEqual(coerceBodyEdits([{ find: 'a', replace: 'b' }, '{"find":"c","replace":"d"}']), [
+      { find: 'a', replace: 'b' },
+      { find: 'c', replace: 'd' },
+    ]);
+  });
+
+  it('refuses an empty array, in either form', () => {
+    const msg = 'bodyEdits cannot be empty; omit it to leave the body unchanged.';
+    refusesParams(() => coerceBodyEdits([]), msg);
+    refusesParams(() => coerceBodyEdits('[]'), msg);
+  });
+
+  it('refuses a value that is not an array', () => {
+    const msg = 'bodyEdits must be an array of {find, replace} objects.';
+    refusesParams(() => coerceBodyEdits('not json'), msg);
+    refusesParams(() => coerceBodyEdits('[{'), msg);
+    refusesParams(() => coerceBodyEdits('{"find":"a","replace":"b"}'), msg);
+    refusesParams(() => coerceBodyEdits({ find: 'a', replace: 'b' }), msg);
+    refusesParams(() => coerceBodyEdits(3), msg);
+  });
+
+  it('refuses a bare-string element by index', () => {
+    refusesParams(
+      () => coerceBodyEdits([{ find: 'a', replace: 'b' }, 'find a']),
+      'bodyEdits[1] must be a {find, replace} object, not a bare string.',
+    );
+    refusesParams(() => coerceBodyEdits(['{find']), 'bodyEdits[0] must be a {find, replace} object, not a bare string.');
+    refusesParams(() => coerceBodyEdits(['find}']), 'bodyEdits[0] must be a {find, replace} object, not a bare string.');
+  });
+
+  it('refuses a braced string element that is not JSON, by index', () => {
+    refusesParams(
+      () => coerceBodyEdits([{ find: 'a', replace: 'b' }, '{find: a}']),
+      "bodyEdits[1] is a string that isn't valid JSON; pass a {find, replace} object.",
+    );
+  });
+
+  it('refuses a non-object element by index', () => {
+    for (const bad of [null, 7, ['a', 'b'], true]) {
+      refusesParams(() => coerceBodyEdits([{ find: 'a', replace: 'b' }, bad]), 'bodyEdits[1] must be a {find, replace} object.');
+    }
+  });
+
+  it('refuses unknown keys by index, naming them', () => {
+    refusesParams(
+      () => coerceBodyEdits([{ find: 'a', replace: 'b', all: true, with: 'x' }]),
+      'bodyEdits[0] has unknown key(s): all, with. Valid: find, replace',
+    );
+  });
+
+  it('refuses a missing or non-string find or replace by index', () => {
+    refusesParams(() => coerceBodyEdits([{ replace: 'b' }]), 'bodyEdits[0].find must be a string.');
+    refusesParams(() => coerceBodyEdits([{ find: 1, replace: 'b' }]), 'bodyEdits[0].find must be a string.');
+    refusesParams(() => coerceBodyEdits([{ find: 'a', replace: 'b' }, { find: 'a' }]), 'bodyEdits[1].replace must be a string.');
+    refusesParams(() => coerceBodyEdits([{ find: 'a', replace: null }]), 'bodyEdits[0].replace must be a string.');
   });
 });

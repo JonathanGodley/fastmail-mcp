@@ -88,7 +88,7 @@ describe('buildForwardBlocks — a block starts at its header line', () => {
 // draft-email-handler.test.ts.
 
 // Late import, beside the suites that use it.
-import { signatureBlock, signatureHtmlBlock, signatureTextBlock } from './reply-quote.js';
+import { emptyQuoteImages, signatureBlock, signatureHtmlBlock, signatureTextBlock } from './reply-quote.js';
 
 // A signature as signatureOf hands it over: either form may be absent.
 const HTML_ONLY_SIG = { html: '<div>Kind regards,</div><div>Test User</div>' };
@@ -125,6 +125,17 @@ describe('buildQuoteBlocks — the attribution line', () => {
     assert.match(block, /^Alex wrote:\n/);
     assert.doesNotMatch(block, /Invalid Date/);
     assert.doesNotMatch(block, /On .*wrote:/);
+  });
+
+  it('trims the sender display name', () => {
+    assert.match(textBlockFor({ text: 'orig', name: '  Alex  ' }), /^Alex wrote:\n/);
+  });
+
+  it('names no one when the sender has neither a name nor an email', () => {
+    for (const from of [[], undefined]) {
+      const { textBlock } = buildQuoteBlocks({ original: { ...makeOriginal({ text: 'orig' }), from }, htmlShips: false });
+      assert.match(textBlock!, /^\s*wrote:\n> orig$/);
+    }
   });
 
   it('collapses a newline in the sender display name', () => {
@@ -171,9 +182,9 @@ describe('buildQuoteBlocks — the html form of the quote', () => {
   });
 
   it('quotes a text-only original via an escaped html block', () => {
-    const original = makeOriginal({ text: 'plain <b>not bold</b>\nsecond', name: 'Alex', sentAt: '2026-06-15T03:29:02Z' });
+    const original = makeOriginal({ text: `plain <b>not bold</b> "q" it's\nsecond`, name: 'Alex', sentAt: '2026-06-15T03:29:02Z' });
     const { htmlBlock } = buildQuoteBlocks({ original, htmlShips: true, timezone: TZ });
-    assert.match(htmlBlock!, /plain &lt;b&gt;not bold&lt;\/b&gt;<br>second/);
+    assert.match(htmlBlock!, /plain &lt;b&gt;not bold&lt;\/b&gt; &quot;q&quot; it&#39;s<br>second/);
   });
 
   it('quotes each format from its matching original part', () => {
@@ -193,6 +204,81 @@ describe('buildQuoteBlocks — what it will and will not read', () => {
     };
     const { textBlock } = buildQuoteBlocks({ original, htmlShips: false, timezone: TZ });
     assert.match(textBlock!, /> untyped body/);
+  });
+
+  const withParts = (textBody: any[], htmlBody: any[], bodyValues: Record<string, any>) =>
+    ({ from: [{ name: 'Alex', email: 'alex@example.com' }], textBody, htmlBody, bodyValues });
+
+  it('skips a part of the other body type rather than quoting its raw markup', () => {
+    // JMAP puts the html part in textBody when an original has no text alternative.
+    const html = [{ partId: 'h', type: 'text/html' }];
+    const original = withParts(html, html, { h: { value: '<p>Hello</p>' } });
+    assert.equal(buildQuoteBlocks({ original, htmlShips: false }).textBlock, 'Alex wrote:\n> Hello');
+  });
+
+  it('joins several parts with a newline and skips a part with no body value', () => {
+    const parts = ['a', 'gone', 'b'].map((partId) => ({ partId, type: 'text/plain' }));
+    const original = withParts(parts, [], { a: { value: 'one' }, b: { value: 'two' } });
+    assert.equal(buildQuoteBlocks({ original, htmlShips: false }).textBlock, 'Alex wrote:\n> one\n> two');
+  });
+
+  it('marks a truncated part at the end of each form', () => {
+    const original = withParts(
+      [{ partId: 't', type: 'text/plain' }], [{ partId: 'h', type: 'text/html' }],
+      { t: { value: 'text', isTruncated: true }, h: { value: '<p>html</p>', isTruncated: true } },
+    );
+    const quote = buildQuoteBlocks({ original, htmlShips: true });
+    assert.equal(quote.textBlock, 'Alex wrote:\n> text\n> […]');
+    assert.match(quote.htmlBlock!, /<p>html<\/p><div>\[…\]<\/div><\/blockquote>$/);
+    const forward = buildForwardBlocks({ original, htmlShips: true });
+    assert.ok(forward.textBlock.endsWith('\n\ntext\n[…]'), forward.textBlock);
+    assert.match(forward.htmlBlock, /<p>html<\/p><div>\[…\]<\/div><\/div>$/);
+  });
+
+  it('strips a sentinel the body value already carries', () => {
+    const original = makeOriginal({ text: 'one[body truncated] two[encoding issues detected]', name: 'Alex' });
+    assert.equal(buildQuoteBlocks({ original, htmlShips: false }).textBlock, 'Alex wrote:\n> one two');
+  });
+
+  it('quotes the html when the text part is only whitespace', () => {
+    const original = makeOriginal({ text: '  \n ', html: '<p>from html</p>', name: 'Alex' });
+    assert.equal(buildQuoteBlocks({ original, htmlShips: false }).textBlock, 'Alex wrote:\n> from html');
+  });
+
+  it('quotes an original whose only content is a remote image', () => {
+    const original = makeOriginal({ html: '<img alt="" src="https://img.example/a.png">', name: 'Alex' });
+    const { htmlBlock } = buildQuoteBlocks({ original, htmlShips: true });
+    assert.match(htmlBlock!, /<img alt="" src="https:\/\/img\.example\/a\.png" \/><\/blockquote>$/);
+  });
+
+  it('does not quote an original whose only content is a link around a dropped image', () => {
+    for (const img of ['<img src="foo.png">', '<img src="cid:gone@x.example">']) {
+      const original = makeOriginal({ html: `<a href="https://x.example/">${img}</a>`, name: 'Alex' });
+      const quoteImages = { sourceParts: [] };
+      assert.equal(buildQuoteBlocks({ original, htmlShips: true, quoteImages }).htmlBlock, undefined, img);
+      assert.equal(buildForwardBlocks({ original, htmlShips: true, quoteImages }).htmlQuotable, false, img);
+    }
+    const linked = makeOriginal({ html: '<a href="https://x.example/">site</a>', name: 'Alex' });
+    assert.notEqual(buildQuoteBlocks({ original: linked, htmlShips: true }).htmlBlock, undefined);
+  });
+
+  it('does not quote an original whose only image is one the quote would drop', () => {
+    for (const src of ['foo.png', './a.png', '/a.png', 'mailto:a@example.com']) {
+      const original = makeOriginal({ html: `<img src="${src}">`, name: 'Alex' });
+      for (const htmlShips of [true, false]) {
+        const quoteImages = { sourceParts: [] };
+        const quote = buildQuoteBlocks({ original, htmlShips, quoteImages });
+        assert.equal(quote.htmlBlock, undefined, src);
+        assert.equal(buildForwardBlocks({ original, htmlShips, quoteImages }).htmlQuotable, false, src);
+      }
+    }
+  });
+
+  it('builds nothing for a missing original', () => {
+    assert.deepEqual(buildQuoteBlocks({ original: undefined, htmlShips: true }), { images: emptyQuoteImages() });
+    const forward = buildForwardBlocks({ original: undefined, htmlShips: true });
+    assert.equal(forward.textBlock, '----- Original message -----');
+    assert.equal(forward.htmlBlock, '<div>----- Original message -----<br></div>');
   });
 
   it('yields no html block for a cid-image-only original (content-based, not string trim)', () => {
@@ -231,6 +317,104 @@ describe('buildForwardBlocks — the header block (canonical Fastmail shape)', (
     const block = textBlockFor({ to: [], cc: [], subject: '' });
     assert.doesNotMatch(block, /\nTo:/);
     assert.doesNotMatch(block, /\nSubject:/);
+  });
+
+  it('omits the From line when there is no sender, and the Subject line when there is no subject', () => {
+    const block = textBlockFor({ from: [], subject: undefined });
+    assert.doesNotMatch(block, /\nFrom:/);
+    assert.doesNotMatch(block, /\nSubject:/);
+  });
+
+  it('joins addresses with ", " and skips an entry with nothing to show', () => {
+    const to = [null, {}, { email: ' ' }, { name: 'Bob', email: 'bob@example.com' }, { email: 'dee@example.com' }];
+    assert.match(textBlockFor({ to }), /\nTo: Bob <bob@example\.com>, dee@example\.com\n/);
+  });
+
+  it('shows an address entry with a name and no email as the name alone', () => {
+    assert.match(textBlockFor({ to: [{ name: 'Bob' }] }), /\nTo: Bob\n/);
+  });
+
+  it('puts a text-only original into the html block as escaped text', () => {
+    const { htmlBlock } = buildForwardBlocks({ original: fwdOriginal({ htmlBody: [] }), htmlShips: true });
+    assert.ok(htmlBlock.endsWith('<div type="cite">original text</div>'), htmlBlock);
+  });
+
+  it('is the header block alone over an attachment-only original', () => {
+    const { textBlock, htmlBlock } = buildForwardBlocks({ original: attachmentOnlyOriginal(), htmlShips: true });
+    assert.ok(textBlock.endsWith('\nDate: 2026-07-01T09:14:00-04:00'), textBlock);
+    assert.ok(htmlBlock.endsWith('Date: 2026-07-01T09:14:00-04:00<br></div>'), htmlBlock);
+  });
+});
+
+describe('the image outcome the builders report', () => {
+  const PART = { cid: 'logo@x.example', blobId: 'B1', type: 'image/png' };
+  const original = (html: string) => fwdOriginal({ textBody: [], sentAt: undefined, bodyValues: { h: { value: html } } });
+  const mint = () => 'minted@x.example';
+
+  it('emptyQuoteImages carries nothing', () => {
+    assert.deepEqual(emptyQuoteImages(), {
+      minted: [], mappings: [], resolvedParts: [], unresolvedRefs: [],
+      droppedDataImages: 0, droppedUnsupportedImages: 0, htmlQuoteShips: false,
+    });
+  });
+
+  it('reports nothing when no image channel is given', () => {
+    const textOnly = makeOriginal({ text: 'orig', name: 'Alex' });
+    assert.deepEqual(buildQuoteBlocks({ original: textOnly, htmlShips: true }).images, emptyQuoteImages());
+    assert.deepEqual(buildForwardBlocks({ original: fwdOriginal(), htmlShips: false }).images, emptyQuoteImages());
+  });
+
+  it('mints with the injected mint', () => {
+    const quoteImages = { sourceParts: [PART], mint };
+    const html = '<p>x</p><img src="cid:logo@x.example">';
+    for (const built of [
+      buildQuoteBlocks({ original: original(html), htmlShips: true, quoteImages }),
+      buildForwardBlocks({ original: original(html), htmlShips: true, quoteImages }),
+    ]) {
+      assert.equal(built.images.minted[0]?.cid, 'minted@x.example');
+      assert.match(built.htmlBlock!, /<img src="cid:minted@x\.example" \/>/);
+    }
+  });
+
+  it('counts an unsupported image when html ships, with or without an image channel', () => {
+    const html = original('<p>x</p><img src="ftp://img.example/a.png">');
+    for (const quoteImages of [{ sourceParts: [] }, undefined]) {
+      for (const [htmlShips, count] of [[true, 1], [false, 0]] as const) {
+        assert.equal(buildQuoteBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+        assert.equal(buildForwardBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+      }
+    }
+  });
+
+  it('reports an image dropped from html that is not quoted, when html ships', () => {
+    const html = fwdOriginal({ sentAt: undefined, bodyValues: { t: { value: 'plain body' }, h: { value: '<img src="foo.png">' } } });
+    const quoteImages = { sourceParts: [] };
+    for (const [htmlShips, count] of [[true, 1], [false, 0]] as const) {
+      assert.equal(buildQuoteBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+      assert.equal(buildForwardBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+    }
+  });
+
+  it('reports no dropped image when nothing of the original is quoted', () => {
+    for (const img of ['<img src="/logo.png">', '<img src="//cdn.example.com/a.png">', '<img src="data:image/png;base64,AA">']) {
+      const nothing = original(img);
+      const quoteImages = { sourceParts: [] };
+      for (const { images } of [
+        buildQuoteBlocks({ original: nothing, htmlShips: true, quoteImages }),
+        buildForwardBlocks({ original: nothing, htmlShips: true, quoteImages }),
+      ]) {
+        assert.deepEqual([images.droppedDataImages, images.droppedUnsupportedImages], [0, 0], img);
+      }
+    }
+  });
+
+  it('writes no placeholder in the text form for an image the message does not carry', () => {
+    const html = original('<p>x</p><img src="cid:gone@x.example">');
+    const quoteImages = { sourceParts: [] };
+    for (const htmlShips of [true, false]) {
+      assert.equal(buildQuoteBlocks({ original: html, htmlShips, quoteImages }).textBlock, 'Ada Lovelace wrote:\n> x');
+      assert.ok(buildForwardBlocks({ original: html, htmlShips, quoteImages }).textBlock.endsWith('\n\nx'));
+    }
   });
 });
 
@@ -297,6 +481,10 @@ describe('signatureHtmlBlock — the form a sign-off takes in an html part', () 
     assert.equal(signatureHtmlBlock(undefined), undefined);
     assert.equal(signatureTextBlock(undefined, true), undefined);
     assert.equal(signatureTextBlock(undefined, false), undefined);
+    assert.equal(signatureHtmlBlock({}), undefined);
+    assert.equal(signatureTextBlock({}, true), undefined);
+    assert.equal(signatureTextBlock({}, false), undefined);
+    assert.deepEqual(signatureBlock({}, 'htmlBody', true), { available: false, cause: 'no-signature' });
   });
 });
 

@@ -7,20 +7,30 @@
  */
 export function foldICalLine(line: string, lineEnding: string = '\r\n'): string {
   const parts: string[] = [];
-  while (Buffer.byteLength(line, 'utf8') > 75) {
-    // Find the largest character count that fits in 75 bytes
-    let cut = 75;
-    while (cut > 0 && Buffer.byteLength(line.slice(0, cut), 'utf8') > 75) {
-      cut--;
+  let start = 0;
+  let octets = 0;
+  for (let i = 0; i < line.length; i++) {
+    const code = line.charCodeAt(i);
+    const isLow = (code & 0xFC00) === 0xDC00;
+    let size: number;
+    if (code < 0x80) size = 1;
+    else if (code < 0x800) size = 2;
+    // A high surrogate counts as 3 octets, so the low that completes a pair in this segment adds 1.
+    // Any other surrogate is lone and encodes as U+FFFD, 3 octets, as Buffer.byteLength counts it.
+    else if (isLow && i > start && (line.charCodeAt(i - 1) & 0xFC00) === 0xD800) size = 1;
+    else size = 3;
+    if (octets + size > 75) {
+      // A cut before any low surrogate moves back one unit, keeping a pair whole; before a lone low
+      // that follows a pair, that lands inside the pair and splits it.
+      const cut = isLow ? i - 1 : i;
+      parts.push(line.slice(start, cut));
+      start = cut;
+      i = cut - 1;
+      octets = 1; // the continuation line's leading space
+      continue;
     }
-    // Don't split a surrogate pair (characters outside BMP like emoji)
-    if (cut > 0 && cut < line.length) {
-      const code = line.charCodeAt(cut);
-      if (code >= 0xDC00 && code <= 0xDFFF) cut--;
-    }
-    parts.push(line.slice(0, cut));
-    line = ' ' + line.slice(cut);
+    octets += size;
   }
-  parts.push(line);
-  return parts.join(lineEnding);
+  parts.push(line.slice(start));
+  return parts.join(lineEnding + ' ');
 }

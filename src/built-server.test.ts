@@ -377,6 +377,7 @@ const ARRAY_PARAM_COERCERS: Record<string, string> = {
   'edit_draft.attachments': 'edit-draft-handler.ts coerceAttachments',
   'edit_draft.removeAttachments': 'edit-draft-handler.ts coerceStringArrayStrict',
   'edit_draft.clearFields': 'edit-draft-handler.ts coerceStringArrayStrict',
+  'edit_draft.bodyEdits': 'edit-draft-handler.ts coerceBodyEdits',
   'create_contact.emails': 'contacts-handler.ts coerceContactEmails',
   'create_contact.phones': 'contacts-handler.ts coerceContactPhones',
   'create_contact.addresses': 'contacts-handler.ts coerceContactAddresses',
@@ -471,8 +472,8 @@ describe('array-side schema drift guard (#98)', () => {
     // exact count, like the tool floor above.
     const arrayAdmitting = params.filter((p) => admittedTypes(p.declared).includes('array'));
     assert.ok(
-      arrayAdmitting.length >= 41,
-      `found only ${arrayAdmitting.length} array-admitting top-level parameters (expected 41); ` +
+      arrayAdmitting.length >= 42,
+      `found only ${arrayAdmitting.length} array-admitting top-level parameters (expected 42); ` +
         'either admittedTypes() has stopped matching the live schema, or an array-admitting ' +
         'parameter was removed or narrowed with this floor not yet lowered to match',
     );

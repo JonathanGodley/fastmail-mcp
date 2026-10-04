@@ -3,21 +3,17 @@ import { InvalidInputError } from './coerce.js';
 // Size bounds for the caller-supplied text that gets serialized into an iCalendar
 // VEVENT by `create_calendar_event` / `update_calendar_event`.
 //
-// The cap is not an iCalendar rule; it is a bound on the quadratic serializer
-// `foldICalLine` (src/ical-fold.ts), whose cost grows with the square of the field length.
-// Do not remove it without first making the folding linear.
-//
-// The bounds are deliberately generous: they exist to stop a denial of service, not to
-// referee how long an agenda may be.
+// The caps are not an iCalendar rule; they bound the size of what one calendar write sends
+// to the server and stores there. They are deliberately generous, so as not to referee how
+// long an agenda may be.
 
 // Per-field cap. 64KB of text is far beyond any real event summary, location or agenda
-// (a dense page of prose is ~3KB), while keeping the worst-case fold on one field in the
-// tens of milliseconds.
+// (a dense page of prose is ~3KB).
 export const MAX_ICAL_FIELD_BYTES = 64 * 1024;
 
-// Cap on the number of participants. One participant is one folded ATTENDEE line, so an
-// unbounded array is an unbounded number of folds. 500 comfortably covers an all-hands
-// or a large distribution list.
+// Cap on the number of participants. One participant is one ATTENDEE line, so an unbounded
+// array is an unbounded number of ATTENDEE lines written into the event. 500 comfortably
+// covers an all-hands or a large distribution list.
 export const MAX_ICAL_PARTICIPANTS = 500;
 
 // Cap on the TOTAL of all folded text in one call. Per-field caps alone are defeated by

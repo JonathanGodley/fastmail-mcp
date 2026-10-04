@@ -11,6 +11,7 @@ export interface SimplifiedEmail {
   subject: string;
   from: string;
   date?: string;
+  sentAt?: string;
   threadId?: string;
   messageId?: string[];
   references?: string[];
@@ -95,7 +96,7 @@ export interface SimplifyOptions {
   // (#73). Opt-in per call; the default output is always verbatim. Applies to the plain
   // text body ONLY — a `bodyHtml` returned alongside it (verbose) is untouched.
   stripQuoted?: boolean;
-  // IANA timezone name (e.g. 'America/New_York') to render `date` in. Takes
+  // IANA timezone name (e.g. 'America/New_York') to render `date` and `sentAt` in. Takes
   // precedence over the module default set by setDefaultTimezone(); falls back
   // to the host zone when neither is set.
   timezone?: string;
@@ -164,6 +165,9 @@ function renderLocalIso(date: Date, zone: string | undefined): string {
   // 'GMT+10:00' / 'GMT-05:30' → '+10:00' / '-05:30'; bare 'GMT' (UTC) → '+00:00'.
   const stripped = offsetPart.replace('GMT', '');
   const offset = stripped === '' ? '+00:00' : stripped;
+  // A local-mean-time offset carries seconds, which ISO 8601 and new Date() reject; UTC
+  // renders the same instant.
+  if (!/^[+-]\d\d:\d\d$/.test(offset)) return renderLocalIso(date, 'UTC');
 
   return `${year}-${month}-${day}T${hour}:${minute}:${second}${offset}`;
 }
@@ -271,6 +275,7 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   };
 
   addIf(result, 'date', raw.receivedAt ? toLocalIso(raw.receivedAt, options?.timezone) : undefined);
+  addIf(result, 'sentAt', raw.sentAt ? toLocalIso(raw.sentAt, options?.timezone) : undefined);
   addIf(result, 'threadId', raw.threadId);
   addIf(result, 'messageId', raw.messageId);
   addIf(result, 'references', raw.references);

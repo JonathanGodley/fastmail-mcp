@@ -375,9 +375,9 @@ export interface SanitizeQuoteResult {
   droppedDataImages: number;
   droppedCidImages: number;
   /**
-   * MAP MODE ONLY: a real src that is neither cid nor http(s). Counted because the collect
-   * pass would have kept such an image (the scheme filter passes a relative path), so the
-   * drop must be visible. An `<img>` with no src is not counted.
+   * MAP MODE ONLY: a real src that is not cid, data: or http(s), such as a relative path, which
+   * the sanitizer alone would pass. Map mode drops it, so it is counted to keep the drop
+   * visible. An `<img>` with no src is not counted.
    */
   droppedUnsupportedImages: number;
 }

@@ -16,6 +16,7 @@ const EMAIL_FIELD_MAP: Record<keyof SimplifiedEmail, true> = {
   subject: true,
   from: true,
   date: true,
+  sentAt: true,
   threadId: true,
   messageId: true,
   references: true,
@@ -185,4 +186,18 @@ export function projectEmail(
   }
 
   return projected as Partial<SimplifiedEmail>;
+}
+
+// Fields list_emails and search_emails return only when `fields` names them, so a list
+// response keeps its default size; each is still a valid `fields` name.
+export const LIST_OPT_IN_FIELDS: readonly (keyof SimplifiedEmail)[] = ['sentAt'];
+
+export function projectListEmail(
+  email: SimplifiedEmail,
+  fields: ReadonlySet<string> | undefined,
+): Partial<SimplifiedEmail> {
+  if (fields) return projectEmail(email, fields);
+  const projected: Partial<SimplifiedEmail> = { ...email };
+  for (const key of LIST_OPT_IN_FIELDS) delete projected[key];
+  return projected;
 }
