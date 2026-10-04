@@ -54,6 +54,21 @@ async function assertCheckOrder(run: typeof listEmailsTool, order: Array<[string
 }
 
 describe('listEmailsTool', () => {
+  // MCP `arguments` is optional, so a call can arrive with none.
+  it('runs with the defaults when args is undefined', async () => {
+    const stub = stubClient();
+    await listEmailsTool(undefined, 20, stub.client);
+    assert.deepEqual(stub.getEmails.mock.calls[0].arguments, [{
+      mailbox: undefined,
+      limit: 20,
+      position: undefined,
+      ascending: false,
+      includeTrash: false,
+      includeSpam: false,
+      excludeDrafts: false,
+    }]);
+  });
+
   it('forwards every option, with the flags false by default and the limit as passed', async () => {
     const stub = stubClient();
     await listEmailsTool({ mailbox: 'Inbox', limit: 999 }, 37, stub.client);
@@ -105,6 +120,33 @@ describe('listEmailsTool', () => {
 });
 
 describe('searchEmailsTool', () => {
+  it('runs with the defaults when args is undefined', async () => {
+    const stub = stubClient();
+    await searchEmailsTool(undefined, 20, stub.client);
+    assert.deepEqual(stub.searchEmails.mock.calls[0].arguments, [{
+      query: undefined,
+      from: undefined,
+      to: undefined,
+      cc: undefined,
+      bcc: undefined,
+      subject: undefined,
+      hasAttachment: undefined,
+      isUnread: undefined,
+      isPinned: undefined,
+      mailbox: undefined,
+      requiredMailboxes: undefined,
+      excludeMailboxes: undefined,
+      after: undefined,
+      before: undefined,
+      limit: 20,
+      position: undefined,
+      ascending: false,
+      excludeDrafts: false,
+      includeTrash: false,
+      includeSpam: false,
+    }]);
+  });
+
   it('forwards every option, with the filter flags absent and the others false by default', async () => {
     const stub = stubClient();
     await searchEmailsTool({

@@ -21,33 +21,35 @@ export interface EmailListClient {
 // parseable.
 
 export async function listEmailsTool(args: any, limit: number, client: EmailListClient): Promise<ToolContent> {
-  const { mailbox } = args ?? {};
-  const ascending = coerceBool(args?.ascending, 'ascending') ?? false;
-  const raw = coerceBool(args?.raw, 'raw') ?? false;
-  const fields = parseEmailFields(args?.fields, { raw });
-  const position = coercePosition(args?.position, { ascendingHint: true });
+  const a = args ?? {};
+  const { mailbox } = a;
+  const ascending = coerceBool(a.ascending, 'ascending') ?? false;
+  const raw = coerceBool(a.raw, 'raw') ?? false;
+  const fields = parseEmailFields(a.fields, { raw });
+  const position = coercePosition(a.position, { ascendingHint: true });
   const result = await client.getEmails({
     mailbox,
     limit,
     position,
     ascending,
-    includeTrash: coerceBool(args?.includeTrash, 'includeTrash') ?? false,
-    includeSpam: coerceBool(args?.includeSpam, 'includeSpam') ?? false,
-    excludeDrafts: coerceBool(args?.excludeDrafts, 'excludeDrafts') ?? false,
+    includeTrash: coerceBool(a.includeTrash, 'includeTrash') ?? false,
+    includeSpam: coerceBool(a.includeSpam, 'includeSpam') ?? false,
+    excludeDrafts: coerceBool(a.excludeDrafts, 'excludeDrafts') ?? false,
   });
   const body = raw ? formatRawQueryResult(result) : formatEmailQueryResult(result, { fields });
   return [{ type: 'text', text: body + buildExclusionNote(result.exclusion) }];
 }
 
 export async function searchEmailsTool(args: any, limit: number, client: EmailListClient): Promise<ToolContent> {
-  const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before } = args ?? {};
-  const ascending = coerceBool(args?.ascending, 'ascending') ?? false;
-  const raw = coerceBool(args?.raw, 'raw') ?? false;
-  const fields = parseEmailFields(args?.fields, { raw });
-  const position = coercePosition(args?.position, { ascendingHint: true });
+  const a = args ?? {};
+  const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before } = a;
+  const ascending = coerceBool(a.ascending, 'ascending') ?? false;
+  const raw = coerceBool(a.raw, 'raw') ?? false;
+  const fields = parseEmailFields(a.fields, { raw });
+  const position = coercePosition(a.position, { ascendingHint: true });
   // STRICT: dropping an uncoercible scope array would silently widen the query.
-  const requiredMailboxes = coerceStringArrayStrict(args?.requiredMailboxes, 'requiredMailboxes');
-  const excludeMailboxes = coerceStringArrayStrict(args?.excludeMailboxes, 'excludeMailboxes');
+  const requiredMailboxes = coerceStringArrayStrict(a.requiredMailboxes, 'requiredMailboxes');
+  const excludeMailboxes = coerceStringArrayStrict(a.excludeMailboxes, 'excludeMailboxes');
   const result = await client.searchEmails({
     query, from, to, cc, bcc, subject,
     hasAttachment: coerceBool(hasAttachment, 'hasAttachment'),
@@ -56,9 +58,9 @@ export async function searchEmailsTool(args: any, limit: number, client: EmailLi
     mailbox, requiredMailboxes, excludeMailboxes,
     after, before, limit, position,
     ascending,
-    excludeDrafts: coerceBool(args?.excludeDrafts, 'excludeDrafts') ?? false,
-    includeTrash: coerceBool(args?.includeTrash, 'includeTrash') ?? false,
-    includeSpam: coerceBool(args?.includeSpam, 'includeSpam') ?? false,
+    excludeDrafts: coerceBool(a.excludeDrafts, 'excludeDrafts') ?? false,
+    includeTrash: coerceBool(a.includeTrash, 'includeTrash') ?? false,
+    includeSpam: coerceBool(a.includeSpam, 'includeSpam') ?? false,
   });
   const body = raw ? formatRawQueryResult(result) : formatEmailQueryResult(result, { fields });
   return [{ type: 'text', text: body + buildExclusionNote(result.exclusion) }];
