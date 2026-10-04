@@ -1012,7 +1012,7 @@ export function parseICalDuration(duration: string, start: string, tzid?: string
     return inYearRange(wallMs) ? formatWallClockIso(wallMs) : undefined;
   }
 
-  // Without a designator `new Date()` read the start in the process's zone.
+  // Without a designator `new Date()` reads the start in the process's zone.
   if (!/(Z|[+-]\d{2}:?\d{2})$/.test(start)) return undefined;
   return inYearRange(endMs) ? endDate.toISOString().replace(/\.\d{3}Z$/, 'Z') : undefined;
 }
