@@ -965,19 +965,26 @@ function formatWallClockIso(ms: number): string {
 }
 
 /**
- * The end a DURATION implies from `start`, in start's format, or undefined if malformed.
+ * The end a DURATION implies from `start`, in start's format, or undefined if malformed or
+ * outside years 0001-9999, which have no iCalendar form.
  *
  * `tzid` is the start's zone. A wall-clock start in a zone ICU can resolve gets the RFC 5545
  * §3.3.6 split (`resolveDurationEndMs`) and its end is that zone's wall clock. Every other
- * start is plain arithmetic: exact for a UTC or date-only start, and for a floating one, one
- * whose TZID cannot be resolved (a vendor name) or one whose nominal end cannot be resolved
- * (past year 9999), on its wall clock with no transitions.
+ * start is plain arithmetic: exact for a UTC or date-only start, and for a floating one or one
+ * whose TZID cannot be resolved (a vendor name), on its wall clock with no transitions.
  */
 export function parseICalDuration(duration: string, start: string, tzid?: string): string | undefined {
+  const inYearRange = (ms: number) => {
+    const year = new Date(ms).getUTCFullYear();
+    return year >= 1 && year <= 9999;
+  };
+
   if (tzid && WALL_CLOCK_ISO_RE.test(start) && isUsableTimezone(tzid)) {
     const endMs = resolveDurationEndMs(duration, start, tzid);
-    if (endMs === undefined) return undefined;
-    if (!Number.isNaN(endMs)) return formatWallClockIso(endMs + zoneOffsetMsAt(endMs, tzid));
+    // NaN is a nominal end the resolver cannot read: one outside years 0000-9999.
+    if (endMs === undefined || Number.isNaN(endMs)) return undefined;
+    const wallMs = endMs + zoneOffsetMsAt(endMs, tzid);
+    return inYearRange(wallMs) ? formatWallClockIso(wallMs) : undefined;
   }
 
   const parsed = parseICalDurationComponents(duration);
@@ -993,7 +1000,7 @@ export function parseICalDuration(duration: string, start: string, tzid?: string
   const endDate = new Date(endMs);
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(start)) {
-    return endDate.toISOString().slice(0, 10);
+    return inYearRange(endMs) ? endDate.toISOString().slice(0, 10) : undefined;
   }
 
   // `new Date()` reads a floating time as process-local, so do the arithmetic in UTC by hand.
@@ -1001,10 +1008,11 @@ export function parseICalDuration(duration: string, start: string, tzid?: string
     const [datePart, timePart] = start.split('T');
     const [y, mo, d] = datePart.split('-').map(Number);
     const [h, mi, s] = timePart.split(':').map(Number);
-    return formatWallClockIso(utcMsFromComponents(y, mo, d, h, mi, s) + sign * ms);
+    const wallMs = utcMsFromComponents(y, mo, d, h, mi, s) + sign * ms;
+    return inYearRange(wallMs) ? formatWallClockIso(wallMs) : undefined;
   }
 
-  return endDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return inYearRange(endMs) ? endDate.toISOString().replace(/\.\d{3}Z$/, 'Z') : undefined;
 }
 
 /**

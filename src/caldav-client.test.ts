@@ -2798,6 +2798,20 @@ describe('parseICalDuration', () => {
     assert.equal(parseICalDuration('PT1H', '0026-01-01T10:00:00'), '0026-01-01T11:00:00');
     assert.equal(parseICalDuration('PT1H', '0999-01-01T10:00:00'), '0999-01-01T11:00:00');
   });
+
+  it('gives no end for a floating start when the end falls outside years 0001-9999', () => {
+    assert.equal(parseICalDuration('-P400D', '0001-01-01T10:00:00'), undefined);
+    assert.equal(parseICalDuration('P2D', '9999-12-31T10:00:00'), undefined);
+  });
+
+  it('gives no end for a date-only start when the end falls outside years 0001-9999', () => {
+    assert.equal(parseICalDuration('-P1D', '0001-01-01'), undefined);
+    assert.equal(parseICalDuration('P1D', '9999-12-31'), undefined);
+  });
+
+  it('gives no end for a UTC start when the end falls outside years 0001-9999', () => {
+    assert.equal(parseICalDuration('P1D', '9999-12-31T10:00:00Z'), undefined);
+  });
 });
 
 // Australia/Sydney in 2026: clocks go back 03:00 AEDT -> 02:00 AEST on Sunday 5 April, and
@@ -2831,9 +2845,9 @@ describe('parseICalDuration from a zoned start', () => {
     assert.equal(parseICalDuration('P1DT1H', '2026-04-04T02:30:00', SYDNEY), '2026-04-05T02:30:00');
   });
 
-  it('falls back to plain arithmetic when the nominal end cannot be resolved', () => {
-    // The nominal end, 10000-01-02, has no four-digit year for the resolver to read.
-    assert.equal(parseICalDuration('P2D', '9999-12-31T10:00:00', SYDNEY), '10000-01-02T10:00:00');
+  it('gives no end when the end falls outside years 0001-9999', () => {
+    assert.equal(parseICalDuration('P2D', '9999-12-31T10:00:00', SYDNEY), undefined);
+    assert.equal(parseICalDuration('-P400D', '0001-01-01T10:00:00', SYDNEY), undefined);
   });
 
   it('applies the nominal days before the exact time: P1DT6H from 23:00 across a spring-forward', () => {
