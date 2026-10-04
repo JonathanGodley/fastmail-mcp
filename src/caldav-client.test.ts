@@ -2809,8 +2809,10 @@ describe('parseICalDuration from a zoned start', () => {
     assert.equal(parseICalDuration('P1D', '2026-10-03T02:30:00', SYDNEY), '2026-10-04T03:30:00');
   });
 
-  it('resolves a nominal end in the repeated hour to the earlier instant, the same wall clock', () => {
-    assert.equal(parseICalDuration('P1D', '2026-04-04T02:30:00', SYDNEY), '2026-04-05T02:30:00');
+  it('resolves a nominal end in the repeated hour to the earlier instant', () => {
+    // 02:30 on 5 April happens twice: 15:30Z (AEDT) and 16:30Z (AEST). An hour on from the
+    // earlier is 16:30Z, 02:30 AEST; from the later it would be 17:30Z, 03:30 AEST.
+    assert.equal(parseICalDuration('P1DT1H', '2026-04-04T02:30:00', SYDNEY), '2026-04-05T02:30:00');
   });
 
   it('applies the nominal days before the exact time: P1DT6H from 23:00 across a spring-forward', () => {
