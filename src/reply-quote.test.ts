@@ -251,6 +251,17 @@ describe('buildQuoteBlocks — what it will and will not read', () => {
     assert.match(htmlBlock!, /<img alt="" src="https:\/\/img\.example\/a\.png" \/><\/blockquote>$/);
   });
 
+  it('does not quote an original whose only content is a link around a dropped image', () => {
+    for (const img of ['<img src="foo.png">', '<img src="cid:gone@x.example">']) {
+      const original = makeOriginal({ html: `<a href="https://x.example/">${img}</a>`, name: 'Alex' });
+      const quoteImages = { sourceParts: [] };
+      assert.equal(buildQuoteBlocks({ original, htmlShips: true, quoteImages }).htmlBlock, undefined, img);
+      assert.equal(buildForwardBlocks({ original, htmlShips: true, quoteImages }).htmlQuotable, false, img);
+    }
+    const linked = makeOriginal({ html: '<a href="https://x.example/">site</a>', name: 'Alex' });
+    assert.notEqual(buildQuoteBlocks({ original: linked, htmlShips: true }).htmlBlock, undefined);
+  });
+
   it('does not quote an original whose only image is one the quote would drop', () => {
     for (const src of ['foo.png', './a.png', '/a.png', 'mailto:a@example.com']) {
       const original = makeOriginal({ html: `<img src="${src}">`, name: 'Alex' });

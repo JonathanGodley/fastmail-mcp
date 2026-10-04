@@ -36,9 +36,10 @@ function stripSentinels(s: string): string {
 // Content-based, NOT a string trim: an embedded-image-only original sanitizes to e.g.
 // <div></div>, which must not count or an orphan "On … wrote:" ships over an empty quote
 // (it becomes quotable through the resolvability test instead). Placeholders are suppressed
-// because an unmapped image has already been dropped from sanitized html.
+// because an unmapped image has already been dropped from sanitized html. Links are read
+// without their href, which htmlToText would print for an anchor showing nothing.
 function isQuotable(sanitized: string): boolean {
-  if (!isBlank(htmlToText(sanitized, 'suppress'))) return true;
+  if (!isBlank(htmlToText(sanitized.replace(/<a\b[^>]*>/gi, '<a>'), 'suppress'))) return true;
   return /<img\b[^>]*\bsrc\s*=/i.test(sanitized);
 }
 
