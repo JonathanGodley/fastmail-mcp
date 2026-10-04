@@ -301,7 +301,7 @@ export function buildQuoteBlocks(input: {
     mappings: resolved?.mappings ?? [],
     resolvedParts: collected.resolvedParts,
     unresolvedRefs: collected.unresolvedRefs,
-    droppedDataImages: quoted ? collected.droppedDataImages : 0,
+    droppedDataImages: quoted && htmlShips ? collected.droppedDataImages : 0,
     droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
     htmlQuoteShips,
   };
@@ -309,8 +309,13 @@ export function buildQuoteBlocks(input: {
   // No block in either format, so no orphan "On … wrote:" over an empty quote.
   if (!quoted) return { images };
 
-  const senderRaw = original?.from?.[0]?.name || original?.from?.[0]?.email || '';
-  const name = normalizeName(senderRaw);
+  // Judged after normalising: a whitespace-only or invisible-only value falls through.
+  const usable = (s: string | null | undefined): string => {
+    const n = normalizeName(s ?? '');
+    return isBlank(n) ? '' : n;
+  };
+  const sender = original?.from?.[0];
+  const name = usable(sender?.name) || usable(sender?.email) || 'unknown';
   const date = formatReplyDate(original?.sentAt ?? original?.receivedAt, timezone);
   const attribution = date ? `On ${date}, ${name} wrote:` : `${name} wrote:`;
 
@@ -451,7 +456,7 @@ export function buildForwardBlocks(input: {
       mappings: resolved?.mappings ?? [],
       resolvedParts: collected.resolvedParts,
       unresolvedRefs: collected.unresolvedRefs,
-      droppedDataImages: quoted ? collected.droppedDataImages : 0,
+      droppedDataImages: quoted && htmlShips ? collected.droppedDataImages : 0,
       droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
       htmlQuoteShips,
     },

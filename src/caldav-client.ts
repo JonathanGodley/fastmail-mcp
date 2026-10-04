@@ -1042,7 +1042,6 @@ function resolveDurationEndMs(durationValue: string, startIso: string, tzid: str
   const nominalIso = `${String(year).padStart(4, '0')}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}T${timePart}`;
 
   const nominalMs = resolveCalendarInstantMs(nominalIso, tzid);
-  if (Number.isNaN(nominalMs)) return NaN;
 
   const exactMs = sign * ((hours * 3600000) + (minutes * 60000) + (seconds * 1000));
   return nominalMs + exactMs;
@@ -1374,8 +1373,10 @@ export function unescapeICalText(value: string): string {
  * writer handles CR and LF first), DEL, C1, and the bidi overrides and isolates, which let a
  * title display as different text and a name as a different address. LRM/RLM are deliberately
  * kept: they cannot reorder surrounding text and occur legitimately in Arabic and Hebrew names.
+ * Also lone UTF-16 surrogates, which have no UTF-8 encoding; under the `u` flag the surrogate
+ * range matches only an unpaired one, so an emoji survives whole.
  */
-const UNSAFE_ICAL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g;
+const UNSAFE_ICAL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069\uD800-\uDFFF]/gu;
 
 /**
  * `requireNonEmpty`, judged on what `escapeICalText` will leave: a value made only of stripped
@@ -1441,19 +1442,19 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
   // form would be written verbatim; a leap second (60) has no instant to normalise to.
   const [hh, mm, ss] = timePart.split(':').map(Number);
   if (hh > 23 || mm > 59 || ss > 59) {
-    throw new InvalidInputError(`${fieldName} has a time out of range; hours run 00-23 and minutes and seconds 00-59 (got: ${trimmed.slice(0, 60)})`);
+    throw new InvalidInputError(`${fieldName} has a time out of range; hours run 00-23 and minutes and seconds 00-59 (got: ${trimmed})`);
   }
   const isoForParse = `${datePart}T${timePart}${tz || ''}`;
   const d = new Date(isoForParse);
   if (Number.isNaN(d.getTime())) {
-    throw new InvalidInputError(`${fieldName} is not a valid datetime (got: ${trimmed.slice(0, 60)})`);
+    throw new InvalidInputError(`${fieldName} is not a valid datetime (got: ${trimmed})`);
   }
   if (!tz) {
     return `${datePart.replace(/-/g, '')}T${timePart.replace(/:/g, '')}`;
   }
   const utcYear = d.getUTCFullYear();
   if (utcYear < 1 || utcYear > 9999) {
-    throw new InvalidInputError(`${fieldName} falls in year ${String(utcYear).padStart(4, '0')} once converted to UTC; ${YEAR_RANGE} (got: ${trimmed.slice(0, 60)})`);
+    throw new InvalidInputError(`${fieldName} falls in year ${String(utcYear).padStart(4, '0')} once converted to UTC; ${YEAR_RANGE} (got: ${trimmed})`);
   }
   const utc = d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   return utc;
@@ -1466,15 +1467,16 @@ const YEAR_RANGE = 'the year must be 0001-9999, since an iCalendar year has four
  * roll `2026-02-31` to 3 March. A rolled-over date no longer round-trips through toISOString.
  * Year 0000 is refused too, for the reason `YEAR_RANGE` gives.
  *
- * @param echo the caller's whole value, quoted in the message.
+ * @param echo the caller's whole value, quoted unescaped in the message, so it must already
+ *   match an anchored short shape.
  */
 function assertRealCalendarDate(datePart: string, echo: string, fieldName: string): void {
   if (datePart.startsWith('0000')) {
-    throw new InvalidInputError(`${fieldName} has year 0000; ${YEAR_RANGE} (got: ${echo.slice(0, 60)})`);
+    throw new InvalidInputError(`${fieldName} has year 0000; ${YEAR_RANGE} (got: ${echo})`);
   }
   const probe = new Date(`${datePart}T00:00:00Z`);
   if (Number.isNaN(probe.getTime()) || !probe.toISOString().startsWith(datePart)) {
-    throw new InvalidInputError(`${fieldName} is not a real calendar date (got: ${echo.slice(0, 60)})`);
+    throw new InvalidInputError(`${fieldName} is not a real calendar date (got: ${echo})`);
   }
 }
 

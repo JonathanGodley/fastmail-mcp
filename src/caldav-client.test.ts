@@ -1049,6 +1049,19 @@ describe('validateAndFormatICalDate', () => {
     assert.equal(validateAndFormatICalDate('2026-03-20T23:59:59', 'start'), '20260320T235959');
   });
 
+  it('refuses an offset the pattern admits but the Date parser cannot read, echoing the value', () => {
+    for (const value of ['2026-01-01T10:00:00+12:3', '2026-01-01T10:00:00+123', '2026-01-01T10:00:00+99:99']) {
+      assert.throws(
+        () => validateAndFormatICalDate(` ${value} `, 'end'),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError', value);
+          assert.equal(err.message, `end is not a valid datetime (got: ${value})`);
+          return true;
+        },
+      );
+    }
+  });
+
   it('rejects CRLF injection attempt', () => {
     assert.throws(
       () => validateAndFormatICalDate('2026-04-18T10:00:00Z\r\nATTENDEE:mailto:attacker@example.com', 'start'),
@@ -3391,6 +3404,11 @@ describe('quoteParamValue', () => {
     assert.equal(quoteParamValue('Ali\u2066ce\u2069'), 'Alice');
   });
 
+  it('strips lone surrogates and keeps a surrogate pair whole', () => {
+    assert.equal(quoteParamValue('Ali\uD83Dce\uDE00'), 'Alice');
+    assert.equal(quoteParamValue('Alice \ud83d\ude00'), 'Alice \ud83d\ude00');
+  });
+
   it('keeps the plain left/right marks, which appear in real Arabic and Hebrew names', () => {
     // LRM/RLM carry no nesting scope and cannot reorder the text around them,
     // so stripping them would corrupt a legitimate name for no security gain.
@@ -4941,6 +4959,11 @@ describe('escapeICalText control-character hardening', () => {
   it('keeps LRM and RLM', () => {
     assert.equal(escapeICalText('a\u200Eb\u200Fc'), 'a\u200Eb\u200Fc');
   });
+
+  it('strips lone surrogates and keeps a surrogate pair whole', () => {
+    assert.equal(escapeICalText('a\uD83Db\uDE00c\uDE00\uD83Dd'), 'abcd');
+    assert.equal(escapeICalText('a\uD83D\uDE00b'), 'a\uD83D\uDE00b');
+  });
 });
 
 describe('parseICalDateAsUTC', () => {
@@ -5677,6 +5700,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
       ['numeric title', { title: 5 }, /title must be a string; received number/],
       ['whitespace-only title', { title: '   ' }, /title cannot be empty; pass the event title/],
       ['title of only stripped characters', { title: '\u0085 \u2067' }, /title cannot be empty; pass the event title/],
+      ['title of only lone surrogates', { title: '\uDE00 \uD83D' }, /title cannot be empty; pass the event title/],
       ['array description', { description: ['x'] }, /description must be a string; received array/],
       ['numeric description', { description: 5 }, /description must be a string; received number/],
       ['object location', { location: {} }, /location must be a string; received object/],
