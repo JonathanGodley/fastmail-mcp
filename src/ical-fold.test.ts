@@ -133,13 +133,15 @@ describe('foldICalLine exact output', () => {
   });
 
   it('cuts before a 2-octet character that would pass 75', () => {
-    assert.equal(foldICalLine('X'.repeat(74) + 'é'.repeat(3)),
-      'X'.repeat(74) + '\r\n ' + 'é'.repeat(3));
+    assert.equal(foldICalLine('X'.repeat(74) + '\u00E9'.repeat(3)),
+      'X'.repeat(74) + '\r\n ' + '\u00E9'.repeat(3));
+    assert.equal(foldICalLine('X'.repeat(74) + '\u0080Y'), 'X'.repeat(74) + '\r\n \u0080Y');
   });
 
   it('cuts before a 3-octet character that would pass 75', () => {
-    assert.equal(foldICalLine('X'.repeat(73) + '！'.repeat(2)),
-      'X'.repeat(73) + '\r\n ' + '！'.repeat(2));
+    assert.equal(foldICalLine('X'.repeat(73) + '\uFF01'.repeat(2)),
+      'X'.repeat(73) + '\r\n ' + '\uFF01'.repeat(2));
+    assert.equal(foldICalLine('X'.repeat(73) + '\u0800Y'), 'X'.repeat(73) + '\r\n \u0800Y');
   });
 
   it('moves a surrogate pair straddling 75 octets on a continuation line', () => {
@@ -148,7 +150,7 @@ describe('foldICalLine exact output', () => {
   });
 
   it('leaves 75 octets alone and folds 76', () => {
-    assert.equal(foldICalLine('é'.repeat(37) + 'X'), 'é'.repeat(37) + 'X');
+    assert.equal(foldICalLine('\u00E9'.repeat(37) + 'X'), '\u00E9'.repeat(37) + 'X');
     assert.equal(foldICalLine('X'.repeat(76)), 'X'.repeat(75) + '\r\n X');
   });
 
@@ -173,7 +175,7 @@ describe('foldICalLine exact output', () => {
   });
 
   it('folds a long mixed line to a pinned output', () => {
-    const alphabet = ['a', 'B', 'é', 'Ω', '！', '中', pin, '\u{10FFFF}'];
+    const alphabet = ['a', 'B', '\u00E9', '\u03A9', '\uFF01', '\u4E2D', pin, '\u{10FFFF}'];
     let seed = 12345;
     let input = 'DESCRIPTION:';
     for (let i = 0; i < 600; i++) {
