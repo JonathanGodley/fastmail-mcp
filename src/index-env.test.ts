@@ -191,10 +191,12 @@ describe('broken-collection disclosure in the tool surface', () => {
     }
 
     // ENUMERATED, not sampled: the claim is about every calendar tool, so every one of them
-    // has to be present and matched.
+    // has to be present and matched. list_calendar_events builds its note in
+    // formatCalendarEventList instead; calendar-list-handler.test.ts pins its consequence.
+    const BUILT_IN_CASE_BODY = ['create_calendar_event', 'delete_calendar_event', 'get_calendar_event', 'list_calendars', 'update_calendar_event'];
     assert.deepEqual(
       [...found.keys()].sort(),
-      Object.keys(CONTEXT_BY_TOOL).sort(),
+      BUILT_IN_CASE_BODY,
       'a calendar tool either lost its broken-collection note or gained one this guard does not know about',
     );
     for (const [tool, context] of found) {

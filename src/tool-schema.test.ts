@@ -89,6 +89,7 @@ const HANDLER_FILES = [
   'send-draft-handler.ts',
   'mailbox-handler.ts',
   'contacts-handler.ts',
+  'calendar-list-handler.ts',
 ];
 
 function readLines(file: string): string[] {
@@ -667,6 +668,12 @@ describe('the limit bound is owned by the handlers', () => {
       `a tool's limit clamp disagrees with what its schema advertises, so it applies a bound ` +
         `it never told the caller about: ${mismatches.join('; ')}`,
     );
+  });
+
+  // A limit of 101 or more serves 100: the email tools' cap, now that `position` reaches
+  // the rest (#169).
+  it('caps list_calendar_events at 100', () => {
+    assert.deepEqual(collectClamps().get('list_calendar_events'), { fallback: 50, max: 100 });
   });
 });
 

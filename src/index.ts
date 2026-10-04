@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
+import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
@@ -25,6 +25,7 @@ import { readThread } from './thread-handler.js';
 import { runBulkReadTest } from './bulk-test-handler.js';
 import { listMailboxes, createMailbox } from './mailbox-handler.js';
 import { createContactTool, getContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
+import { listCalendarEventsTool } from './calendar-list-handler.js';
 import createDebug from 'debug';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
@@ -1355,7 +1356,7 @@ const TOOLS = [
           'A DATE IS A LOCAL DAY: startDate/endDate written as plain dates (2026-08-12) cover that calendar day in the account\'s configured timezone (FASTMAIL_TIMEZONE, falling back to this server\'s own zone, or UTC when that is not a full IANA name — the same zone every email `date` is shown in), NOT the UTC day. A datetime with no Z and no offset is read as local time too. Only a value carrying Z or a numeric offset means the exact instant it names, so that is how to ask for something the local-day rule cannot express. ' +
           'ONE-SIDED WINDOWS ARE BOUNDED: pass only startDate (or only endDate) and the missing half is filled in 31 days away. The response says so in a trailing "Note:" line naming the range actually searched; pass both bounds to choose the span yourself. ' +
           `ONE SERIES TOO DENSE FOR THE WINDOW FAILS THE WHOLE CALL: if any single repeating event expands to more than ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} occurrences in the range searched, the call returns an error naming that event (title, id, occurrence count and calendar) instead of a listing, even though every other event was fine. Narrow the window so it covers fewer of that event's occurrences, or pass a calendarId that does not hold it. ` +
-          'Every calendar the account listed is queried before the results are sorted and trimmed, so `limit` is a genuine "earliest N" across all of them (a collection the server failed to list is not in that set, and the response names it — see the discovery clause below). The response opens with a summary line stating how many events matched in total; when that total exceeds the returned count, `limit` cut the rest off and there is no paging, so raise `limit` (up to 500) to see more, or narrow the window if the total is larger than that. ' +
+          'Every calendar the account listed is queried before the results are sorted and paged, so `limit` and `position` walk one earliest-first list across all of them (a collection the server failed to list is not in that set, and the response names it — see the discovery clause below). Results are ONE PAGE: the summary line always states the total number of matching events, and when more remain it carries a `nextPosition` to pass back as `position`. No `nextPosition` means you have seen every match. Each page is a fresh read of every calendar in the window, so it costs a full read, and a change to the calendar between calls can move rows across a page boundary. ' +
           `CALENDAR TIMES CARRY A ZONE NAME, NEVER AN OFFSET. \`start\`/\`end\` is a bare local wall clock (2026-04-20T10:00:00), a Z-designated UTC instant, or a date-only (all-day) value — this server never puts an offset in either and never asks you to compute one. READ THE VALUE'S OWN DESIGNATOR FIRST: \`timeZone\` only QUALIFIES a value that carries neither Z nor a date-only marker, so "absent means the configured zone" applies to a bare wall-clock \`start\` and nothing else. \`timeZone\` names the IANA zone a wall-clock \`start\` is in, but ONLY when it differs from this server's configured zone (${CONFIGURED_TIMEZONE}): an ABSENT \`timeZone\` means ${CONFIGURED_TIMEZONE}, and \`timeZone: null\` means \`start\` is genuinely FLOATING (RFC 5545 §3.3.5 — no TZID, no Z, a different instant for every reader), which is a different fact from "in the configured zone". A Z-designated value or an all-day value never carries \`timeZone\` at all, because both already name themselves; \`null\` there would wrongly assert "floating". \`endTimeZone\` describes \`end\` the same way but ONLY relative to \`start\` — it appears only when \`end\`'s zone differs from \`start\`'s, which is legal (a flight departing one zone and landing in another), and is omitted whenever \`end\` is absent or shares \`start\`'s zone. ` +
           '`transparency` APPEARS ONLY WHEN THE EVENT DOES NOT BLOCK YOUR CALENDAR. A row carrying `transparency: "free"` is an event you are still available during — typically an all-day marker. A ROW THAT SAYS NOTHING IS BUSY: most events are, so the field is omitted on them to keep rows small, and its absence here is never "unknown" - except on the "Untitled" row with no dates that a record with no readable VEVENT produces, whose busy state was never read and is unknown. For any other row, call get_calendar_event, which states the value on every event, if you want it said out loud (it cannot open that Untitled row: a record with no readable VEVENT is not found). A value that is neither "busy" nor "free" is the stored iCalendar token reported verbatim, which means the record holds something outside the two the spec defines. ' +
           'WHICH ROWS MAY SIT OUTSIDE THE WINDOW. Rows are filtered EXACTLY against the window you asked for, and all-day events are your account\'s LOCAL days: a date-only value covers that whole day in the configured zone, and an all-day event on a neighbouring day is not returned. TWO KINDS OF ROW CAN STILL SIT OUTSIDE IT. A block that still carries its own recurrence (`recurrenceRule` or `recurrenceDates`) is never dropped whatever its dates say — its start is the series\' ORIGINAL date, which may be years away, and judging it on that would delete a real event rather than misdate it. And a FLOATING timed event comes back from expansion stamped as UTC with the floating marker destroyed, so nothing downstream can move it to your clock; it is judged on UTC and can therefore land in the wrong day for an account far from UTC. THE TWO FAIL IN OPPOSITE DIRECTIONS. A recurrence carrier only ever ADDS a row, so check each `start` against the window you asked for rather than assuming every row is inside it. A floating timed event can be ABSENT from the window it really belongs to, judged into a neighbouring day instead. A THIRD CASE IS NOT A ROW SITTING OUTSIDE THE WINDOW BUT A ROW THAT NEVER ARRIVES: the RDATE-only series described above. So an empty result is NOT proof of a free day on ANY account, and a "nothing on then" answer built from this call alone can be wrong in the direction that matters. ' +
@@ -1380,8 +1381,12 @@ const TOOLS = [
             },
             limit: {
               type: ['number', 'string'],
-              description: 'Maximum number of events to return (default: 50, max: 500). Hard cap, no paging: when the summary line reports a total larger than the number returned, raise `limit` to reach the rest, and narrow the window only if the total is above 500. The summary line states the total of rows that MATCHED, which is what answers "how many rows did `limit` cut off".',
+              description: 'Maximum number of events to return (default: 50, max: 100). A larger value is reduced to 100; read past it with `position`. The summary line states the total of rows that MATCHED, so a total above the number returned means more pages remain.',
               default: 50,
+            },
+            position: {
+              type: ['number', 'string'],
+              description: 'Skip this many events before returning the page: a 0-based offset into the full sorted list (every calendar queried, earliest start first), and the way to read past `limit` (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it; it is absent once the last page has been returned. Omit it, or pass 0, for the first page. A position past the end is not an error: it returns an empty page alongside the real total. EVERY PAGE RE-READS EVERY CALENDAR in the window, so each page costs a full read, and an event added, moved or deleted between calls can shift rows across a page boundary, repeating or skipping one. Events sharing a start time always come back in the same order, so an unchanged calendar pages without overlap or gap. Must be a whole number, 0 or greater: a negative value or a fraction is rejected.',
             },
           },
         },
@@ -2141,17 +2146,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'list_calendar_events': {
-        const { calendarId, limit, startDate, endDate } = args as any;
+        const { limit } = args as any;
         const davClient = initializeCalDAVClient();
         if (!davClient) {
           throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
         }
-        const { events, total, windowClamp, brokenCollections } = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
-        // Unpaged: this tool takes no `position`, so formatQueryResult offers no nextPosition.
-        // The window note and the broken-collection note (#136) ride AFTER the JSON so it
-        // stays parseable; each builder owns its wording and separator, and a call can need
-        // both.
-        return { content: [{ type: 'text', text: `${formatQueryResult({ items: events, total })}${buildCalendarWindowNote(windowClamp)}${buildEtcGmtZoneNote(events)}${buildBrokenCollectionNote(brokenCollections, 'read')}` }] };
+        // Orchestration lives in src/calendar-list-handler.ts.
+        return { content: await listCalendarEventsTool(args, clampLimit(limit, 50, 100), davClient) };
       }
 
       case 'get_calendar_event': {

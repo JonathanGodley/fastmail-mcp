@@ -1436,25 +1436,27 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
   quietly serve the last page. Reading from the other end is what `ascending` is for.
 
 **`nextPosition` is gated on the calling tool accepting `position`.** `formatQuerySummary`
-takes a `paged` flag, and only `list_emails` and `search_emails` set it. The contacts listings render
-through the same summary (they get the always-stated total, which is an improvement
-everywhere) but never the `nextPosition` clause: they declare no `position` parameter, so
-a caller following that instruction would have the call rejected outright by the
-unknown-parameter guard — an instruction the caller cannot act on is worse than none.
+takes a `paged` flag. A tool that accepts `position` renders paged, so its summary offers
+the `nextPosition` that reaches the next page. A tool that does not renders unpaged: it
+still gets the always-stated total, but never the `nextPosition` clause, because a caller
+following that instruction would have the call rejected outright by the unknown-parameter
+guard, and an instruction the caller cannot act on is worse than none.
 This is carried by *which renderer the handler picks*, not by a flag at every call site:
-`formatRawEmailQueryResult` (paged) versus `formatQueryResult` (not), because a forgotten
+a paged renderer (`formatRawEmailQueryResult`, `formatCalendarEventList`) versus
+`formatQueryResult`, because a forgotten
 flag would silently drop a promised signal while a wrong function name is visible in the
 handler. Paginating the contacts listings is tracked on
-[#94](https://github.com/JonathanGodley/fastmail-mcp/issues/94), and the calendar listing on
-[#169](https://github.com/JonathanGodley/fastmail-mcp/issues/169).
+[#94](https://github.com/JonathanGodley/fastmail-mcp/issues/94).
 
 **The CalDAV calendar listing joins the same discipline, over a different protocol.**
 `list_calendar_events` does not go through JMAP at all, so nothing hands it a server-computed
 `total` — it counts what it gathered. `getCalendarEvents` therefore returns
 `{ events, total }`, where `total` is the number of events that matched *after* the window
-re-filter and *before* `limit` trimmed the list, and the handler renders it through the same
-`formatQuerySummary` as everything else (unpaged, so no `nextPosition`, since the tool takes
-no `position`). The count is load-bearing here rather than cosmetic: recurrence expansion
+re-filter and *before* the page was cut, and the handler renders it through the same
+`formatQuerySummary` as everything else (paged, since the tool takes `position`). Each page
+re-reads every calendar and slices the sorted set at `position`, so `sortEventsByStart`
+breaks ties between rows sharing an instant on fixed keys, and an unchanged calendar is cut
+at the same place on every read. The count is load-bearing here rather than cosmetic: recurrence expansion
 turns one fortnightly series across a quarter into seven rows, so the cap is reached far
 sooner than it was when a series counted once, and a caller reading a capped page as the
 whole answer is exactly the false negative this section exists to prevent (#64, #100).

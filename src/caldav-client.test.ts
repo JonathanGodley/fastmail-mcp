@@ -45,6 +45,7 @@ import {
   isBrokenCalendarHomeEntry,
   findBrokenCalendarHomeCollections,
 } from './caldav-client.js';
+import type { CalendarEvent } from './caldav-client.js';
 // The assertion on the login refusal compares against this helper's OWN output rather than a
 // hand-written expectation, so the test cannot drift from the bound the helper enforces.
 import { describeUntrustedAt } from './coerce.js';
@@ -58,7 +59,7 @@ import { defaultCalendarMultiGet, makeMockDAVClient } from './testing/caldav-moc
 // the single place it is stored, so a test that asserts on a window has to pin that zone.
 import { setDefaultTimezone } from './email-formatter.js';
 import { toolJson, isUsableTimezone, resolveCalendarInstantMs, InvalidInputError } from './coerce.js';
-import { buildBrokenCollectionNote, formatQueryResult } from './response-formatters.js';
+import { buildBrokenCollectionNote, formatCalendarEventList, formatQueryResult } from './response-formatters.js';
 import { generateVTimezone } from './vtimezone.js';
 import { foldICalLine } from './ical-fold.js';
 
@@ -10613,6 +10614,104 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
       seen[0].indexOf('/cal/work/s.ics|s@fm||2027-03-02T09:00:00Z') < seen[0].indexOf('/cal/work/s.ics|s@fm|2027-03-05T09:00:00Z|2027-03-02T09:00:00Z'),
       seen[0].join('\n'),
     );
+  });
+});
+
+// The page is a slice of the fully sorted, window-filtered set (#169).
+describe('CalDAVCalendarClient.getCalendarEvents paging', () => {
+  before(() => setDefaultTimezone('Australia/Sydney'));
+  after(() => setDefaultTimezone(undefined));
+
+  const vevent = (uid: string, start: string, extra: string[] = []) => [
+    'BEGIN:VEVENT', `UID:${uid}`, `SUMMARY:${uid}`, `DTSTART:${start}`, ...extra, 'END:VEVENT',
+  ];
+  const ics = (...blocks: string[][]) =>
+    ['BEGIN:VCALENDAR', ...blocks.flat(), 'END:VCALENDAR'].join('\r\n');
+
+  // Five rows at 09:00Z on the 2nd: one UID in both calendars, a series' first occurrence
+  // with an override moved onto the same instant, and a one-off. One row either side.
+  const WORK = [
+    { url: '/cal/work/early.ics', data: ics(vevent('early@fm', '20270301T080000Z')) },
+    { url: '/cal/work/dup.ics', data: ics(vevent('dup@fm', '20270302T090000Z')) },
+    {
+      url: '/cal/work/s.ics',
+      data: ics(
+        vevent('s@fm', '20270302T090000Z'),
+        vevent('s@fm', '20270302T090000Z', ['RECURRENCE-ID:20270305T090000Z']),
+      ),
+    },
+    { url: '/cal/work/solo.ics', data: ics(vevent('solo@fm', '20270302T090000Z')) },
+  ];
+  const PERSONAL = [
+    { url: '/cal/personal/dup.ics', data: ics(vevent('dup@fm', '20270302T090000Z')) },
+    { url: '/cal/personal/late.ics', data: ics(vevent('late@fm', '20270303T090000Z')) },
+  ];
+
+  function pagingClient(reversed = false) {
+    const calendars = [
+      { displayName: 'Work', url: '/cal/work/' },
+      { displayName: 'Personal', url: '/cal/personal/' },
+    ];
+    const byCalendar: Record<string, typeof WORK> = { '/cal/work/': WORK, '/cal/personal/': PERSONAL };
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const mockDAVClient = makeMockDAVClient(reversed ? [...calendars].reverse() : calendars, {
+      fetchCalendarObjects: mock.fn(async (p: FetchObjectsParams) => {
+        const objects = byCalendar[p.calendar.url];
+        return reversed ? [...objects].reverse() : objects;
+      }),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  const WINDOW = ['2027-03-01', '2027-03-10'] as const;
+  const keyOf = (e: CalendarEvent) => `${e.url}|${e.id}|${e.recurrenceId ?? ''}`;
+
+  it('covers the whole sorted set once, with no row on two pages, at every page size', async () => {
+    const { client } = pagingClient();
+    const whole = await client.getCalendarEvents(undefined, 100, ...WINDOW);
+    assert.equal(whole.total, 7);
+    const wholeKeys = whole.events.map(keyOf);
+    assert.equal(new Set(wholeKeys).size, 7, wholeKeys.join('\n'));
+
+    for (const limit of [1, 2, 3]) {
+      const paged: string[] = [];
+      for (let position = 0; position < whole.total; position += limit) {
+        // A fresh client per page, its server answering in the opposite order, so the page
+        // boundary cannot lean on one read's arrival order.
+        const { client: fresh } = pagingClient(position % 2 === 1);
+        const page = await fresh.getCalendarEvents(undefined, limit, ...WINDOW, position);
+        assert.equal(page.total, 7);
+        assert.equal(page.position, position);
+        paged.push(...page.events.map(keyOf));
+      }
+      assert.deepEqual(paged, wholeKeys, `limit ${limit}`);
+    }
+  });
+
+  it('returns the same order whatever order the server answers in', async () => {
+    const forward = await pagingClient(false).client.getCalendarEvents(undefined, 100, ...WINDOW);
+    const backward = await pagingClient(true).client.getCalendarEvents(undefined, 100, ...WINDOW);
+    assert.deepEqual(backward.events.map(keyOf), forward.events.map(keyOf));
+  });
+
+  it('answers a position past the end with an empty page and the real total', async () => {
+    const { client } = pagingClient();
+    const page = await client.getCalendarEvents(undefined, 50, ...WINDOW, 99);
+    assert.deepEqual(page.events, []);
+    assert.equal(page.total, 7);
+    assert.equal(page.position, 99);
+  });
+
+  it('offers nextPosition exactly while rows remain', async () => {
+    const { client } = pagingClient();
+    const summary = async (limit: number, position?: number) =>
+      formatCalendarEventList(await client.getCalendarEvents(undefined, limit, ...WINDOW, position)).split('\n')[0];
+    assert.equal(await summary(3), 'Showing 3 of 7 results. nextPosition: 3 (pass position:3 for the next page).');
+    assert.equal(await summary(3, 3), 'Showing 3 of 7 results from position 3. nextPosition: 6 (pass position:6 for the next page).');
+    // A short last page and an exact last page both end the listing.
+    assert.equal(await summary(3, 6), 'Showing 1 of 7 results from position 6.');
+    assert.equal(await summary(4, 3), 'Showing 4 of 7 results from position 3.');
   });
 });
 

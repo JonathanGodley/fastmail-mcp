@@ -92,11 +92,13 @@ export interface CalendarEvent {
   transparency?: string;
 }
 
-// `total` is how many matched before `limit` trimmed the page: `limit` is a hard cap with no
-// paging, and a capped page read as the whole answer looks like an empty calendar (#100).
+// `total` is how many matched before the page was cut, since a capped page read as the whole
+// answer looks like an empty calendar (#100).
 export interface CalendarEventQueryResult {
   events: CalendarEvent[];
   total: number;
+  // The offset the page starts at, for the summary's "from position N" and `nextPosition`.
+  position?: number;
   // Set only when the window queried was narrower than the one the caller described. Structure,
   // not prose: the formatter owns the wording, as `QueryResult.exclusion` does for email.
   windowClamp?: CalendarWindowClamp;
@@ -3290,7 +3292,7 @@ export class CalDAVCalendarClient {
     return { calendars: listed, brokenCollections: asBrokenCollectionsField(brokenCollections) };
   }
 
-  async getCalendarEvents(calendarId?: string, limit: number = 50, startDate?: string, endDate?: string): Promise<CalendarEventQueryResult> {
+  async getCalendarEvents(calendarId?: string, limit: number = 50, startDate?: string, endDate?: string, position: number = 0): Promise<CalendarEventQueryResult> {
     const client = await this.getClient();
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
@@ -3458,8 +3460,9 @@ export class CalDAVCalendarClient {
     sortEventsByStart(allEvents, configuredZone);
 
     return {
-      events: allEvents.slice(0, limit),
+      events: allEvents.slice(position, position + limit),
       total: allEvents.length,
+      position,
       windowClamp,
       // Collections that failed at discovery (#136). A calendar that listed and then failed on
       // its event read still fails the whole call.

@@ -3,8 +3,8 @@ import { projectEmail } from './field-projection.js';
 import { describeUntrusted, describeUntrustedAt, echoCallerText, parseAddress, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
-import { CALENDAR_OPEN_WINDOW_DAYS, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
-import type { CalendarEvent, CalendarEventCopy, CalendarWindowClamp } from './caldav-client.js';
+import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
+import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
 import { buildIdCollapseNote } from './id-collapse-note.js';
@@ -41,6 +41,16 @@ export function formatQuerySummary(result: QueryResult, options?: { paged?: bool
 // promised signal while the wrong function is visible in the handler.
 export function formatQueryResult(result: QueryResult): string {
   return `${formatQuerySummary(result)}\n${toolJson(result.items)}`;
+}
+
+// list_calendar_events takes `position`, so it renders paged. The notes ride AFTER the JSON
+// so it stays parseable; each builder owns its wording and separator.
+export function formatCalendarEventList(result: CalendarEventQueryResult): string {
+  const { events, total, position } = result;
+  return `${formatQuerySummary({ items: events, total, position }, { paged: true })}\n${toolJson(events)}`
+    + buildCalendarWindowNote(result.windowClamp)
+    + buildEtcGmtZoneNote(events)
+    + buildBrokenCollectionNote(result.brokenCollections, 'read');
 }
 
 export function formatRawEmailQueryResult(result: QueryResult): string {
