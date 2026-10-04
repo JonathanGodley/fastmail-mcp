@@ -123,7 +123,7 @@ describe('loadHomeEnvFile', () => {
       try {
         assert.throws(
           () => loadHomeEnvFile(home),
-          (err: Error) => err.message.includes(file) && err.cause instanceof Error,
+          (err: Error) => err.message.startsWith(`${file} exists but could not be loaded: `) && err.cause instanceof Error,
         );
       } finally {
         allowRead(file);
