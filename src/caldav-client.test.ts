@@ -2799,6 +2799,11 @@ describe('parseICalDuration', () => {
     assert.equal(parseICalDuration('PT1H', '0999-01-01T10:00:00'), '0999-01-01T11:00:00');
   });
 
+  it('keeps an end landing in year 0001 or year 9999', () => {
+    assert.equal(parseICalDuration('-PT1H', '0001-01-01T01:00:00'), '0001-01-01T00:00:00');
+    assert.equal(parseICalDuration('PT1H', '9999-12-31T22:00:00'), '9999-12-31T23:00:00');
+  });
+
   it('gives no end for a floating start when the end falls outside years 0001-9999', () => {
     assert.equal(parseICalDuration('-P400D', '0001-01-01T10:00:00'), undefined);
     assert.equal(parseICalDuration('P2D', '9999-12-31T10:00:00'), undefined);
@@ -2853,6 +2858,20 @@ describe('parseICalDuration from a zoned start', () => {
   it('applies the nominal days before the exact time: P1DT6H from 23:00 across a spring-forward', () => {
     // P1D lands on 3 October 23:00 AEST; PT6H then crosses the transition.
     assert.equal(parseICalDuration('P1DT6H', '2026-10-02T23:00:00', SYDNEY), '2026-10-04T06:00:00');
+  });
+
+  it('returns undefined for a malformed DURATION on a zoned start', () => {
+    assert.equal(parseICalDuration('PXYZ', '2026-04-01T10:00:00', SYDNEY), undefined);
+  });
+
+  it('keeps a UTC or date-only start\'s own form when a zone is passed', () => {
+    assert.equal(parseICalDuration('PT1H', '2026-04-01T10:00:00Z', SYDNEY), '2026-04-01T11:00:00Z');
+    assert.equal(parseICalDuration('P1D', '2026-04-01', SYDNEY), '2026-04-02');
+  });
+
+  it('keeps a zoned end landing in year 0001 or year 9999', () => {
+    assert.equal(parseICalDuration('-PT1H', '0001-01-01T01:00:00', SYDNEY), '0001-01-01T00:00:00');
+    assert.equal(parseICalDuration('PT1H', '9999-12-31T22:00:00', SYDNEY), '9999-12-31T23:00:00');
   });
 
   it('keeps naive arithmetic for a TZID the runtime cannot resolve', () => {
