@@ -327,9 +327,8 @@ has one, else the text) and must occur exactly once; all ops are located in the 
 and applied together. Nothing outside the matches is touched, so the history survives
 because the caller never sent a replacement for it. This still identifies no quoted region:
 the caller names the exact bytes to change. The spliced part then takes every path a
-whole-body write of it would: the text fallback regenerates from spliced html, embedded
-images are reconciled against the result, and `callerWrittenHtml` is the spliced body with
-the caller's raw replacements.
+whole-body write of it would: the text fallback regenerates from spliced html, and embedded
+images are reconciled against the result.
 
 **Why no guard recognises the quote.** Shape recognition is lossy both ways: a foreign-shaped
 quote is dropped silently, and quote-shaped prose gets challenged.
