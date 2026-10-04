@@ -2877,6 +2877,26 @@ describe('parseICalDuration from a zoned start', () => {
     assert.equal(parseICalDuration('-P400D', '0001-01-01T10:00:00', SYDNEY), undefined);
   });
 
+  it('gives no end, rather than throwing, when the exact part passes the end beyond Date\'s range', () => {
+    assert.equal(parseICalDuration('PT2400000000H', '2026-11-01T00:30:00', 'America/New_York'), undefined);
+  });
+
+  it('reads a DURATION event whose end is beyond Date\'s range with no end, rather than failing the read', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:huge-duration@example.com',
+      'DTSTART;TZID=America/New_York:20261101T003000',
+      'DURATION:PT2400000000H',
+      'SUMMARY:Endless',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: 'UTC' });
+    assert.equal(event.start, '2026-11-01T00:30:00');
+    assert.equal(event.end, undefined);
+  });
+
   it('applies the nominal days before the exact time: P1DT6H from 23:00 across a spring-forward', () => {
     // P1D lands on 3 October 23:00 AEST; PT6H then crosses the transition.
     assert.equal(parseICalDuration('P1DT6H', '2026-10-02T23:00:00', SYDNEY), '2026-10-04T06:00:00');

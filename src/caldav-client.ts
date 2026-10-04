@@ -983,6 +983,8 @@ export function parseICalDuration(duration: string, start: string, tzid?: string
     const endMs = resolveDurationEndMs(duration, start, tzid);
     // NaN is a nominal end the resolver cannot read: one outside years 0000-9999.
     if (endMs === undefined || Number.isNaN(endMs)) return undefined;
+    // An exact part can push the end past Date's range, where `zoneOffsetMsAt` throws.
+    if (Number.isNaN(new Date(endMs).getTime())) return undefined;
     const wallMs = endMs + zoneOffsetMsAt(endMs, tzid);
     return inYearRange(wallMs) ? formatWallClockIso(wallMs) : undefined;
   }
