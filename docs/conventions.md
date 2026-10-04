@@ -2485,11 +2485,12 @@ incidental config:
 
 Embedded (`cid:`) images die in a single sanitising pass: `cid` is not an allowed scheme, so
 the `src` is stripped to empty and `exclusiveFilter` removes the element. Carrying those
-images into the quote (#13) means the same html has to be sanitised twice, in two modes:
+images into the quote (#13) means the same html has to be sanitised twice. The sanitiser has
+two modes:
 
 - **`collect`** reports which references the html makes and rewrites nothing. Its output is
-  byte-for-byte what the sanitiser alone would emit — `cid` is still not admitted — so it is
-  exactly the string a quotability check should read.
+  byte-for-byte what the sanitiser alone would emit — `cid` is still not admitted. The quote
+  builders do not use it: it keeps an `<img>` with a relative src, which `map` drops.
 - **`map`** rewrites each reference that resolved to a part into the Content-ID this draft
   attaches for it, with `allowedSchemesByTag` admitting `cid` **on `<img>` and nowhere
   else** (a per-tag list replaces the global one for that tag, so no other attribute can
@@ -2498,7 +2499,9 @@ images into the quote (#13) means the same html has to be sanitised twice, in tw
 The order is the whole point: minting an identifier commits the call to attaching a part,
 and a part nothing references is a stray file on the finished message. So pass one decides
 whether an html quote ships at all, and pass two runs only on a branch that really ships
-one. A text-only reply mints nothing.
+one. Both passes run `map`. Pass one maps with an empty map: it reports the references, and
+its html is what ships when nothing is minted. Pass two maps with the identifiers just
+minted. A text-only reply mints nothing.
 
 `map` mode is **default-deny**: an `<img>` survives only when the transform affirmatively
 emits a `src` — a mapped identifier, or a value whose normalised scheme is http/https.
@@ -2513,14 +2516,15 @@ admitting it would mean trusting the classifier's *negative* answer, which is th
 this design refuses to do. The drop is counted, never silent: `droppedUnsupportedImages` is
 its own counter with its own sentence, kept apart from a `data:` image (content this server
 declines to re-encode) and from an unmatched embedded-image reference (which named a part
-that was not there). It is a **map-mode-only** count, because the collecting pass drops none
-of these — it leaves them to the sanitiser, which passes a relative URL through. That
-asymmetry is precisely why the count exists: the pass that ships the quote loses an image
-the other pass would have kept. An `<img>` with no `src` at all is not counted; there was no
-image to lose.
+that was not there). It is a **map-mode-only** count, because `collect` drops none of these
+— it leaves them to the sanitiser, which passes a relative URL through. The count is
+reported only for a quote that ships, so it names images the sent quote loses. An `<img>`
+with no `src` at all is not counted; there was no image to lose.
 
-Quotability follows from the same pass. An original whose only content is embedded images
-sanitises in `collect` mode to something visually empty (`<div></div>`), so it is judged
+Quotability is read from pass one's html, so an image counts only if it would ship. An
+original whose only image has a relative src is therefore not quotable. An original whose
+only content is embedded images sanitises in pass one to something visually empty
+(`<div></div>`), so it is judged
 quotable by whether at least one of its references would really embed — resolved to exactly
 one part, that part declaring itself an image and carrying a blob. Testing mere *resolution*
 would open an attribution over a quote showing nothing; testing the sanitised string would
