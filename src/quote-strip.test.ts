@@ -427,6 +427,92 @@ describe('stripQuotedText — documented over-strip residuals', () => {
   });
 });
 
+describe('stripQuotedText — where a region starts and stops', () => {
+  it('keeps an indented answer set off from the quote above by a blank line, even glued to the next', () => {
+    const body = ['> Can you review it?', '', '    Reviewed, all fine.', '> And the budget?'].join('\n');
+    assert.equal(strip(body).text, '    Reviewed, all fine.');
+  });
+
+  it('reads a blank line inside a run as part of the run, not the end of it', () => {
+    // Read as two runs, the nested "wrote:" line would reach up for the reader's own "On".
+    const body = ['On balance, yes.', '> Ann wrote:', '', '> > Should we ship?'].join('\n');
+    assert.equal(strip(body).text, 'On balance, yes.');
+  });
+
+  it('does not reach above an attribution that already opens with "On"', () => {
+    const body = ['On Friday I can do it.', 'On Mon, Ann <ann@example.com> wrote:', '> Can you?'].join('\n');
+    assert.equal(strip(body).text, 'On Friday I can do it.');
+  });
+
+  it('finds a wrapped opener across a blank line between "wrote:" and the quote', () => {
+    const body = [
+      'Thanks.',
+      '',
+      'On Mon, Jun 15, 2026 at 1:29 PM Alice Example <alice@example.com>',
+      'wrote:',
+      '',
+      '> original',
+    ].join('\n');
+    assert.equal(strip(body).text, 'Thanks.');
+  });
+
+  it('looks for a wrapped opener no more than two lines above "wrote:"', () => {
+    const body = [
+      'On Monday the team met,',
+      'and we agreed the plan,',
+      'as Alice said in her note.',
+      'Alice wrote:',
+      '> quoted',
+    ].join('\n');
+    assert.equal(
+      strip(body).text,
+      'On Monday the team met,\nand we agreed the plan,\nas Alice said in her note.',
+    );
+  });
+
+  it('does not look for a wrapped opener across a blank line', () => {
+    const body = ['On Monday we agreed.', '', 'Ann <ann@example.com> wrote:', '> quoted'].join('\n');
+    assert.equal(strip(body).text, 'On Monday we agreed.');
+  });
+
+  it('takes the blank lines above an attribution with it in a bottom-posted reply', () => {
+    const body = ['Hi', '', 'On Mon, Ann wrote:', '> quoted', '', 'My reply.'].join('\n');
+    assert.equal(strip(body).text, 'Hi\n\nMy reply.');
+  });
+
+  it('takes a separator rule on the first line with the header block below it', () => {
+    const body = [
+      '________________',
+      'From: Ann <ann@example.com>',
+      'Sent: Monday',
+      'To: Sam',
+      'Subject: Hi',
+      '',
+      'old body',
+    ].join('\n');
+    assert.equal(strip(body).text, '');
+  });
+});
+
+describe('stripQuotedText — the header block lookahead', () => {
+  it('counts header lines across blank lines', () => {
+    const body = [
+      'Reply.', '', 'From: Ann <ann@example.com>', '', 'Sent: Monday', 'To: Sam', 'Subject: Hi', '', 'old body',
+    ].join('\n');
+    assert.equal(strip(body).text, 'Reply.');
+  });
+
+  it('counts a header line six lines below the From: line', () => {
+    const body = ['From: Ann <ann@example.com>', '', '', '', '', 'Sent: Monday', 'To: Sam'].join('\n');
+    assert.equal(strip(body).text, '');
+  });
+
+  it('looks no further than six lines below the From: line', () => {
+    const body = ['From: Ann <ann@example.com>', '', '', '', '', '', '', 'Sent: Monday', 'To: Sam'].join('\n');
+    assert.deepEqual(strip(body), { text: body, quotedBytesStripped: 0 });
+  });
+});
+
 describe('assertStripQuotedNotRaw', () => {
   it('rejects stripQuoted together with raw, naming both ways out', () => {
     assert.throws(
