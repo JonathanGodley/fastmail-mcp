@@ -1122,6 +1122,14 @@ describe('validateAndFormatICalDate', () => {
     assert.equal(validateAndFormatICalDate('0001-01-01T05:00:00+05:00', 'start'), '00010101T000000Z');
   });
 
+  it('refuses an offset datetime that falls past year 9999 once converted to UTC', () => {
+    assert.throws(
+      () => validateAndFormatICalDate('9999-12-31T23:00:00-05:00', 'start'),
+      /start falls in year 10000 once converted to UTC; .*0001-9999/,
+    );
+    assert.equal(validateAndFormatICalDate('9999-12-31T18:59:59-05:00', 'start'), '99991231T235959Z');
+  });
+
   it('classes every rejection as caller-fixable input', () => {
     for (const bad of ['garbage', '2026-02-31', '2026-04-18T10:00:00Z\r\nX', 42 as any]) {
       assert.throws(

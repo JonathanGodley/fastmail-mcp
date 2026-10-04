@@ -1441,14 +1441,15 @@ export function validateAndFormatICalDate(value: string, fieldName: string): str
   if (!tz) {
     return `${datePart.replace(/-/g, '')}T${timePart.replace(/:/g, '')}`;
   }
-  if (d.getUTCFullYear() <= 0) {
-    throw new InvalidInputError(`${fieldName} falls in year 0000 once converted to UTC; ${NO_YEAR_ZERO} (got: ${trimmed.slice(0, 60)})`);
+  const utcYear = d.getUTCFullYear();
+  if (utcYear < 1 || utcYear > 9999) {
+    throw new InvalidInputError(`${fieldName} falls in year ${String(utcYear).padStart(4, '0')} once converted to UTC; ${YEAR_RANGE} (got: ${trimmed.slice(0, 60)})`);
   }
   const utc = d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   return utc;
 }
 
-const NO_YEAR_ZERO = 'iCalendar dates are Gregorian, which has no year 0, so the earliest is 0001';
+const YEAR_RANGE = 'the year must be 0001-9999, since an iCalendar year has four digits and the Gregorian calendar has no year 0';
 
 /**
  * Reject a YYYY-MM-DD that names a day its month does not have; `new Date` would silently
@@ -1459,7 +1460,7 @@ const NO_YEAR_ZERO = 'iCalendar dates are Gregorian, which has no year 0, so the
  */
 function assertRealCalendarDate(datePart: string, echo: string, fieldName: string): void {
   if (datePart.startsWith('0000')) {
-    throw new InvalidInputError(`${fieldName} has year 0000; ${NO_YEAR_ZERO} (got: ${echo.slice(0, 60)})`);
+    throw new InvalidInputError(`${fieldName} has year 0000; ${YEAR_RANGE} (got: ${echo.slice(0, 60)})`);
   }
   const probe = new Date(`${datePart}T00:00:00Z`);
   if (Number.isNaN(probe.getTime()) || !probe.toISOString().startsWith(datePart)) {
