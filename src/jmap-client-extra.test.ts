@@ -2366,6 +2366,11 @@ describe('JMAP property consistency', () => {
     assert.ok(EMAIL_PROPERTIES_VERBOSE.includes('textBody'));
   });
 
+  it('compact fetches sentAt, defined once across both lists (#84)', () => {
+    assert.ok(EMAIL_PROPERTIES_COMPACT.includes('sentAt'));
+    assert.equal(EMAIL_PROPERTIES_VERBOSE.filter((p) => p === 'sentAt').length, 1);
+  });
+
   it('body properties include required fields', () => {
     assert.ok(EMAIL_BODY_PROPERTIES.includes('partId'));
     assert.ok(EMAIL_BODY_PROPERTIES.includes('blobId'));

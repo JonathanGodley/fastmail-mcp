@@ -262,16 +262,16 @@ export const EMAIL_PROPERTIES_COMPACT = [
   'id', 'subject', 'from', 'to', 'cc', 'bcc', 'replyTo', 'receivedAt',
   'preview', 'keywords', 'threadId', 'messageId', 'references', 'inReplyTo',
   'hasAttachment', 'header:List-Unsubscribe:asURLs', 'blobId', 'size', 'mailboxIds',
-  'textBody',
+  'textBody', 'sentAt',
 ] as const;
 
 // VERBOSE: superset with body properties, for verbose mode, getEmailById and getThread's
-// includeBodies mode (#74). `sentAt` is for reply-quote attribution. The two provenance
-// headers are deliberately VERBOSE-tier, not COMPACT: their values matter only when
-// operating on one draft, so an ordinary thread read does not surface them.
+// includeBodies mode (#74). The two provenance headers are deliberately VERBOSE-tier, not
+// COMPACT: their values matter only when operating on one draft, so an ordinary thread
+// read does not surface them.
 export const EMAIL_PROPERTIES_VERBOSE = [
   ...EMAIL_PROPERTIES_COMPACT,
-  'htmlBody', 'attachments', 'bodyValues', 'sentAt',
+  'htmlBody', 'attachments', 'bodyValues',
   'header:X-Forwarded-Message-Id:asMessageIds',
   'header:X-Fastmail-MCP-Source-Id:asText',
 ] as const;

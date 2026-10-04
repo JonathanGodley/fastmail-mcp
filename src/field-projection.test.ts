@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EMAIL_FIELD_NAMES, parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
+import { EMAIL_FIELD_NAMES, LIST_OPT_IN_FIELDS, parseEmailFields, projectEmail, projectListEmail, wantsHtmlBody } from './field-projection.js';
 import { simplifyEmail } from './email-formatter.js';
 import { attachDraftBodyHash } from './body-hash.js';
 import { InvalidInputError } from './coerce.js';
@@ -16,6 +16,7 @@ function rawEmail(overrides: Record<string, any> = {}): any {
     to: [{ email: 'bob@example.com' }],
     cc: [{ email: 'carol@example.com' }],
     receivedAt: '2026-01-15T09:00:00Z',
+    sentAt: '2026-01-15T08:58:00Z',
     threadId: 't1',
     messageId: ['<m1@example.com>'],
     references: ['<r1@example.com>', '<r2@example.com>'],
@@ -211,6 +212,27 @@ describe('parseEmailFields', () => {
 });
 
 // ---------- wantsHtmlBody ----------
+
+describe('projectListEmail', () => {
+  const simplified = simplifyEmail(withMailboxInfo(rawEmail(), { names: ['Inbox'], roles: ['inbox'] }));
+
+  it('drops only the opt-in fields when no projection was requested', () => {
+    const expected: Record<string, unknown> = { ...simplified };
+    delete expected.sentAt;
+    assert.ok('sentAt' in simplified);
+    assert.deepEqual(projectListEmail(simplified, undefined), expected);
+  });
+
+  it('returns an opt-in field the caller names', () => {
+    const projected = projectListEmail(simplified, new Set(['id', 'sentAt']));
+    assert.deepEqual(projected, { id: simplified.id, sentAt: simplified.sentAt });
+  });
+
+  it('lists only names that fields accepts', () => {
+    assert.deepEqual(LIST_OPT_IN_FIELDS, ['sentAt']);
+    assert.deepEqual(parseEmailFields([...LIST_OPT_IN_FIELDS]), new Set(LIST_OPT_IN_FIELDS));
+  });
+});
 
 describe('wantsHtmlBody', () => {
   it('is true only when bodyHtml is projected', () => {

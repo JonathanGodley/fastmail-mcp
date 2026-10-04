@@ -789,6 +789,26 @@ describe('formatEmailQueryResult', () => {
       assert.ok(result.includes('references'));
       assert.ok(result.includes('preview'));
     });
+
+    // sentAt is fetched for every list item but shown only on request (#84).
+    const items = (text: string) => JSON.parse(text.slice(text.indexOf('\n') + 1));
+    const sent = () => ({ ...threaded(), sentAt: '2025-12-31T23:59:00Z' });
+
+    it('omits sentAt by default, keeping every other default field', () => {
+      const [item] = items(formatEmailQueryResult({ items: [sent()], total: 1 }));
+      const [baseline] = items(formatEmailQueryResult({ items: [threaded()], total: 1 }));
+      assert.equal('sentAt' in item, false);
+      assert.deepEqual(item, baseline);
+    });
+
+    it('returns sentAt when fields names it', () => {
+      const [item] = items(formatEmailQueryResult(
+        { items: [sent()], total: 1 },
+        { fields: new Set(['id', 'date', 'sentAt']) },
+      ));
+      assert.deepEqual(Object.keys(item).sort(), ['date', 'id', 'sentAt']);
+      assert.equal(typeof item.sentAt, 'string');
+    });
   });
 
   // The query summary carries the two paging signals (#51). They describe the query,

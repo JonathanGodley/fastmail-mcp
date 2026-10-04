@@ -1,5 +1,5 @@
 import { simplifyEmail } from './email-formatter.js';
-import { projectEmail } from './field-projection.js';
+import { projectListEmail } from './field-projection.js';
 import { describeUntrusted, describeUntrustedAt, echoCallerText, parseAddress, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
@@ -54,7 +54,7 @@ export function formatRawQueryResult(result: QueryResult): string {
 // drift between them. The summary and exclusion note are never projected away: losing them
 // under a narrower shape would be a scope lie.
 export function formatEmailQueryResult(result: QueryResult, options?: { fields?: ReadonlySet<string> }): string {
-  const simplified = result.items.map(e => projectEmail(simplifyEmail(e), options?.fields));
+  const simplified = result.items.map(e => projectListEmail(simplifyEmail(e), options?.fields));
   return `${formatQuerySummary(result, { paged: true })}\n${toolJson(simplified)}`;
 }
 
