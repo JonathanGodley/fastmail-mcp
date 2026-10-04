@@ -26,13 +26,16 @@ function stripSentinels(s: string): string {
   return s.replace(/\n?\[body truncated\]/g, '').replace(/\n?\[encoding issues detected\]/g, '');
 }
 
-// Both block builders run the original's html through the two-pass sanitizer in
-// src/inline-images.ts (the posture is in docs/conventions.md). `collect` reports references
-// and rewrites nothing; `map` rewrites resolved references to the Content-IDs this draft
-// attaches. The order matters: minting an identifier commits the call to attaching a part,
-// so pass one decides whether an html quote ships and pass two runs only when one does.
+// Both block builders run the original's html through the `map` pass of the sanitizer in
+// src/inline-images.ts (the posture is in docs/conventions.md), twice. Pass one maps with an
+// empty map, so it reports references and yields exactly the html that ships when nothing is
+// minted; the `collect` pass would not do here, because it keeps an image src (a relative
+// path) that `map` drops, and quotability judged on it would put an attribution over an empty
+// quote. Pass two rewrites resolved references to the Content-IDs this draft attaches. The
+// order matters: minting an identifier commits the call to attaching a part, so pass one
+// decides whether an html quote ships and pass two runs only when one does.
 
-// Content-based, NOT a string trim: an embedded-image-only original collects to e.g.
+// Content-based, NOT a string trim: an embedded-image-only original sanitizes to e.g.
 // <div></div>, which must not count or an orphan "On … wrote:" ships over an empty quote
 // (it becomes quotable through the resolvability test instead). Placeholders are suppressed
 // because an unmapped image has already been dropped from sanitized html.
@@ -97,7 +100,7 @@ function collectQuoteRefs(
   if (!origHtml) {
     return { html: '', refs: [], droppedDataImages: 0, quotable: false, resolvedParts: [], unresolvedRefs: [] };
   }
-  const collected = sanitizeQuoteHtml(origHtml, { mode: 'collect' });
+  const collected = sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: new Map() });
   const resolution = images ? resolveCidRefs(collected.refs, images.sourceParts ?? []) : null;
   // On the edit path the resolution already happened elsewhere: the map holds exactly the
   // references that resolved to a carriable part, so membership answers the same question.
@@ -276,7 +279,7 @@ export function buildQuoteBlocks(input: {
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
-  // PASS 1: collect. Nothing is minted here.
+  // PASS 1: nothing is minted here.
   const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
@@ -411,7 +414,7 @@ export function buildForwardBlocks(input: {
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
-  // PASS 1: collect. An image-only original becomes quotable here, so an html block over it
+  // PASS 1: nothing is minted. An image-only original becomes quotable here, so an html block over it
   // shows the picture rather than the header block alone.
   const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
   const htmlQuotable = collected.quotable;
