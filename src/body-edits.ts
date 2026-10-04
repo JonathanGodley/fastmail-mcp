@@ -41,7 +41,7 @@ export function noteBodyEditsSplitSignature(part: BodyEditPart, count: number): 
   const one = count === 1;
   return (
     `${count} {{signature}} token${one ? '' : 's'} in ${part} ${one ? 'was' : 'were'} formed where a bodyEdits ` +
-    `replace meets the stored text beside it, so ${one ? 'it is' : 'they are'} stored as literal text: only a ` +
+    `replace meets the text beside it, so ${one ? 'it is' : 'they are'} stored as literal text: only a ` +
     'token wholly inside a replace expands. Put the whole {{signature}} in one replace.'
   );
 }
@@ -158,6 +158,19 @@ export function spliceBodyEdits(stored: string, located: readonly LocatedBodyEdi
     cursor = located[i].offset + located[i].matchedSize;
   }
   return out + stored.slice(cursor);
+}
+
+/** The stretches of `stored` that no located op matched, in order. */
+export function unmatchedSegments(stored: string, located: readonly LocatedBodyEdit[]): string[] {
+  const ordered = [...located].sort((x, y) => x.offset - y.offset);
+  const segments: string[] = [];
+  let cursor = 0;
+  for (const op of ordered) {
+    segments.push(stored.slice(cursor, op.offset));
+    cursor = op.offset + op.matchedSize;
+  }
+  segments.push(stored.slice(cursor));
+  return segments;
 }
 
 /** The receipt as one result line, sizes in the `chars` the replaced-draft sizes use. */

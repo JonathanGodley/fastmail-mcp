@@ -4,6 +4,7 @@ import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { InvalidInputError } from './coerce.js';
 import {
   coerceBodyEdits, formatBodyEditsReceipt, locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
+  unmatchedSegments,
 } from './body-edits.js';
 
 /** Asserts `fn` throws `type` with exactly `message` (McpError prefixes its code). */
@@ -271,11 +272,27 @@ describe('spliceBodyEdits', () => {
   });
 });
 
+describe('unmatchedSegments', () => {
+  it('returns the text around and between the matches, in stored order', () => {
+    assert.deepEqual(
+      unmatchedSegments('abcdefgh', [{ offset: 5, matchedSize: 2 }, { offset: 1, matchedSize: 2 }]),
+      ['a', 'de', 'h'],
+    );
+  });
+
+  it('returns an empty segment where matches touch or reach an end', () => {
+    assert.deepEqual(
+      unmatchedSegments('abcd', [{ offset: 0, matchedSize: 2 }, { offset: 2, matchedSize: 2 }]),
+      ['', '', ''],
+    );
+  });
+});
+
 describe('noteBodyEditsSplitSignature', () => {
   it('says one token in the singular', () => {
     assert.equal(
       noteBodyEditsSplitSignature('htmlBody', 1),
-      '1 {{signature}} token in htmlBody was formed where a bodyEdits replace meets the stored text beside it, ' +
+      '1 {{signature}} token in htmlBody was formed where a bodyEdits replace meets the text beside it, ' +
         'so it is stored as literal text: only a token wholly inside a replace expands. Put the whole {{signature}} in one replace.',
     );
   });
@@ -283,7 +300,7 @@ describe('noteBodyEditsSplitSignature', () => {
   it('says several tokens in the plural', () => {
     assert.equal(
       noteBodyEditsSplitSignature('textBody', 2),
-      '2 {{signature}} tokens in textBody were formed where a bodyEdits replace meets the stored text beside it, ' +
+      '2 {{signature}} tokens in textBody were formed where a bodyEdits replace meets the text beside it, ' +
         'so they are stored as literal text: only a token wholly inside a replace expands. Put the whole {{signature}} in one replace.',
     );
   });

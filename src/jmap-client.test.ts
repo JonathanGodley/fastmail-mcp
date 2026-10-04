@@ -6140,6 +6140,23 @@ describe('updateDraft bodyEdits (#177)', () => {
     assert.deepEqual(result.notes, [noteBodyEditsSplitSignature('htmlBody', 1)]);
   });
 
+  it('still notes a split token when another op deletes a stored {{signature}}', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING]);
+    const split = { ...PLANTED, bodyValues: { h: { value: '<p>A {{sigXX</p><p>SIGN</p><q>{{signature}}</q>' } } };
+    const makeReq = serve(split);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [
+        { find: 'XX', replace: 'nature}}' },
+        { find: '<p>SIGN</p>', replace: '{{signature}}' },
+        { find: '<q>{{signature}}</q>', replace: '' },
+      ],
+      expandSignature: true,
+      bodyHash: hashOf(split),
+    });
+    assert.equal(created(makeReq).bodyValues.html.value, '<p>A {{signature}}</p><div><div>Test User</div></div>');
+    assert.deepEqual(result.notes, [noteBodyEditsSplitSignature('htmlBody', 1)]);
+  });
+
   // -- the spliced part meets the guards a whole-body hand-back of it meets --
 
   it('refuses a replace that puts a CDATA section in the html', async () => {
@@ -6149,7 +6166,7 @@ describe('updateDraft bodyEdits (#177)', () => {
       () => client.updateDraft('draft-1', {
         bodyEdits: [{ find: 'Friday', replace: '<![CDATA[Friday at 3]]>' }], bodyHash: hashOf(draft),
       }),
-      (err: unknown) => err instanceof InvalidInputError && /^htmlBody contains a CDATA section/.test(err.message),
+      (err: unknown) => err instanceof InvalidInputError && /^bodyEdits: the draft.s htmlBody after these edits fails a body check \(an op can escape or remove the offending text\): htmlBody contains a CDATA section/.test(err.message),
     );
     wroteNothing(makeReq);
   });
@@ -6161,7 +6178,18 @@ describe('updateDraft bodyEdits (#177)', () => {
       () => client.updateDraft('draft-1', {
         bodyEdits: [{ find: '<p>x</p>', replace: '&lt;p&gt;x&lt;/p&gt;' }], bodyHash: hashOf(draft),
       }),
-      (err: unknown) => err instanceof InvalidInputError && /^htmlBody appears to be HTML-escaped/.test(err.message),
+      (err: unknown) => err instanceof InvalidInputError && /^bodyEdits: the draft.s htmlBody after these edits fails a body check \(an op can escape or remove the offending text\): htmlBody appears to be HTML-escaped/.test(err.message),
+    );
+    wroteNothing(makeReq);
+  });
+
+  it('names bodyEdits when the failing text is stored text no op touched', async () => {
+    const draft = { ...PLANTED, bodyValues: { h: { value: '<p>See you Friday.</p><blockquote><![CDATA[x]]></blockquote>' } } };
+    const makeReq = serve(draft);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { bodyEdits: [{ find: 'Friday', replace: 'Saturday' }], bodyHash: hashOf(draft) }),
+      (err: unknown) => err instanceof InvalidInputError
+        && err.message.startsWith('bodyEdits: the draft\'s htmlBody after these edits fails a body check (an op can escape or remove the offending text): htmlBody contains a CDATA section'),
     );
     wroteNothing(makeReq);
   });
@@ -6172,7 +6200,7 @@ describe('updateDraft bodyEdits (#177)', () => {
       () => client.updateDraft('draft-1', {
         bodyEdits: [{ find: 'Hi Bob,', replace: '<![CDATA[Hi Bob,' }], bodyHash: hashOf(TEXT_ONLY),
       }),
-      (err: unknown) => err instanceof InvalidInputError && /^textBody is wrapped in a CDATA section/.test(err.message),
+      (err: unknown) => err instanceof InvalidInputError && /^bodyEdits: the draft.s textBody after these edits fails a body check \(an op can escape or remove the offending text\): textBody is wrapped in a CDATA section/.test(err.message),
     );
     wroteNothing(makeReq);
   });

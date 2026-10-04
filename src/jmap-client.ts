@@ -10,7 +10,7 @@ import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenExpansion, BodyTokenScan } from './body-tokens.js';
 import {
   NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_WITH_BODY, REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
-  locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
+  locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits, unmatchedSegments,
 } from './body-edits.js';
 import type { BodyEdit, BodyEditPart, BodyEditsReceipt, LocatedBodyEdit } from './body-edits.js';
 import {
@@ -2343,8 +2343,17 @@ export class JmapClient {
       const located = locateBodyEdits(stored, updates.bodyEdits!, editedPart);
       edited = { stored, located };
       const spliced = spliceBodyEdits(stored, located, updates.bodyEdits!.map((op) => op.replace));
-      // The guards a whole-body hand-back of the spliced part meets.
-      assertBodyInputs({ [editedPart]: spliced });
+      // The guards a whole-body hand-back of the spliced part meets, attributed to bodyEdits,
+      // since the offending text may be stored text no op touched.
+      try {
+        assertBodyInputs({ [editedPart]: spliced });
+      } catch (err) {
+        if (!(err instanceof InvalidInputError)) throw err;
+        throw new InvalidInputError(
+          `bodyEdits: the draft's ${editedPart} after these edits fails a body check ` +
+          `(an op can escape or remove the offending text): ${err.message}`,
+        );
+      }
       if (editedPart === 'htmlBody') authoredHtml = spliced;
       else authoredText = spliced;
     }
@@ -2494,9 +2503,12 @@ export class JmapClient {
           tokenNotes.push(noteEscapedTokenShips(e.text));
         }
       } else if (p.part === editedPart) {
-        // A token a replace completes with the stored text beside it is in no string the flag
-        // expands, so it ships literally.
-        const surplus = scan.counts.signature - storedScan.counts.signature - ownSignatures(p.part);
+        // A token formed where a replace meets the text beside it is in no string the flag
+        // expands, so it ships literally. Stored tokens are counted only where no op matched,
+        // or one an op deletes would cancel it out.
+        const untouched = unmatchedSegments(edited!.stored, edited!.located)
+          .reduce((n, s) => n + scanBodyTokens(s).counts.signature, 0);
+        const surplus = scan.counts.signature - untouched - ownSignatures(p.part);
         if (surplus > 0) tokenNotes.push(noteBodyEditsSplitSignature(editedPart, surplus));
       }
       // Count rise per token, the signature note's gate: a `{{quote}}` sitting in the quoted
