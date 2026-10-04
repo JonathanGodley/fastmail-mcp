@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQuerySummary, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -872,24 +872,24 @@ describe('formatEmailQueryResult', () => {
 
 // ---------- summaries for tools that do not take a position ----------
 
-// formatQueryResult renders list_calendar_events, which declares no `position`. It must
-// still state the total, but a nextPosition would be an instruction its callers cannot
-// follow — passing `position` back is rejected by the unknown-parameter guard.
-describe('formatQuerySummary on an unpaged tool', () => {
+// Without `paged` the summary still states the total but never offers a nextPosition:
+// passing `position` back to a tool that does not declare it is rejected by the
+// unknown-parameter guard.
+describe('formatQuerySummary without paged', () => {
   const rows = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `ev-${i}` }));
 
   it('states the total but offers no nextPosition when results remain', () => {
-    const summary = formatQueryResult({ items: rows(50), total: 312 }).split('\n')[0];
+    const summary = formatQuerySummary({ items: rows(50), total: 312 });
     assert.equal(summary, 'Showing 50 of 312 results.');
   });
 
   it('offers no nextPosition even if the response carries a position', () => {
-    const summary = formatQueryResult({ items: rows(50), total: 312, position: 50 }).split('\n')[0];
+    const summary = formatQuerySummary({ items: rows(50), total: 312, position: 50 });
     assert.ok(!summary.includes('nextPosition'), summary);
   });
 
   it('says a missing total is missing, without the paging consequence', () => {
-    const summary = formatQueryResult({ items: rows(50) }).split('\n')[0];
+    const summary = formatQuerySummary({ items: rows(50) });
     assert.equal(summary, 'Showing 50 results; the total match count was not returned.');
   });
 });

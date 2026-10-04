@@ -36,13 +36,6 @@ export function formatQuerySummary(result: QueryResult, options?: { paged?: bool
   return `Showing ${items.length} of ${total} results${from}.${more}`;
 }
 
-// For a listing tool that does NOT take a `position`. Paging is carried by which renderer
-// the handler picks rather than by a flag, because a forgotten flag would silently drop a
-// promised signal while the wrong function is visible in the handler.
-export function formatQueryResult(result: QueryResult): string {
-  return `${formatQuerySummary(result)}\n${toolJson(result.items)}`;
-}
-
 // list_calendar_events takes `position`, so it renders paged. The notes ride AFTER the JSON
 // so it stays parseable; each builder owns its wording and separator.
 export function formatCalendarEventList(result: CalendarEventQueryResult): string {

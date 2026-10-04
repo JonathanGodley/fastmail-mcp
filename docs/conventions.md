@@ -1439,13 +1439,13 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
 
 **`nextPosition` is gated on the calling tool accepting `position`.** `formatQuerySummary`
 takes a `paged` flag, and a tool gets it from the renderer its handler picks:
-`formatRawQueryResult`, `formatCalendarEventList` and the simplified listing renderers set
-it, `formatQueryResult` does not. A tool that declares no `position` renders through
-`formatQueryResult`, because a caller following a `nextPosition` it cannot pass back would
-have the call rejected outright by the unknown-parameter guard — an instruction the caller
-cannot act on is worse than none. Paging is carried by the renderer rather than by a flag at
-every call site because a forgotten flag would silently drop a promised signal, while a
-wrong function name is visible in the handler. A paged listing also needs an order the
+`formatRawQueryResult`, `formatCalendarEventList` and the simplified listing renderers all
+set it, and every listing tool today declares `position`. A tool that did not would need a
+renderer that leaves the flag off, because a caller following a `nextPosition` it cannot
+pass back would have the call rejected outright by the unknown-parameter guard — an
+instruction the caller cannot act on is worse than none. Paging is carried by the renderer
+rather than by a flag at every call site because a forgotten flag would silently drop a
+promised signal, while a wrong function name is visible in the handler. A paged listing also needs an order the
 server keeps from call to call, or an offset points somewhere different on each page: the
 contacts queries send an explicit sort ending in `uid` for that reason (#94).
 

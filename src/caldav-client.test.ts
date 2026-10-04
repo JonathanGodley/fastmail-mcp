@@ -60,7 +60,7 @@ import { defaultCalendarMultiGet, makeMockDAVClient } from './testing/caldav-moc
 // the single place it is stored, so a test that asserts on a window has to pin that zone.
 import { setDefaultTimezone } from './email-formatter.js';
 import { toolJson, isUsableTimezone, resolveCalendarInstantMs, InvalidInputError } from './coerce.js';
-import { buildBrokenCollectionNote, formatCalendarEventList, formatQueryResult } from './response-formatters.js';
+import { buildBrokenCollectionNote, formatCalendarEventList } from './response-formatters.js';
 import { generateVTimezone } from './vtimezone.js';
 import { foldICalLine } from './ical-fold.js';
 
@@ -767,7 +767,7 @@ describe('timeZone / endTimeZone (#139)', () => {
     assert.equal(event.endTimeZone, 'Pacific/Auckland');
   });
 
-  it('survives the toolJson (get_calendar_event) and formatQueryResult (list_calendar_events) serialisation seams', () => {
+  it('survives the toolJson (get_calendar_event) and formatCalendarEventList (list_calendar_events) serialisation seams', () => {
     const data = [
       'BEGIN:VCALENDAR',
       'BEGIN:VEVENT',
@@ -785,12 +785,12 @@ describe('timeZone / endTimeZone (#139)', () => {
     assert.equal(single.timeZone, null);
     assert.ok('timeZone' in single, 'timeZone key must survive toolJson, not just its value');
 
-    // formatQueryResult: summary line followed by a JSON array of items.
-    const rendered = formatQueryResult({ items: [event], total: 1 });
+    // formatCalendarEventList: summary line followed by a JSON array of items.
+    const rendered = formatCalendarEventList({ events: [event], total: 1 });
     const jsonLine = rendered.split('\n')[1];
     const parsed = JSON.parse(jsonLine);
     assert.equal(parsed[0].timeZone, null);
-    assert.ok('timeZone' in parsed[0], 'timeZone key must survive formatQueryResult, not just its value');
+    assert.ok('timeZone' in parsed[0], 'timeZone key must survive formatCalendarEventList, not just its value');
   });
 });
 
@@ -6603,7 +6603,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
         fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: free, url: '/cal/ser.ics', etag: FIXTURE_ETAG }]),
       });
       const result = await client.getCalendarEvents(undefined, 50, '2026-10-03T00:00:00Z', '2026-10-04T00:00:00Z');
-      assert.match(formatQueryResult({ items: result.events, total: result.total }), /"transparency":"free"/);
+      assert.match(formatCalendarEventList(result), /"transparency":"free"/);
     });
 
     // Hostile and malformed spellings of the one property, each read the way the rules above
