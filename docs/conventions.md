@@ -1436,16 +1436,16 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
   quietly serve the last page. Reading from the other end is what `ascending` is for.
 
 **`nextPosition` is gated on the calling tool accepting `position`.** `formatQuerySummary`
-takes a `paged` flag, and only `list_emails` and `search_emails` set it. The contacts listings render
-through the same summary (they get the always-stated total, which is an improvement
-everywhere) but never the `nextPosition` clause: they declare no `position` parameter, so
-a caller following that instruction would have the call rejected outright by the
-unknown-parameter guard — an instruction the caller cannot act on is worse than none.
-This is carried by *which renderer the handler picks*, not by a flag at every call site:
-`formatRawEmailQueryResult` (paged) versus `formatQueryResult` (not), because a forgotten
-flag would silently drop a promised signal while a wrong function name is visible in the
-handler. Paginating the contacts listings is tracked on
-[#94](https://github.com/JonathanGodley/fastmail-mcp/issues/94), and the calendar listing on
+takes a `paged` flag, and a tool gets it from the renderer its handler picks:
+`formatRawQueryResult` and the simplified listing renderers set it, `formatQueryResult` does
+not. A tool that declares no `position` renders through `formatQueryResult`, because a
+caller following a `nextPosition` it cannot pass back would have the call rejected outright
+by the unknown-parameter guard — an instruction the caller cannot act on is worse than none.
+Paging is carried by the renderer rather than by a flag at every call site because a
+forgotten flag would silently drop a promised signal, while a wrong function name is visible
+in the handler. A paged listing also needs an order the server keeps from call to call, or
+an offset points somewhere different on each page: the contacts queries send an explicit
+sort ending in `uid` for that reason (#94). Paginating the calendar listing is tracked on
 [#169](https://github.com/JonathanGodley/fastmail-mcp/issues/169).
 
 **The CalDAV calendar listing joins the same discipline, over a different protocol.**

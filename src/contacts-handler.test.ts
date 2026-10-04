@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createContactTool, getContactTool, updateContactTool, deleteContactTool, type ContactsWriteClient } from './contacts-handler.js';
+import { createContactTool, getContactTool, updateContactTool, deleteContactTool, listContactsTool, searchContactsTool, type ContactsReadClient, type ContactsWriteClient } from './contacts-handler.js';
 import { InvalidInputError } from './coerce.js';
 import { simplifyContact } from './response-formatters.js';
 import type { UpdateContactPatch } from './contacts-calendar.js';
@@ -333,5 +333,83 @@ describe('contact tool boolean flags', () => {
     await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', raw: 'yes' }, {} as any), /raw must be true or false/);
     await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', verbose: 'yes' }, {} as any), /verbose must be true or false/);
     await assert.rejects(() => updateContactTool({ contactId: 'C1', notes: 'x', allowEntryReplace: 'yes' }, {} as any), /allowEntryReplace must be true or false/);
+  });
+});
+
+// ---------- list_contacts / search_contacts ----------
+
+// A read client that records every query, so a test can prove a refused call sent none.
+function makeReadClient(page: { ids: string[]; total: number; position: number }): {
+  client: ContactsReadClient;
+  queries: Array<{ query?: string; limit: number; position?: number }>;
+} {
+  const queries: Array<{ query?: string; limit: number; position?: number }> = [];
+  const result = () => ({ items: page.ids.map((id) => ({ ...CARD, id })), total: page.total, position: page.position });
+  const client: ContactsReadClient = {
+    async getContacts(limit, position) {
+      queries.push({ limit, position });
+      return result();
+    },
+    async searchContacts(query, limit, position) {
+      queries.push({ query, limit, position });
+      return result();
+    },
+  };
+  return { client, queries };
+}
+
+const READ_TOOLS = [
+  { tool: 'listContactsTool', run: (args: any, limit: number, client: ContactsReadClient) => listContactsTool(args, limit, client) },
+  { tool: 'searchContactsTool', run: (args: any, limit: number, client: ContactsReadClient) => searchContactsTool({ query: 'ada', ...args }, limit, client) },
+];
+
+for (const { tool, run } of READ_TOOLS) {
+  describe(`${tool} paging`, () => {
+    for (const bad of [-1, 1.5, 'abc']) {
+      it(`refuses position ${JSON.stringify(bad)} before any query`, async () => {
+        const { client, queries } = makeReadClient({ ids: ['C1'], total: 1, position: 0 });
+        await assert.rejects(
+          () => run({ position: bad }, 20, client),
+          (err: Error) => err instanceof InvalidInputError && /^position /.test(err.message),
+        );
+        assert.equal(queries.length, 0, 'a refused position must not reach the server');
+      });
+    }
+
+    it('hands the coerced position and the given limit to the client', async () => {
+      const { client, queries } = makeReadClient({ ids: ['C1'], total: 1, position: 40 });
+      await run({ position: '40' }, 25, client);
+      assert.equal(queries.length, 1);
+      assert.equal(queries[0].position, 40);
+      assert.equal(queries[0].limit, 25);
+    });
+
+    it('omits position when the caller gave none', async () => {
+      const { client, queries } = makeReadClient({ ids: ['C1'], total: 1, position: 0 });
+      await run({}, 20, client);
+      assert.equal(queries[0].position, undefined);
+    });
+
+    for (const raw of [false, true]) {
+      it(`offers nextPosition while more remain${raw ? ' under raw' : ''}`, async () => {
+        const { client } = makeReadClient({ ids: ['C1', 'C2'], total: 10, position: 4 });
+        const content = await run({ position: 4, raw }, 2, client);
+        assert.ok(
+          content[0].text.startsWith('Showing 2 of 10 results from position 4. nextPosition: 6'),
+          content[0].text.split('\n')[0],
+        );
+      });
+    }
+  });
+}
+
+describe('searchContactsTool', () => {
+  it('refuses a missing query before any query is sent', async () => {
+    const { client, queries } = makeReadClient({ ids: [], total: 0, position: 0 });
+    await assert.rejects(
+      () => searchContactsTool({}, 20, client),
+      (err: Error) => err instanceof InvalidInputError && /query is required/.test(err.message),
+    );
+    assert.equal(queries.length, 0);
   });
 });

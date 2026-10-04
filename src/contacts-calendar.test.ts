@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { ContactsCalendarClient } from './contacts-calendar.js';
+import { formatContactQueryResult } from './response-formatters.js';
 import type { JmapRequest } from './jmap-client.js';
 import { FastmailAuth } from './auth.js';
 import { callArguments, findCallArguments, type RecordedCalls } from './testing/mock-calls.js';
@@ -74,6 +75,68 @@ describe('contacts reads', () => {
     const [query, get] = callArguments(makeReq)[0].methodCalls;
     assert.equal(query[1].accountId, CONTACTS_ACCOUNT);
     assert.equal(get[1].accountId, CONTACTS_ACCOUNT);
+  });
+
+  // The sort is what makes `position` mean the same card on every call: without it the
+  // server order is unspecified, and `uid` is the tiebreak for cards with equal names.
+  const CONTACT_SORT = [
+    { property: 'name/given', isAscending: true },
+    { property: 'name/surname', isAscending: true },
+    { property: 'uid', isAscending: true },
+  ];
+
+  it('sends position and the stable name sort from getContacts', async () => {
+    const makeReq = stubMakeRequest(client, queryAndGetResponse([{ id: 'C1' }]));
+    await client.getContacts(10, 40);
+    const [query] = callArguments(makeReq)[0].methodCalls;
+    assert.equal(query[1].position, 40);
+    assert.equal(query[1].limit, 10);
+    assert.deepEqual(query[1].sort, CONTACT_SORT);
+  });
+
+  it('sends position and the stable name sort from searchContacts', async () => {
+    const makeReq = stubMakeRequest(client, queryAndGetResponse([{ id: 'C1' }]));
+    await client.searchContacts('ada', 10, 40);
+    const [query] = callArguments(makeReq)[0].methodCalls;
+    assert.equal(query[1].position, 40);
+    assert.deepEqual(query[1].filter, { text: 'ada' });
+    assert.deepEqual(query[1].sort, CONTACT_SORT);
+  });
+
+  it('omits position when none or 0 is given, and still sorts', async () => {
+    const makeReq = stubMakeRequest(client, queryAndGetResponse([{ id: 'C1' }]));
+    await client.getContacts(10);
+    await client.searchContacts('ada', 10);
+    await client.getContacts(10, 0);
+    await client.searchContacts('ada', 10, 0);
+    assert.equal(makeReq.mock.calls.length, 4);
+    for (let i = 0; i < 4; i++) {
+      const [query] = callArguments(makeReq, i)[0].methodCalls;
+      assert.ok(!('position' in query[1]), `call ${i}: an absent or 0 position must not be sent`);
+      assert.deepEqual(query[1].sort, CONTACT_SORT);
+    }
+  });
+
+  it('falls back to the requested position when the server omits it', async () => {
+    // `position` in a /query response is the server's to report; without this fallback the
+    // summary would count a later page from 0 and point nextPosition back at page two.
+    stubMakeRequest(client, {
+      methodResponses: [
+        ['ContactCard/query', { ids: ['C1', 'C2'], total: 10 }, 'query'],
+        ['ContactCard/get', { list: [{ id: 'C1' }, { id: 'C2' }] }, 'contacts'],
+      ],
+    });
+    const listed = await client.getContacts(2, 4);
+    const searched = await client.searchContacts('ada', 2, 4);
+    const first = await client.getContacts(2);
+    for (const result of [listed, searched]) {
+      assert.equal(result.position, 4);
+      assert.ok(
+        formatContactQueryResult(result).startsWith('Showing 2 of 10 results from position 4. nextPosition: 6'),
+        formatContactQueryResult(result).split('\n')[0],
+      );
+    }
+    assert.equal(first.position, 0);
   });
 
   it('addresses the contacts account from getContactById', async () => {

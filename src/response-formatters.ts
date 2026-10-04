@@ -43,7 +43,7 @@ export function formatQueryResult(result: QueryResult): string {
   return `${formatQuerySummary(result)}\n${toolJson(result.items)}`;
 }
 
-export function formatRawEmailQueryResult(result: QueryResult): string {
+export function formatRawQueryResult(result: QueryResult): string {
   return `${formatQuerySummary(result, { paged: true })}\n${toolJson(result.items)}`;
 }
 
@@ -820,8 +820,7 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
   return result;
 }
 
-// Unpaged: the total, never a nextPosition.
 export function formatContactQueryResult(result: QueryResult, options?: { verbose?: boolean }): string {
   const simplified = result.items.map(c => simplifyContact(c, options));
-  return `${formatQuerySummary(result)}\n${toolJson(simplified)}`;
+  return `${formatQuerySummary(result, { paged: true })}\n${toolJson(simplified)}`;
 }

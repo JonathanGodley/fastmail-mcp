@@ -12,7 +12,7 @@ import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
-import { formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
+import { formatQueryResult, formatRawQueryResult, formatEmailQueryResult, buildExclusionNote, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
 import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, coercePosition, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
 import { attachDraftBodyHash } from './body-hash.js';
@@ -24,7 +24,7 @@ import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_
 import { readThread } from './thread-handler.js';
 import { runBulkReadTest } from './bulk-test-handler.js';
 import { listMailboxes, createMailbox } from './mailbox-handler.js';
-import { createContactTool, getContactTool, updateContactTool, deleteContactTool } from './contacts-handler.js';
+import { createContactTool, getContactTool, updateContactTool, deleteContactTool, listContactsTool, searchContactsTool } from './contacts-handler.js';
 import createDebug from 'debug';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
@@ -608,6 +608,11 @@ const POSITION_TOOL_DESC =
 const POSITION_PARAM_DESC =
   'Skip this many results before returning the page — a 0-based offset into the full match set, and the way to read past this tool\'s `limit` cap (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it: it is the position the server actually served plus what it actually returned, so a short final page ends the listing instead of advertising another one. Every response states the total match count; `nextPosition` appears only while more results remain. All filters (including the default Trash/Spam exclusion) are applied server-side to every page, so paging never changes what matches. The Trash/Spam withheld-count note describes the WHOLE match set, not the page: the same count repeats on every page, so never add up the notes across pages. Omit it, or pass 0, for the first page. A position past the end is not an error — it returns an empty page alongside the real total, so you can see you overshot. Must be a whole number, 0 or greater: a negative value is rejected (JMAP would read it as counting back from the end; to read from the oldest end use ascending:true) and so is a fraction.';
 
+// The contacts version: the same contract, without the email-only Trash/Spam and
+// `ascending` sentences, plus the order a page follows (measured: #94).
+const CONTACT_POSITION_PARAM_DESC =
+  'Skip this many contacts before returning the page — a 0-based offset into the full match set, and the way to read past this tool\'s `limit` cap (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it: it is the position the server actually served plus what it actually returned, so a short final page ends the listing instead of advertising another one. Every response states the total match count; `nextPosition` appears only while more results remain. Pages follow one fixed order — first name, then surname, then the card\'s uid as a tiebreak — so an offset points at the same place on every call while the address book is unchanged. Names are compared byte by byte, so the order is case-sensitive (an uppercase letter sorts before every lowercase one), and cards with no first name come first. Omit it, or pass 0, for the first page. A position past the end is not an error — it returns an empty page alongside the real total, so you can see you overshot. Must be a whole number, 0 or greater: a negative value is rejected, and so is a fraction.';
+
 function positionSchemaProperty() {
   return {
     type: ['number', 'string'],
@@ -1098,14 +1103,18 @@ const TOOLS = [
       },
       {
         name: 'list_contacts',
-        description: 'List contacts from the address book. ' + CONTACT_SHAPE_DESC,
+        description: 'List contacts from the address book, ordered by first name and then surname (see position). ' + CONTACT_SHAPE_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
             limit: {
               type: ['number', 'string'],
-              description: 'Maximum number of contacts to return (default: 20, max: 100). Hard cap, no paging — a larger value is silently reduced to 100 and there is no way to reach the rest.',
+              description: 'Maximum number of contacts to return (default: 20, max: 100). A larger value is silently reduced to 100; read further with position.',
               default: 20,
+            },
+            position: {
+              type: ['number', 'string'],
+              description: CONTACT_POSITION_PARAM_DESC,
             },
             verbose: {
               type: ['boolean', 'string'],
@@ -1142,7 +1151,7 @@ const TOOLS = [
       },
       {
         name: 'search_contacts',
-        description: 'Search contacts by name or email. ' + CONTACT_SHAPE_DESC,
+        description: 'Search contacts by name or email, ordered by first name and then surname (see position). ' + CONTACT_SHAPE_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1152,8 +1161,12 @@ const TOOLS = [
             },
             limit: {
               type: ['number', 'string'],
-              description: 'Maximum number of results (default: 20, max: 100). Hard cap, no paging — a larger value is silently reduced to 100 and there is no way to reach the rest.',
+              description: 'Maximum number of results (default: 20, max: 100). A larger value is silently reduced to 100; read further with position.',
               default: 20,
+            },
+            position: {
+              type: ['number', 'string'],
+              description: CONTACT_POSITION_PARAM_DESC,
             },
             verbose: {
               type: ['boolean', 'string'],
@@ -1988,7 +2001,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         // The exclusion note rides after the JSON on both raw and simplified, so the JSON
         // block stays parseable.
-        const body = raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields });
+        const body = raw ? formatRawQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
           content: [
             {
@@ -2066,51 +2079,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case 'list_contacts': {
-        const { limit } = args as any;
-        // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw, 'raw') ?? false;
-        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
-        const contactsClient = initializeContactsCalendarClient();
-        // Hard cap: the contacts tools have no `position` param, so anything past
-        // the cap is unreachable. Paging for contacts is tracked as issue #94.
-        const result = await contactsClient.getContacts(clampLimit(limit, 20, 100));
-        return {
-          content: [
-            {
-              type: 'text',
-              text: raw ? formatQueryResult(result) : formatContactQueryResult(result, { verbose }),
-            },
-          ],
-        };
-      }
+      // Orchestration for every contacts tool lives in src/contacts-handler.ts.
+      case 'list_contacts':
+        return { content: await listContactsTool(args, clampLimit((args as any).limit, 20, 100), initializeContactsCalendarClient()) };
 
       case 'get_contact': {
         return { content: await getContactTool(args, initializeContactsCalendarClient()) };
       }
 
-      case 'search_contacts': {
-        const { query, limit } = args as any;
-        // Same coercion as list_emails - see there for why `!!` was wrong.
-        const raw = coerceBool((args as any).raw, 'raw') ?? false;
-        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
-        if (!query) {
-          throw new McpError(ErrorCode.InvalidParams, 'query is required');
-        }
-        const contactsClient = initializeContactsCalendarClient();
-        // Hard cap, same as list_contacts (#94).
-        const result = await contactsClient.searchContacts(query, clampLimit(limit, 20, 100));
-        return {
-          content: [
-            {
-              type: 'text',
-              text: raw ? formatQueryResult(result) : formatContactQueryResult(result, { verbose }),
-            },
-          ],
-        };
-      }
+      case 'search_contacts':
+        return { content: await searchContactsTool(args, clampLimit((args as any).limit, 20, 100), initializeContactsCalendarClient()) };
 
-      // Orchestration for the three contacts write tools lives in src/contacts-handler.ts.
       case 'create_contact':
         return { content: await createContactTool(args, initializeContactsCalendarClient()) };
 
@@ -2465,7 +2444,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           includeTrash: coerceBool((args as any).includeTrash, 'includeTrash') ?? false,
           includeSpam: coerceBool((args as any).includeSpam, 'includeSpam') ?? false,
         });
-        const body = raw ? formatRawEmailQueryResult(result) : formatEmailQueryResult(result, { fields });
+        const body = raw ? formatRawQueryResult(result) : formatEmailQueryResult(result, { fields });
         return {
           content: [
             {

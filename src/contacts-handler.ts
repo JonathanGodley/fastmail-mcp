@@ -5,6 +5,7 @@ import {
   coerceContactEmails,
   coerceContactName,
   coerceContactPhones,
+  coercePosition,
   coerceStringArrayStrict,
   toolJson,
   type ContactAddressSpec,
@@ -12,8 +13,9 @@ import {
   type ContactNameSpec,
   type ContactPhoneSpec,
 } from './coerce.js';
-import { simplifyContact } from './response-formatters.js';
+import { formatContactQueryResult, formatRawQueryResult, simplifyContact } from './response-formatters.js';
 import type { DeleteContactResult, UpdateContactPatch, UpdateContactResult } from './contacts-calendar.js';
+import type { QueryResult } from './jmap-client.js';
 
 /**
  * The slice of the contacts client the three write tools need, so each handler can be
@@ -32,6 +34,12 @@ export interface ContactsWriteClient {
   getContactById(id: string): Promise<any>;
   updateContact(id: string, patch: UpdateContactPatch): Promise<UpdateContactResult>;
   deleteContact(id: string): Promise<DeleteContactResult>;
+}
+
+/** The slice of the contacts client the two listing tools need. */
+export interface ContactsReadClient {
+  getContacts(limit: number, position?: number): Promise<QueryResult>;
+  searchContacts(query: string, limit: number, position?: number): Promise<QueryResult>;
 }
 
 export type ToolContent = Array<{ type: 'text'; text: string }>;
@@ -173,4 +181,27 @@ export async function deleteContactTool(args: any, client: ContactsWriteClient):
     });
   }
   return content;
+}
+
+function renderContactPage(result: QueryResult, raw: boolean, verbose: boolean): ToolContent {
+  return [{ type: 'text', text: raw ? formatRawQueryResult(result) : formatContactQueryResult(result, { verbose }) }];
+}
+
+// The two listing tools take `limit` already clamped: the clamp stays in the index.ts case,
+// where tool-schema.test.ts checks it against the default and cap the schema advertises.
+export async function listContactsTool(args: any, limit: number, client: ContactsReadClient): Promise<ToolContent> {
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
+  const position = coercePosition(args?.position);
+  return renderContactPage(await client.getContacts(limit, position), raw, verbose);
+}
+
+export async function searchContactsTool(args: any, limit: number, client: ContactsReadClient): Promise<ToolContent> {
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
+  const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
+  if (!args?.query) {
+    throw new InvalidInputError('query is required');
+  }
+  const position = coercePosition(args?.position);
+  return renderContactPage(await client.searchContacts(args.query, limit, position), raw, verbose);
 }

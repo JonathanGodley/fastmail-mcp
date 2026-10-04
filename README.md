@@ -392,7 +392,7 @@ The rules:
 - **A position past the end is not an error.** It returns an empty page next to the real total (`Showing 0 of 137 results from position 500.`), so you can see you overshot.
 - **The summary is identical on the `raw` path**, which already carried one; `raw` callers can also read JMAP's own `total`/`position` by querying directly.
 
-`position` is how you read past the `limit` caps (`search_emails`/`list_emails` cap at 100). Contacts and calendar listings do not take it: passing one back would be rejected as an unknown parameter. `list_contacts`/`search_contacts` state their total the same way but never carry a `nextPosition`, so a total larger than the returned count means the rest is out of reach behind the hard cap. `list_calendar_events` goes over CalDAV rather than JMAP but states its total the same way, and its total counts every matching occurrence across every calendar queried, before `limit` trimmed the list — so a total larger than the returned count means raising `limit` (hard cap 500) will reach the rest, and only a total above that cap calls for a narrower window.
+`position` is how you read past a tool's `limit` cap. A tool offers a `nextPosition` only if it takes `position`, so the summary never tells you to pass back a parameter the tool would reject. Contact pages follow one fixed order, by first name and then surname (see `list_contacts`). `list_calendar_events` takes no `position`: it goes over CalDAV rather than JMAP but states its total the same way, and its total counts every matching occurrence across every calendar queried, before `limit` trimmed the list — so a total larger than the returned count means raising `limit` (hard cap 500) will reach the rest, and only a total above that cap calls for a narrower window.
 
 ### Mailbox fields
 
@@ -849,12 +849,12 @@ There is **no `bulk_archive`**. `archive_email` already takes an `emailIds` arra
 
 All three read tools carry `kind` on a card that is not an ordinary person - see [`kind` tells you which cards the write tools will refuse](#kind-tells-you-which-cards-the-write-tools-will-refuse).
 
-- **list_contacts**: List all contacts. Returns simplified format by default.
-  - Parameters: `limit` (default: 20, hard cap 100 — no paging), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
+- **list_contacts**: List all contacts, one page at a time (see [Result counts and paging](#result-counts-and-paging-position)). Returns simplified format by default. Pages follow one fixed order: first name, then surname, then the card's uid as a tiebreak. Names are compared byte by byte, so the order is case-sensitive (an uppercase letter sorts before every lowercase one), and cards with no first name come first.
+  - Parameters: `limit` (default: 20, max 100), `position` (optional, 0-based offset; pass back the `nextPosition` from the previous page), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **get_contact**: Get a specific contact by ID. Returns simplified format by default. Throws if the ID is not found.
   - Parameters: `contactId` (required), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
-- **search_contacts**: Search contacts by name or email. Returns simplified format by default.
-  - Parameters: `query` (required), `limit` (default: 20, hard cap 100 — no paging), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
+- **search_contacts**: Search contacts by name or email, one page at a time, in the same order as `list_contacts`. Returns simplified format by default.
+  - Parameters: `query` (required), `limit` (default: 20, max 100), `position` (optional, 0-based offset; pass back the `nextPosition` from the previous page), `verbose` (optional, include all fields), `raw` (optional, return original JMAP response)
 - **create_contact**: Create a contact. Needs at least a name or one email address. Returns the created card, read back after the write, in the same shape `get_contact` returns. If only that read-back fails, the contact was still created: the result is `{id}` with a note saying so, and creating it again would make a duplicate. See [Writing contacts](#writing-contacts) for the accepted entry shapes.
   - Parameters: `name` (full-name string or `{given?, surname?, full?}`), `emails` (array; bare address strings or `{address, label?}`), `phones` (array; bare number strings or `{number, label?}`), `addresses` (array of `{full, label?}` objects), `notes`, `addressBookId` (optional, defaults to the account's address book), `verbose`, `raw`
 - **update_contact**: Update a contact, **merging per entry** so the stored fields the simplified output doesn't show (`contexts`, `pref`, …) survive an edit. Returns `{contact, previousCard}`. An edit that both drops a stored entry and adds an unknown one is rejected as ambiguous unless `allowEntryReplace` is set (which is scoped to that one array); `addresses` replace wholesale; `name` merges into the stored components; a changed label is added, never removed. Refused, with nothing written, if the address book changed after the tool read the card (retry the call). See [Writing contacts](#writing-contacts).
@@ -1129,7 +1129,7 @@ src/
 ├── inline-notes.ts         # The wording used when an image is carried, demoted or refused
 ├── contacts-calendar.ts    # Contacts and calendar extensions
 ├── contact-card.ts         # Contact card algebra: label resolution and the per-entry merge
-├── contacts-handler.ts     # create/update/delete_contact orchestration behind an injected client
+├── contacts-handler.ts     # Contacts tool orchestration behind an injected client
 ├── ical-limits.ts          # Size bounds on calendar text, checked before serialization
 ├── ical-fold.ts            # iCalendar content-line folding at 75 octets
 ├── vtimezone.ts            # The VTIMEZONE block written beside every TZID, from Node's ICU data

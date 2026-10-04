@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawEmailQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -862,7 +862,7 @@ describe('formatEmailQueryResult', () => {
 
     it('gives the raw path the same summary as the simplified path', () => {
       const result = { items: page(20, 40), total: 137, position: 40 };
-      const rawSummary = formatRawEmailQueryResult(result).split('\n')[0];
+      const rawSummary = formatRawQueryResult(result).split('\n')[0];
       const simplifiedSummary = formatEmailQueryResult(result).split('\n')[0];
       assert.equal(rawSummary, simplifiedSummary);
       assert.ok(rawSummary.includes('nextPosition: 60'));
@@ -872,10 +872,9 @@ describe('formatEmailQueryResult', () => {
 
 // ---------- summaries for tools that do not take a position ----------
 
-// formatQueryResult renders the raw path of the contacts listings, which declare no
-// `position`. They must still state the total, but a nextPosition would be an
-// instruction their callers cannot follow — passing `position` back to list_contacts
-// or search_contacts is rejected by the unknown-parameter guard.
+// formatQueryResult renders list_calendar_events, which declares no `position`. It must
+// still state the total, but a nextPosition would be an instruction its callers cannot
+// follow — passing `position` back is rejected by the unknown-parameter guard.
 describe('formatQuerySummary on an unpaged tool', () => {
   const contacts = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `ct-${i}` }));
 
@@ -887,13 +886,6 @@ describe('formatQuerySummary on an unpaged tool', () => {
   it('offers no nextPosition even if the response carries a position', () => {
     const summary = formatQueryResult({ items: contacts(50), total: 312, position: 50 }).split('\n')[0];
     assert.ok(!summary.includes('nextPosition'), summary);
-  });
-
-  it('states the total on the simplified contacts path too', () => {
-    const summary = formatContactQueryResult({ items: contacts(50), total: 312 }).split('\n')[0];
-    assert.equal(summary, 'Showing 50 of 312 results.');
-    const complete = formatContactQueryResult({ items: contacts(3), total: 3 }).split('\n')[0];
-    assert.equal(complete, 'Showing 3 of 3 results.');
   });
 
   it('says a missing total is missing, without the paging consequence', () => {
@@ -919,6 +911,41 @@ describe('formatContactQueryResult', () => {
   it('includes verbose contact fields when verbose=true', () => {
     const result = formatContactQueryResult({ items: [rawContact], total: 1 }, { verbose: true });
     assert.ok(result.includes('123 Main St'));
+  });
+});
+
+// list_contacts and search_contacts take `position`, so both their renderers carry the
+// paged summary: nextPosition exactly while more remain.
+describe('the contacts listings are paged on both paths', () => {
+  const contacts = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `ct-${i}` }));
+  const renderers = [
+    { path: 'simplified', render: (r: any) => formatContactQueryResult(r) },
+    { path: 'raw', render: (r: any) => formatRawQueryResult(r) },
+  ];
+
+  for (const { path, render } of renderers) {
+    it(`offers nextPosition while more remain (${path})`, () => {
+      const summary = render({ items: contacts(50), total: 312, position: 0 }).split('\n')[0];
+      assert.equal(summary, 'Showing 50 of 312 results. nextPosition: 50 (pass position:50 for the next page).');
+    });
+
+    it(`counts nextPosition from the served position (${path})`, () => {
+      const summary = render({ items: contacts(20), total: 312, position: 40 }).split('\n')[0];
+      assert.equal(summary, 'Showing 20 of 312 results from position 40. nextPosition: 60 (pass position:60 for the next page).');
+    });
+
+    it(`offers no nextPosition on the final page (${path})`, () => {
+      const last = render({ items: contacts(12), total: 312, position: 300 }).split('\n')[0];
+      assert.equal(last, 'Showing 12 of 312 results from position 300.');
+      const whole = render({ items: contacts(3), total: 3, position: 0 }).split('\n')[0];
+      assert.equal(whole, 'Showing 3 of 3 results.');
+    });
+  }
+
+  it('serialises the raw cards untransformed', () => {
+    const card = { id: 'ct-1', name: { full: 'Alice' }, addresses: { home: { street: '123 Main St' } } };
+    const rendered = formatRawQueryResult({ items: [card], total: 1, position: 0 });
+    assert.deepEqual(JSON.parse(rendered.split('\n').slice(1).join('\n')), [card]);
   });
 });
 

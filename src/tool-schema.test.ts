@@ -1448,3 +1448,20 @@ describe('check_function_availability lists every tool', () => {
     assert.deepEqual(declared.filter((t) => !listed.has(t)), []);
   });
 });
+
+// The tools that render through a paged summary, listed by hand: each offers a
+// `nextPosition` to pass back as `position`, and assertKnownParams rejects any key the
+// schema does not declare. A newly paged tool is added to this list.
+describe('the listed paged tools declare position', () => {
+  it('declares position on list_emails, search_emails, list_contacts and search_contacts', () => {
+    const params = collectToolParams();
+    const missing = ['list_emails', 'search_emails', 'list_contacts', 'search_contacts']
+      .filter((tool) => !params.get(tool)?.has('position'));
+    assert.deepEqual(
+      missing,
+      [],
+      `these tools offer a nextPosition but do not declare position, so following it is ` +
+        `rejected as an unknown parameter: ${missing.join(', ')}`,
+    );
+  });
+});

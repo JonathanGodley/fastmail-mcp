@@ -58,6 +58,15 @@ export interface DeleteContactResult {
   deletedCard?: any;
 }
 
+// Gives `position` a fixed meaning across calls: first name, then surname, then `uid` as
+// the tiebreak for equal names. Fastmail compares these byte-wise, so the order is
+// case-sensitive.
+const CONTACT_SORT = [
+  { property: 'name/given', isAscending: true },
+  { property: 'name/surname', isAscending: true },
+  { property: 'uid', isAscending: true },
+];
+
 export class ContactsCalendarClient extends JmapClient {
   
   private async checkContactsPermission(): Promise<boolean> {
@@ -89,7 +98,7 @@ export class ContactsCalendarClient extends JmapClient {
     return accountId;
   }
 
-  async getContacts(limit: number = 50): Promise<QueryResult> {
+  async getContacts(limit: number = 50, position?: number): Promise<QueryResult> {
     const hasPermission = await this.checkContactsPermission();
     if (!hasPermission) {
       throw new Error('Contacts access not available. This account may not have JMAP contacts permissions enabled. Please check your Fastmail account settings or contact support to enable contacts API access.');
@@ -102,6 +111,8 @@ export class ContactsCalendarClient extends JmapClient {
       methodCalls: [
         ['ContactCard/query', {
           accountId,
+          sort: CONTACT_SORT,
+          ...(position ? { position } : {}),
           limit,
           calculateTotal: true
         }, 'query'],
@@ -115,7 +126,9 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return this.getQueryResult(response, 0, 1);
+      const result = this.getQueryResult(response, 0, 1);
+      if (typeof result.position !== 'number') result.position = position ?? 0;
+      return result;
     } catch (error) {
       // No AddressBook/get fallback: it would hide the real ContactCard/query error behind
       // address books dressed up as contacts. A failed contacts query surfaces as a failure,
@@ -158,7 +171,7 @@ export class ContactsCalendarClient extends JmapClient {
     return contact;
   }
 
-  async searchContacts(query: string, limit: number = 20): Promise<QueryResult> {
+  async searchContacts(query: string, limit: number = 20, position?: number): Promise<QueryResult> {
     const hasPermission = await this.checkContactsPermission();
     if (!hasPermission) {
       throw new Error('Contacts access not available. This account may not have JMAP contacts permissions enabled. Please check your Fastmail account settings or contact support to enable contacts API access.');
@@ -172,6 +185,8 @@ export class ContactsCalendarClient extends JmapClient {
         ['ContactCard/query', {
           accountId,
           filter: { text: query },
+          sort: CONTACT_SORT,
+          ...(position ? { position } : {}),
           limit,
           calculateTotal: true
         }, 'query'],
@@ -185,7 +200,9 @@ export class ContactsCalendarClient extends JmapClient {
 
     try {
       const response = await this.makeRequest(request);
-      return this.getQueryResult(response, 0, 1);
+      const result = this.getQueryResult(response, 0, 1);
+      if (typeof result.position !== 'number') result.position = position ?? 0;
+      return result;
     } catch (error) {
       throw new Error(`Contact search not supported: ${error instanceof Error ? error.message : String(error)}. Try checking account permissions or enabling contacts API access in Fastmail settings.`);
     }
