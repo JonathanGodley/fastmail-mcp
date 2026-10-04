@@ -1049,6 +1049,19 @@ describe('validateAndFormatICalDate', () => {
     assert.equal(validateAndFormatICalDate('2026-03-20T23:59:59', 'start'), '20260320T235959');
   });
 
+  it('refuses an offset the pattern admits but the Date parser cannot read, echoing the value', () => {
+    for (const value of ['2026-01-01T10:00:00+12:3', '2026-01-01T10:00:00+123', '2026-01-01T10:00:00+99:99']) {
+      assert.throws(
+        () => validateAndFormatICalDate(` ${value} `, 'end'),
+        (err: Error) => {
+          assert.equal(err.name, 'InvalidInputError', value);
+          assert.equal(err.message, `end is not a valid datetime (got: ${value})`);
+          return true;
+        },
+      );
+    }
+  });
+
   it('rejects CRLF injection attempt', () => {
     assert.throws(
       () => validateAndFormatICalDate('2026-04-18T10:00:00Z\r\nATTENDEE:mailto:attacker@example.com', 'start'),
