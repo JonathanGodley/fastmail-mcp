@@ -1108,6 +1108,28 @@ describe('validateAndFormatICalDate', () => {
     assert.throws(() => validateAndFormatICalDate('2026-06-31T10:00:00', 'start'), /not a real calendar date/);
   });
 
+  it('refuses year 0000, which RFC 5545 DATE and DATE-TIME cannot name', () => {
+    assert.throws(() => validateAndFormatICalDate('0000-01-01', 'start'), /start has year 0000/);
+    assert.throws(() => validateAndFormatICalDate('0000-01-01T10:00:00Z', 'start'), /start has year 0000/);
+    assert.equal(validateAndFormatICalDate('0001-01-01', 'start'), '00010101');
+  });
+
+  it('refuses an offset datetime that falls in year 0000 once converted to UTC', () => {
+    assert.throws(
+      () => validateAndFormatICalDate('0001-01-01T00:00:00+05:00', 'start'),
+      /start falls in year 0000 once converted to UTC/,
+    );
+    assert.equal(validateAndFormatICalDate('0001-01-01T05:00:00+05:00', 'start'), '00010101T000000Z');
+  });
+
+  it('refuses an offset datetime that falls past year 9999 once converted to UTC', () => {
+    assert.throws(
+      () => validateAndFormatICalDate('9999-12-31T23:00:00-05:00', 'start'),
+      /start falls in year 10000 once converted to UTC; .*0001-9999/,
+    );
+    assert.equal(validateAndFormatICalDate('9999-12-31T18:59:59-05:00', 'start'), '99991231T235959Z');
+  });
+
   it('classes every rejection as caller-fixable input', () => {
     for (const bad of ['garbage', '2026-02-31', '2026-04-18T10:00:00Z\r\nX', 42 as any]) {
       assert.throws(
@@ -2770,6 +2792,116 @@ describe('parseICalDuration', () => {
 
   it('parses a single-digit second count (PT30S)', () => {
     assert.equal(parseICalDuration('PT30S', '2026-01-01T00:00:00'), '2026-01-01T00:00:30');
+  });
+
+  it('keeps a floating start\'s year below 1000 as written, four digits wide', () => {
+    assert.equal(parseICalDuration('PT1H', '0026-01-01T10:00:00'), '0026-01-01T11:00:00');
+    assert.equal(parseICalDuration('PT1H', '0999-01-01T10:00:00'), '0999-01-01T11:00:00');
+  });
+
+  it('keeps an end landing in year 0001 or year 9999', () => {
+    assert.equal(parseICalDuration('-PT1H', '0001-01-01T01:00:00'), '0001-01-01T00:00:00');
+    assert.equal(parseICalDuration('PT1H', '9999-12-31T22:00:00'), '9999-12-31T23:00:00');
+  });
+
+  it('gives no end for a start in no shape it reads, rather than one read in the host zone', () => {
+    // An expanded-year start parses, but as process-local time, and formatICalDate passes
+    // through a DTSTART value it does not recognise.
+    assert.equal(parseICalDuration('PT1H', '+002026-04-01T10:00:00'), undefined);
+    assert.equal(parseICalDuration('PT1H', '+002026-04-01T10:00:00', 'Australia/Sydney'), undefined);
+    assert.equal(parseICalDuration('PT1H', '2026-04-01T10:00:00+10:00'), '2026-04-01T01:00:00Z');
+    assert.equal(parseICalDuration('PT1H', '2026-04-01T10:00:00-0500'), '2026-04-01T16:00:00Z');
+  });
+
+  it('gives no end for a floating start when the end falls outside years 0001-9999', () => {
+    assert.equal(parseICalDuration('-P400D', '0001-01-01T10:00:00'), undefined);
+    assert.equal(parseICalDuration('P2D', '9999-12-31T10:00:00'), undefined);
+  });
+
+  it('gives no end for a date-only start when the end falls outside years 0001-9999', () => {
+    assert.equal(parseICalDuration('-P1D', '0001-01-01'), undefined);
+    assert.equal(parseICalDuration('P1D', '9999-12-31'), undefined);
+  });
+
+  it('gives no end for a UTC start when the end falls outside years 0001-9999', () => {
+    assert.equal(parseICalDuration('P1D', '9999-12-31T10:00:00Z'), undefined);
+  });
+});
+
+// Australia/Sydney in 2026: clocks go back 03:00 AEDT -> 02:00 AEST on Sunday 5 April, and
+// forward 02:00 AEST -> 03:00 AEDT on Sunday 4 October. The zone is passed explicitly, so none
+// of these depend on the host's zone.
+describe('parseICalDuration from a zoned start', () => {
+  const SYDNEY = 'Australia/Sydney';
+
+  it('adds hours as elapsed time across a spring-forward: PT6H from 23:00 ends at 06:00', () => {
+    // 23:00 AEST is 13:00Z; six hours later is 19:00Z, which is 06:00 AEDT.
+    assert.equal(parseICalDuration('PT6H', '2026-10-03T23:00:00', SYDNEY), '2026-10-04T06:00:00');
+  });
+
+  it('adds hours as elapsed time across a fall-back: PT6H from 23:00 ends at 04:00', () => {
+    // 23:00 AEDT is 12:00Z; six hours later is 18:00Z, which is 04:00 AEST.
+    assert.equal(parseICalDuration('PT6H', '2026-04-04T23:00:00', SYDNEY), '2026-04-05T04:00:00');
+  });
+
+  it('keeps a day nominal across a spring-forward: P1D from 23:00 ends at 23:00 the next day', () => {
+    assert.equal(parseICalDuration('P1D', '2026-10-03T23:00:00', SYDNEY), '2026-10-04T23:00:00');
+  });
+
+  it('moves a nominal end that falls in the skipped hour forward by the gap', () => {
+    // 02:30 on 4 October does not exist in Sydney; the resolver moves it forward an hour.
+    assert.equal(parseICalDuration('P1D', '2026-10-03T02:30:00', SYDNEY), '2026-10-04T03:30:00');
+  });
+
+  it('resolves a nominal end in the repeated hour to the earlier instant', () => {
+    // 02:30 on 5 April happens twice: 15:30Z (AEDT) and 16:30Z (AEST). An hour on from the
+    // earlier is 16:30Z, 02:30 AEST; from the later it would be 17:30Z, 03:30 AEST.
+    assert.equal(parseICalDuration('P1DT1H', '2026-04-04T02:30:00', SYDNEY), '2026-04-05T02:30:00');
+  });
+
+  it('gives no end when the end falls outside years 0001-9999', () => {
+    assert.equal(parseICalDuration('P2D', '9999-12-31T10:00:00', SYDNEY), undefined);
+    assert.equal(parseICalDuration('-P400D', '0001-01-01T10:00:00', SYDNEY), undefined);
+  });
+
+  it('applies the nominal days before the exact time: P1DT6H from 23:00 across a spring-forward', () => {
+    // P1D lands on 3 October 23:00 AEST; PT6H then crosses the transition.
+    assert.equal(parseICalDuration('P1DT6H', '2026-10-02T23:00:00', SYDNEY), '2026-10-04T06:00:00');
+  });
+
+  it('returns undefined for a malformed DURATION on a zoned start', () => {
+    assert.equal(parseICalDuration('PXYZ', '2026-04-01T10:00:00', SYDNEY), undefined);
+  });
+
+  it('keeps a UTC or date-only start\'s own form when a zone is passed', () => {
+    assert.equal(parseICalDuration('PT1H', '2026-04-01T10:00:00Z', SYDNEY), '2026-04-01T11:00:00Z');
+    assert.equal(parseICalDuration('P1D', '2026-04-01', SYDNEY), '2026-04-02');
+  });
+
+  it('keeps a zoned end landing in year 0001 or year 9999', () => {
+    assert.equal(parseICalDuration('-PT1H', '0001-01-01T01:00:00', SYDNEY), '0001-01-01T00:00:00');
+    assert.equal(parseICalDuration('PT1H', '9999-12-31T22:00:00', SYDNEY), '9999-12-31T23:00:00');
+  });
+
+  it('keeps naive arithmetic for a TZID the runtime cannot resolve', () => {
+    assert.equal(parseICalDuration('PT6H', '2026-10-03T23:00:00', 'Vendor Standard Time'), '2026-10-04T05:00:00');
+  });
+
+  it('computes a DURATION event\'s end in DTSTART\'s zone on a read', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:dst-duration@example.com',
+      'DTSTART;TZID=Australia/Sydney:20261003T230000',
+      'DURATION:PT6H',
+      'SUMMARY:Overnight shift',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: 'UTC' });
+    assert.equal(event.start, '2026-10-03T23:00:00');
+    assert.equal(event.end, '2026-10-04T06:00:00');
+    assert.equal(event.timeZone, SYDNEY);
   });
 });
 
@@ -7887,7 +8019,7 @@ describe('VTIMEZONE embedding (#166)', () => {
 
     it('refuses a year-9999 DTSTART whose DURATION cannot resolve to an instant, for a reason unrelated to either span bound (#166)', () => {
       // Same DTSTART as the PT48H case above, but with the nominal-day-shift DURATION form
-      // (P2D rather than PT48H): resolveDurationSpanEndMs's own arithmetic for a day-count
+      // (P2D rather than PT48H): resolveDurationEndMs's own arithmetic for a day-count
       // DURATION fails to resolve here, independently of both MAX_VTIMEZONE_SPAN_DAYS and the
       // year-10000 ceiling.
       const data = [
