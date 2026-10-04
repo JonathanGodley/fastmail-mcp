@@ -1,6 +1,7 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart, DESCRIBE_PART_MAX, isAuthorableCid, stripCidSpelling } from './inline-images.js';
 import { rejectUnusableCid } from './inline-notes.js';
+import type { BodyEdit } from './body-edits.js';
 
 // Tagged error for filesystem-path access decisions (path confinement and the
 // attachment opt-in gate). Thrown by the path guards and attachment upload in
@@ -1301,6 +1302,62 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
     specs.push(spec);
   }
   return specs;
+}
+
+const BODY_EDIT_KEYS = new Set(['find', 'replace']);
+const BODY_EDITS_SHAPE = 'bodyEdits must be an array of {find, replace} objects.';
+
+/**
+ * Lenient read of `bodyEdits`, on coerceAttachments' rules: the whole value or any element
+ * may arrive JSON-encoded, and a blank string is an omitted value. `find` and `replace` are
+ * never trimmed, since whitespace is part of an exact match.
+ */
+export function coerceBodyEdits(value: unknown): BodyEdit[] | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  let arr: unknown = value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    try {
+      arr = JSON.parse(trimmed);
+    } catch {
+      throw new McpError(ErrorCode.InvalidParams, BODY_EDITS_SHAPE);
+    }
+  }
+  if (!Array.isArray(arr)) throw new McpError(ErrorCode.InvalidParams, BODY_EDITS_SHAPE);
+  if (arr.length === 0) {
+    throw new McpError(ErrorCode.InvalidParams, 'bodyEdits cannot be empty; omit it to leave the body unchanged.');
+  }
+
+  return arr.map((raw, i) => {
+    let item: unknown = raw;
+    if (typeof item === 'string') {
+      const t = item.trim();
+      if (!(t.startsWith('{') && t.endsWith('}'))) {
+        throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${i}] must be a {find, replace} object, not a bare string.`);
+      }
+      try {
+        item = JSON.parse(t);
+      } catch {
+        throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${i}] is a string that isn't valid JSON; pass a {find, replace} object.`);
+      }
+    }
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${i}] must be a {find, replace} object.`);
+    }
+    const obj = item as Record<string, unknown>;
+    const unknownKeys = Object.keys(obj).filter((k) => !BODY_EDIT_KEYS.has(k));
+    if (unknownKeys.length > 0) {
+      throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: find, replace`);
+    }
+    for (const key of ['find', 'replace'] as const) {
+      if (typeof obj[key] !== 'string') {
+        throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${i}].${key} must be a string.`);
+      }
+    }
+    return { find: obj.find as string, replace: obj.replace as string };
+  });
 }
 
 // One calendar-event attendee as it arrives from a tool call, before

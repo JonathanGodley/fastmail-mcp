@@ -186,6 +186,12 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   `participants`, a blank string reads as the empty list rather than omitted: `[]` is
   already refused on these arrays, so the blank string meets that refusal instead of passing
   as a silent no-op.
+- `coerceBodyEdits`: `edit_draft`'s
+  `bodyEdits` to `{ find, replace }[]`, on `coerceAttachments`' rules: the whole value or any
+  element may arrive JSON-encoded, a blank string reads as omitted, and an unknown key, a
+  bare-string element or a non-string `find`/`replace` is refused by index. `find` and
+  `replace` are **never trimmed**, since whitespace is part of an exact match, and `[]` is
+  refused rather than read as a no-op body edit.
 - `requireNonEmpty` / `validateClearFields` — the loud-reject + `clearFields` machinery
   shared by `update_calendar_event`, `edit_draft` and `update_contact`.
 
@@ -368,8 +374,8 @@ its lenient shape: `type: ['array', 'string']` with `items` kept (JSON Schema ap
 `items` to array instances only, so the union is well-formed). The accepted string forms
 are NOT one set, which is why `src/index.ts` carries two description constants rather than
 one: `coerceStringArray` takes a single bare value, a comma-separated list or a
-JSON-encoded array, while the OBJECT-item lists behind `coerceAttachments` and the contact
-entry coercers read a whole-value string **only** as a JSON-encoded array and reject
+JSON-encoded array, while the OBJECT-item lists behind `coerceAttachments`, `coerceBodyEdits`
+and the contact entry coercers read a whole-value string **only** as a JSON-encoded array and reject
 anything else naming the parameter — promising those a comma-separated form would
 advertise a shape that errors, so the object-list constant denies the comma-joined form in
 so many words rather than leaving a caller to infer it from an omission. Every list
