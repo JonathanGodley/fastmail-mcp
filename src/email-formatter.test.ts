@@ -795,6 +795,25 @@ describe('simplifyEmail — forwardedMessageId (#30)', () => {
   });
 });
 
+describe('simplifyEmail sentAt (#84)', () => {
+  it('renders sentAt in local ISO with the timezone option, right after date', () => {
+    const raw = {
+      id: 'e1', subject: 's', from: [],
+      receivedAt: '2026-03-01T12:00:00Z',
+      sentAt: '2026-03-01T11:58:30Z',
+    };
+    // Brisbane is UTC+10 year-round, so the expected value holds on any host.
+    const result = simplifyEmail(raw, { timezone: 'Australia/Brisbane' });
+    assert.equal(result.sentAt, '2026-03-01T21:58:30+10:00');
+    const keys = Object.keys(result);
+    assert.equal(keys.indexOf('sentAt'), keys.indexOf('date') + 1);
+  });
+  it('omits it when the message has no Date header (sentAt null or absent)', () => {
+    assert.equal('sentAt' in simplifyEmail({ id: 'e1', subject: 's', from: [], sentAt: null }), false);
+    assert.equal('sentAt' in simplifyEmail({ id: 'e1', subject: 's', from: [] }), false);
+  });
+});
+
 describe('simplifyEmail — sourceEmailId', () => {
   const SRC = 'header:X-Fastmail-MCP-Source-Id:asText';
   it('surfaces the X-Fastmail-MCP-Source-Id header as sourceEmailId, trimmed', () => {

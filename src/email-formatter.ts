@@ -11,6 +11,7 @@ export interface SimplifiedEmail {
   subject: string;
   from: string;
   date?: string;
+  sentAt?: string;
   threadId?: string;
   messageId?: string[];
   references?: string[];
@@ -95,7 +96,7 @@ export interface SimplifyOptions {
   // (#73). Opt-in per call; the default output is always verbatim. Applies to the plain
   // text body ONLY — a `bodyHtml` returned alongside it (verbose) is untouched.
   stripQuoted?: boolean;
-  // IANA timezone name (e.g. 'America/New_York') to render `date` in. Takes
+  // IANA timezone name (e.g. 'America/New_York') to render `date` and `sentAt` in. Takes
   // precedence over the module default set by setDefaultTimezone(); falls back
   // to the host zone when neither is set.
   timezone?: string;
@@ -271,6 +272,7 @@ export function simplifyEmail(raw: any, options?: SimplifyOptions): SimplifiedEm
   };
 
   addIf(result, 'date', raw.receivedAt ? toLocalIso(raw.receivedAt, options?.timezone) : undefined);
+  addIf(result, 'sentAt', raw.sentAt ? toLocalIso(raw.sentAt, options?.timezone) : undefined);
   addIf(result, 'threadId', raw.threadId);
   addIf(result, 'messageId', raw.messageId);
   addIf(result, 'references', raw.references);
