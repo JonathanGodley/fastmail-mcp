@@ -10,7 +10,7 @@ import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenExpansion, BodyTokenScan } from './body-tokens.js';
 import {
   NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_WITH_BODY, REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
-  locateBodyEdits, spliceBodyEdits,
+  locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
 } from './body-edits.js';
 import type { BodyEdit, BodyEditPart, BodyEditsReceipt, LocatedBodyEdit } from './body-edits.js';
 import {
@@ -2497,7 +2497,7 @@ export class JmapClient {
         // A token a replace completes with the stored text beside it is in no string the flag
         // expands, so it ships literally.
         const surplus = scan.counts.signature - storedScan.counts.signature - ownSignatures(p.part);
-        if (surplus > 0) tokenNotes.push(noteSignatureTokenStored(p.part, surplus));
+        if (surplus > 0) tokenNotes.push(noteBodyEditsSplitSignature(editedPart, surplus));
       }
       // Count rise per token, the signature note's gate: a `{{quote}}` sitting in the quoted
       // history is the original author's text and rides along on every edit.

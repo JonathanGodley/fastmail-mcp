@@ -2,7 +2,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { InvalidInputError } from './coerce.js';
-import { coerceBodyEdits, formatBodyEditsReceipt, locateBodyEdits, spliceBodyEdits } from './body-edits.js';
+import {
+  coerceBodyEdits, formatBodyEditsReceipt, locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
+} from './body-edits.js';
 
 /** Asserts `fn` throws `type` with exactly `message` (McpError prefixes its code). */
 function refuses(fn: () => unknown, type: typeof McpError | typeof InvalidInputError, message: string) {
@@ -266,6 +268,24 @@ describe('spliceBodyEdits', () => {
   it('keeps the untouched text byte for byte', () => {
     const stored = 'x &amp;  \r\n y';
     assert.equal(spliceBodyEdits(stored, [{ offset: 0, matchedSize: 1 }], ['z']), 'z &amp;  \r\n y');
+  });
+});
+
+describe('noteBodyEditsSplitSignature', () => {
+  it('says one token in the singular', () => {
+    assert.equal(
+      noteBodyEditsSplitSignature('htmlBody', 1),
+      '1 {{signature}} token in htmlBody was formed where a bodyEdits replace meets the stored text beside it, ' +
+        'so it is stored as literal text: only a token wholly inside a replace expands. Put the whole {{signature}} in one replace.',
+    );
+  });
+
+  it('says several tokens in the plural', () => {
+    assert.equal(
+      noteBodyEditsSplitSignature('textBody', 2),
+      '2 {{signature}} tokens in textBody were formed where a bodyEdits replace meets the stored text beside it, ' +
+        'so they are stored as literal text: only a token wholly inside a replace expands. Put the whole {{signature}} in one replace.',
+    );
   });
 });
 

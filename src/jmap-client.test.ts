@@ -17,6 +17,7 @@ import {
 } from './inline-notes.js';
 import {
   NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_WITH_BODY, REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
+  noteBodyEditsSplitSignature,
 } from './body-edits.js';
 
 // ---------- helpers ----------
@@ -6136,7 +6137,7 @@ describe('updateDraft bodyEdits (#177)', () => {
       bodyHash: hashOf(split),
     });
     assert.equal(created(makeReq).bodyValues.html.value, '<p>Hi <div><div>Test User</div></div></p><p>A {{signature}}</p>');
-    assert.ok(result.notes?.includes(noteSignatureTokenStored('htmlBody', 1)));
+    assert.deepEqual(result.notes, [noteBodyEditsSplitSignature('htmlBody', 1)]);
   });
 
   // -- the spliced part meets the guards a whole-body hand-back of it meets --

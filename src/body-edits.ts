@@ -36,6 +36,16 @@ export const REJECT_BODY_EDITS_WITHOUT_SIGNATURE =
   'to expand; a {{signature}} already in the stored body is not expanded. Put {{signature}} in the replace ' +
   'where the sign-off goes, or drop the flag and the replacements are stored as written.';
 
+/** Under expandSignature: tokens formed across a replace's edge, which no expansion pass sees. */
+export function noteBodyEditsSplitSignature(part: BodyEditPart, count: number): string {
+  const one = count === 1;
+  return (
+    `${count} {{signature}} token${one ? '' : 's'} in ${part} ${one ? 'was' : 'were'} formed where a bodyEdits ` +
+    `replace meets the stored text beside it, so ${one ? 'it is' : 'they are'} stored as literal text: only a ` +
+    'token wholly inside a replace expands. Put the whole {{signature}} in one replace.'
+  );
+}
+
 const BODY_EDIT_KEYS = new Set(['find', 'replace']);
 const BODY_EDITS_SHAPE = 'bodyEdits must be an array of {find, replace} objects.';
 
