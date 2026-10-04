@@ -4332,6 +4332,21 @@ describe('version sync', () => {
     assert.equal(pkg.version, lock.version, 'package.json and package-lock.json versions must match');
     assert.equal(pkg.version, lock.packages['']?.version, 'package.json and package-lock.json root package versions must match');
   });
+
+  it('every README npx pin names the package.json version', async () => {
+    const { readFileSync } = await import('fs');
+    const { resolve: r } = await import('path');
+    const root = r(import.meta.dirname, '..');
+
+    const pkg = JSON.parse(readFileSync(r(root, 'package.json'), 'utf8'));
+    const readme = readFileSync(r(root, 'README.md'), 'utf8');
+
+    const pins = [...readme.matchAll(/fastmail-mcp@v([0-9A-Za-z.-]+)/g)].map((m) => m[1]);
+    assert.ok(pins.length > 0, 'Could not find a fastmail-mcp@v<version> pin in README.md');
+    for (const pin of pins) {
+      assert.equal(pin, pkg.version, 'every README fastmail-mcp@v pin must match package.json');
+    }
+  });
 });
 
 // ---------- outgoing attachments: uploadBlob ----------
