@@ -2071,9 +2071,11 @@ describe("draft_email — mode:'reply' subject, recipients and threading", () =>
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, withId.client);
     assert.equal(withId.calls.draft.sourceEmailId, 'o1');
 
-    const withoutId = plainClient(makeOriginal({ id: undefined }));
-    await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, withoutId.client);
-    assert.equal(withoutId.calls.draft.sourceEmailId, undefined);
+    for (const id of [undefined, '']) {
+      const withoutId = plainClient(makeOriginal({ id }));
+      await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, withoutId.client);
+      assert.equal('sourceEmailId' in withoutId.calls.draft, false, `id ${JSON.stringify(id)}`);
+    }
   });
 });
 
@@ -3572,7 +3574,7 @@ describe('draft_email — what a refusal tells the caller to do', () => {
     const subjectRefusal = (args: any) => messageFrom(() => compose({ ...args, subject: 42 }, client));
     assert.match(
       await subjectRefusal({ mode: 'new', textBody: 'x' }),
-      /subject must be a string; received number\. Omit it for a subject-less draft\.$/,
+      /received number\. Omit it for a subject-less draft\.$/,
     );
     assert.match(
       await subjectRefusal({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }),
@@ -3624,6 +3626,20 @@ describe('draft_email — what a refusal tells the caller to do', () => {
     assert.match(message, /references embedded image "logo"/);
     assert.equal(calls.draft, undefined);
   });
+
+  it('does not blame the signature for its image when no {{signature}} was placed', async () => {
+    // The <img> sits inside an attribute, where the pre-expansion plan does not see it; the
+    // quote's own double quote closes the attribute, so after expansion it is a real image.
+    const signed = { ...SIGNED_IDENTITY, htmlSignature: '<div>Regards <img src="cid:sig"></div>' };
+    const { client, calls } = spyClient(makeOriginal(), { getIdentities: async () => [signed] });
+    const message = await messageFrom(() => compose(
+      { mode: 'reply', originalEmailId: 'o1', htmlBody: `<p title="{{quote}} <img src='cid:sig'>">hi</p>` },
+      client,
+    ));
+    assert.match(message, /references embedded image "sig", but no part of the assembled message supplies it/);
+    assert.doesNotMatch(message, /signature/);
+    assert.equal(calls.draft, undefined);
+  });
 });
 
 describe('draft_email — fields a reply or forward reads off an incomplete original', () => {
@@ -3632,14 +3648,6 @@ describe('draft_email — fields a reply or forward reads off an incomplete orig
     await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
     assert.deepEqual(calls.draft.references, ['orig-msg@example.com']);
     assert.match(calls.draft.subject, /^Re:\s*$/);
-  });
-
-  it('records no sourceEmailId when the original has no usable id', async () => {
-    for (const id of [undefined, '']) {
-      const { client, calls } = plainClient(makeOriginal({ id }));
-      await compose({ mode: 'reply', originalEmailId: 'o1', textBody: 'x' }, client);
-      assert.equal('sourceEmailId' in calls.draft, false, `id ${JSON.stringify(id)}`);
-    }
   });
 
   it('refuses with its own message when the original could not be fetched at all', async () => {
