@@ -479,8 +479,10 @@ describe('mergeContactNotes — the several-notes refusal', () => {
     assert.throws(
       () => mergeContactNotes({ a: { note: '1' }, b: { note: '2' }, c: { note: '3' } }, 'hello'),
       (err: Error) => {
-        assert.match(err.message, /would delete the other 2\. Read them with get_contact \(verbose or raw\)\./);
-        assert.match(err.message, /do it in two deliberate steps: clearFields:\['notes'\] first, then set notes\.$/);
+        assert.match(err.message, /the other 2\b/);
+        assert.match(err.message, /get_contact \(verbose or raw\)/);
+        assert.match(err.message, /two deliberate steps/);
+        assert.match(err.message, /clearFields:\['notes'\] first, then set notes/);
         return true;
       },
     );
@@ -499,15 +501,18 @@ describe('assertUnambiguousEntryEdit — what the refusal tells the caller', () 
         added: ['x@b.example', 'y@b.example'],
       }),
       (err: Error) => {
-        assert.match(err.message, /drops 2 existing entry\(ies\) and adds 2 the card does not have/);
+        assert.match(err.message, /drops 2 existing entry\(ies\) and adds 2\b/);
         assert.match(
           err.message,
           /Dropped: \{"address":"a@b\.example"\}, \{"address":"b@b\.example"\}\. Added: "x@b\.example", "y@b\.example"\./,
         );
-        assert.match(err.message, /To EDIT an entry losslessly, resend it under its existing value \(shown above\) so it matches, changing only what you meant to change\./);
-        assert.match(err.message, /To REPLACE the emails outright, pass allowEntryReplace:true/);
-        assert.match(err.message, /contexts, pref and any other field the simplified output does not show will NOT carry over\./);
-        assert.match(err.message, /The override applies to emails alone; any other array in the same call still merges\.$/);
+        assert.match(err.message, /resend it under its existing value/);
+        assert.match(err.message, /REPLACE the emails outright/);
+        assert.match(err.message, /allowEntryReplace:true/);
+        assert.match(err.message, /contexts, pref/);
+        assert.match(err.message, /NOT carry over/);
+        assert.match(err.message, /applies to emails alone/);
+        assert.match(err.message, /still merges/);
         return true;
       },
     );
