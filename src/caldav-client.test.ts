@@ -2773,6 +2773,62 @@ describe('parseICalDuration', () => {
   });
 });
 
+// Australia/Sydney in 2026: clocks go back 03:00 AEDT -> 02:00 AEST on Sunday 5 April, and
+// forward 02:00 AEST -> 03:00 AEDT on Sunday 4 October. The zone is passed explicitly, so none
+// of these depend on the host's zone.
+describe('parseICalDuration from a zoned start', () => {
+  const SYDNEY = 'Australia/Sydney';
+
+  it('adds hours as elapsed time across a spring-forward: PT6H from 23:00 ends at 06:00', () => {
+    // 23:00 AEST is 13:00Z; six hours later is 19:00Z, which is 06:00 AEDT.
+    assert.equal(parseICalDuration('PT6H', '2026-10-03T23:00:00', SYDNEY), '2026-10-04T06:00:00');
+  });
+
+  it('adds hours as elapsed time across a fall-back: PT6H from 23:00 ends at 04:00', () => {
+    // 23:00 AEDT is 12:00Z; six hours later is 18:00Z, which is 04:00 AEST.
+    assert.equal(parseICalDuration('PT6H', '2026-04-04T23:00:00', SYDNEY), '2026-04-05T04:00:00');
+  });
+
+  it('keeps a day nominal across a spring-forward: P1D from 23:00 ends at 23:00 the next day', () => {
+    assert.equal(parseICalDuration('P1D', '2026-10-03T23:00:00', SYDNEY), '2026-10-04T23:00:00');
+  });
+
+  it('moves a nominal end that falls in the skipped hour forward by the gap', () => {
+    // 02:30 on 4 October does not exist in Sydney; the resolver moves it forward an hour.
+    assert.equal(parseICalDuration('P1D', '2026-10-03T02:30:00', SYDNEY), '2026-10-04T03:30:00');
+  });
+
+  it('resolves a nominal end in the repeated hour to the earlier instant, the same wall clock', () => {
+    assert.equal(parseICalDuration('P1D', '2026-04-04T02:30:00', SYDNEY), '2026-04-05T02:30:00');
+  });
+
+  it('applies the nominal days before the exact time: P1DT6H from 23:00 across a spring-forward', () => {
+    // P1D lands on 3 October 23:00 AEST; PT6H then crosses the transition.
+    assert.equal(parseICalDuration('P1DT6H', '2026-10-02T23:00:00', SYDNEY), '2026-10-04T06:00:00');
+  });
+
+  it('keeps naive arithmetic for a TZID the runtime cannot resolve', () => {
+    assert.equal(parseICalDuration('PT6H', '2026-10-03T23:00:00', 'Vendor Standard Time'), '2026-10-04T05:00:00');
+  });
+
+  it('computes a DURATION event\'s end in DTSTART\'s zone on a read', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:dst-duration@example.com',
+      'DTSTART;TZID=Australia/Sydney:20261003T230000',
+      'DURATION:PT6H',
+      'SUMMARY:Overnight shift',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: 'UTC' });
+    assert.equal(event.start, '2026-10-03T23:00:00');
+    assert.equal(event.end, '2026-10-04T06:00:00');
+    assert.equal(event.timeZone, SYDNEY);
+  });
+});
+
 describe('parseCalendarObject with participants', () => {
   it('parses ATTENDEE and ORGANIZER', () => {
     const data = [
@@ -7887,7 +7943,7 @@ describe('VTIMEZONE embedding (#166)', () => {
 
     it('refuses a year-9999 DTSTART whose DURATION cannot resolve to an instant, for a reason unrelated to either span bound (#166)', () => {
       // Same DTSTART as the PT48H case above, but with the nominal-day-shift DURATION form
-      // (P2D rather than PT48H): resolveDurationSpanEndMs's own arithmetic for a day-count
+      // (P2D rather than PT48H): resolveDurationEndMs's own arithmetic for a day-count
       // DURATION fails to resolve here, independently of both MAX_VTIMEZONE_SPAN_DAYS and the
       // year-10000 ceiling.
       const data = [

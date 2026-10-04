@@ -2,7 +2,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // Caller-fixable input must throw coerce.ts's tagged InvalidInputError, which the CallTool
 // boundary maps to InvalidParams; a plain Error surfaces as InternalError. See
 // docs/conventions.md.
-import { InvalidInputError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS } from './coerce.js';
+import { InvalidInputError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS, zoneOffsetMsAt } from './coerce.js';
 import { trimEnd } from './trim-end.js';
 import { foldICalLine } from './ical-fold.js';
 // A calendar window interprets local dates in the same zone the rest of the server displays,
@@ -932,7 +932,7 @@ interface ParsedICalDuration {
 
 /**
  * Parse a DURATION value into its components, or undefined if malformed. Shared by
- * `parseICalDuration` and `resolveDurationSpanEndMs` so the two agree on validity.
+ * `parseICalDuration` and `resolveDurationEndMs` so the two agree on validity.
  */
 function parseICalDurationComponents(duration: string): ParsedICalDuration | undefined {
   const m = duration.match(ICAL_DURATION_RE);
@@ -955,12 +955,30 @@ function parseICalDurationComponents(duration: string): ParsedICalDuration | und
   };
 }
 
+const WALL_CLOCK_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+
+/** `ms`'s UTC components as `YYYY-MM-DDTHH:MM:SS`, the year four digits wide. */
+function formatWallClockIso(ms: number): string {
+  const e = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${String(e.getUTCFullYear()).padStart(4, '0')}-${pad(e.getUTCMonth() + 1)}-${pad(e.getUTCDate())}T${pad(e.getUTCHours())}:${pad(e.getUTCMinutes())}:${pad(e.getUTCSeconds())}`;
+}
+
 /**
  * The end a DURATION implies from `start`, in start's format, or undefined if malformed.
- * A plain millisecond add, which is wrong across a DST transition in the event's zone (#196);
- * `resolveDurationSpanEndMs` does the RFC 5545 §3.3.6 nominal-day/exact-time split.
+ *
+ * `tzid` is the start's zone. A wall-clock start in a zone ICU can resolve gets the RFC 5545
+ * §3.3.6 split (`resolveDurationEndMs`) and its end is that zone's wall clock. Every other
+ * start is plain arithmetic: exact for a UTC or date-only start, and for a floating one or one
+ * whose TZID cannot be resolved (a vendor name), on its wall clock with no transitions.
  */
-export function parseICalDuration(duration: string, start: string): string | undefined {
+export function parseICalDuration(duration: string, start: string, tzid?: string): string | undefined {
+  if (tzid && WALL_CLOCK_ISO_RE.test(start) && isUsableTimezone(tzid)) {
+    const endMs = resolveDurationEndMs(duration, start, tzid);
+    if (endMs === undefined || Number.isNaN(endMs)) return undefined;
+    return formatWallClockIso(endMs + zoneOffsetMsAt(endMs, tzid));
+  }
+
   const parsed = parseICalDurationComponents(duration);
   if (!parsed) return undefined;
   const { sign, weeks, days, hours, minutes, seconds } = parsed;
@@ -978,8 +996,7 @@ export function parseICalDuration(duration: string, start: string): string | und
   }
 
   // `new Date()` reads a floating time as process-local, so do the arithmetic in UTC by hand.
-  const isFloating = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(start);
-  if (isFloating) {
+  if (WALL_CLOCK_ISO_RE.test(start)) {
     const [datePart, timePart] = start.split('T');
     const [y, mo, d] = datePart.split('-').map(Number);
     const [h, mi, s] = timePart.split(':').map(Number);
@@ -991,6 +1008,37 @@ export function parseICalDuration(duration: string, start: string): string | und
   }
 
   return endDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+/**
+ * The end instant of a DURATION from a wall-clock `startIso` in `tzid`; undefined if the
+ * DURATION is malformed, NaN if the nominal end cannot be resolved. RFC 5545 §3.3.6 makes
+ * weeks/days nominal (same wall clock N days later) and hours/minutes/seconds exact elapsed
+ * time, so the day shift is resolved to an instant FIRST and the time part added as
+ * milliseconds: across a spring-forward, `PT6H` from 23:00 ends at 06:00, not 05:00.
+ */
+function resolveDurationEndMs(durationValue: string, startIso: string, tzid: string): number | undefined {
+  const parsed = parseICalDurationComponents(durationValue);
+  if (!parsed) return undefined;
+  const { sign, weeks, days, hours, minutes, seconds } = parsed;
+
+  const nominalDays = sign * ((weeks * 7) + days);
+
+  const [datePart, timePart] = startIso.split('T');
+  const [y, mo, d] = datePart.split('-').map(Number);
+  // `Date.UTC` maps a two-digit year to 19xx, so build a Gregorian cycle away and shift back,
+  // as `nextDateOnly` does.
+  const shifted = new Date(Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d));
+  shifted.setUTCDate(shifted.getUTCDate() + nominalDays);
+  const year = shifted.getUTCFullYear() - GREGORIAN_CYCLE_YEARS;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const nominalIso = `${String(year).padStart(4, '0')}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}T${timePart}`;
+
+  const nominalMs = resolveCalendarInstantMs(nominalIso, tzid);
+  if (Number.isNaN(nominalMs)) return NaN;
+
+  const exactMs = sign * ((hours * 3600000) + (minutes * 60000) + (seconds * 1000));
+  return nominalMs + exactMs;
 }
 
 /** Every VEVENT block in an iCalendar payload, in the order the server serialised them. */
@@ -1117,7 +1165,9 @@ function parseVEvent(
     if (rawDuration) {
       const startIso = formatICalDate(rawStart);
       if (startIso) {
-        const computedEnd = parseICalDuration(rawDuration, startIso);
+        const startDesc = classifyZoneFromLines(parseAllICalProperties(vevent, 'DTSTART'));
+        const startTzid = startDesc.kind === 'tzid' ? normalizeZoneForComparison(startDesc.name) : undefined;
+        const computedEnd = parseICalDuration(rawDuration, startIso, startTzid);
         if (computedEnd) {
           const event: CalendarEvent = {
             id: uid,
@@ -1862,36 +1912,6 @@ function insertVTimezoneBlock(icalData: string, block: string, lineEnding: strin
 }
 
 /**
- * The end instant of a DURATION from a zoned `startIso`, for the VTIMEZONE span only. RFC 5545
- * §3.3.6 makes weeks/days nominal (same wall clock N days later) and hours/minutes/seconds exact
- * elapsed time, so the day shift is resolved to an instant FIRST and the time part added as
- * milliseconds: across a spring-forward, `PT6H` from 23:00 ends at 06:00, not 05:00.
- */
-function resolveDurationSpanEndMs(durationValue: string, startIso: string, tzid: string): number | undefined {
-  const parsed = parseICalDurationComponents(durationValue);
-  if (!parsed) return undefined;
-  const { sign, weeks, days, hours, minutes, seconds } = parsed;
-
-  const nominalDays = sign * ((weeks * 7) + days);
-
-  const [datePart, timePart] = startIso.split('T');
-  const [y, mo, d] = datePart.split('-').map(Number);
-  // `Date.UTC` maps a two-digit year to 19xx, so build a Gregorian cycle away and shift back,
-  // as `nextDateOnly` does.
-  const shifted = new Date(Date.UTC(y + GREGORIAN_CYCLE_YEARS, mo - 1, d));
-  shifted.setUTCDate(shifted.getUTCDate() + nominalDays);
-  const year = shifted.getUTCFullYear() - GREGORIAN_CYCLE_YEARS;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const nominalIso = `${String(year).padStart(4, '0')}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}T${timePart}`;
-
-  const nominalMs = resolveCalendarInstantMs(nominalIso, tzid);
-  if (Number.isNaN(nominalMs)) return NaN;
-
-  const exactMs = sign * ((hours * 3600000) + (minutes * 60000) + (seconds * 1000));
-  return nominalMs + exactMs;
-}
-
-/**
  * Recompute the VTIMEZONE block(s) the master VEVENT's current DTSTART/DTEND need, after
  * `updateCalendarEvent` has patched them (#166). Must run after every other patch, so it reads
  * the FINAL start/end, and before `removeOrphanedVTimezones`.
@@ -1930,7 +1950,7 @@ export function regenerateVTimezones(icalData: string, lineEnding: string): stri
       const colonIdx = findValueBoundary(durationLine);
       const durationValue = colonIdx === -1 ? '' : durationLine.slice(colonIdx + 1).trim();
       const startIso = formatICalDate(startFrame.value);
-      const endMs = startIso ? resolveDurationSpanEndMs(durationValue, startIso, startFrame.tzid) : undefined;
+      const endMs = startIso ? resolveDurationEndMs(durationValue, startIso, startFrame.tzid) : undefined;
       if (endMs !== undefined) {
         if (Number.isNaN(endMs)) {
           throw new InvalidInputError('Cannot resolve DURATION to an instant for VTIMEZONE generation.');
