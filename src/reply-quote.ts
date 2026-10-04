@@ -26,14 +26,12 @@ function stripSentinels(s: string): string {
   return s.replace(/\n?\[body truncated\]/g, '').replace(/\n?\[encoding issues detected\]/g, '');
 }
 
-// Both block builders run the original's html through the `map` pass of the sanitizer in
-// src/inline-images.ts (the posture is in docs/conventions.md), twice. Pass one maps with an
-// empty map, so it reports references and yields exactly the html that ships when nothing is
-// minted; the `collect` pass would not do here, because it keeps an image src (a relative
-// path) that `map` drops, and quotability judged on it would put an attribution over an empty
-// quote. Pass two rewrites resolved references to the Content-IDs this draft attaches. The
-// order matters: minting an identifier commits the call to attaching a part, so pass one
-// decides whether an html quote ships and pass two runs only when one does.
+// Both block builders sanitize the original's html twice with the `map` pass in
+// src/inline-images.ts (posture in docs/conventions.md). Pass one uses an empty map: it reports
+// references and yields the html that ships when nothing is minted. Not `collect`, which keeps a
+// relative src that `map` drops, so an attribution would open over an empty quote. Pass two
+// rewrites resolved references to the Content-IDs this draft attaches, and runs only when pass
+// one decides an html quote ships, since minting commits the call to attaching a part.
 
 // Content-based, NOT a string trim: an embedded-image-only original sanitizes to e.g.
 // <div></div>, which must not count or an orphan "On … wrote:" ships over an empty quote
@@ -402,8 +400,8 @@ export function buildForwardBlocks(input: {
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
-  // PASS 1: nothing is minted. An image-only original becomes quotable here, so an html block over it
-  // shows the picture rather than the header block alone.
+  // PASS 1: nothing is minted. An image-only original becomes quotable here, so an html block
+  // over it shows the picture rather than the header block alone.
   const collected = collectQuoteRefs(origHtml, quoteImages);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
