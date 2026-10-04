@@ -61,7 +61,7 @@ createDebug.enable([process.env.DEBUG, '-tsdav*'].filter(Boolean).join(','));
 const server = new Server(
   {
     name: 'fastmail-mcp',
-    version: '1.13.4-fork.4',
+    version: '1.13.4-fork.5',
   },
   {
     capabilities: {
