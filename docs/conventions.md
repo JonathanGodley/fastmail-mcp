@@ -887,10 +887,8 @@ might work, and it never will: the event repeats, and it will still repeat next 
 `assertICalTextLimits` (`src/ical-limits.ts`) follows the same rule from the other end of
 the call chain: it runs in the `create_calendar_event` / `update_calendar_event` handlers,
 before anything measures or serializes the values, and throws `InvalidInputError` naming
-the field, its size and the limit. The classification matters more than usual there. The
-whole point of the bound is that the work it refuses is expensive (see **Bounding a
-quadratic serializer** below), so an `InternalError` would not merely be inaccurate, it
-would invite the bare retry that repeats the cost.
+the field, its size and the limit (see **Bounding calendar text** below). A shorter value
+succeeds and a bare retry never will, so an `InternalError` would invite the wrong retry.
 
 **`download_attachment` follows the rule with no exception.** A bad `emailId`/`attachmentId`
 is caller-fixable input there exactly as it is on `get_email`/`get_thread`, whichever way it
@@ -1006,32 +1004,23 @@ failing the same way reports a caller-fixable error.
 The messages are identical on both sides of the split — only the code differs — so a client
 that reads `error.message` sees no change.
 
-## Bounding a quadratic serializer
+## Bounding calendar text
 
-`foldICalLine` (`src/ical-fold.ts`) folds an iCalendar content line to 75 octets per
-RFC 5545 §3.1 by repeatedly re-slicing the remainder of the line, allocating a fresh copy
-of the tail each time. Its cost therefore grows with the square of the field length:
-roughly 135ms to fold a 200KB value, and out of memory somewhere near 800KB. Every
-caller-supplied calendar text field reaches it, on both the create and the update path
-(SUMMARY, DESCRIPTION, LOCATION, and each ORGANIZER/ATTENDEE line, whose `CN=` parameter
-carries a participant name). One oversized value would stall or kill the process for every
-other request sharing it.
-
-The guard lives in `src/ical-limits.ts`, ahead of the handlers' own checks, and takes
-three bounds rather than one: a per-field cap (64KB), a participant-count cap (500), and
-a cap on the combined text of the whole call (256KB). The third is not redundant. A
-per-field cap on its own is defeated by many fields each sitting just under it, which is
-trivial to arrange through the participants array. Sizes are measured in UTF-8 bytes, not
-JS characters, because the fold is defined on octets.
+Every caller-supplied calendar text field is written into the event, on both the create
+and the update path (SUMMARY, DESCRIPTION, LOCATION, and each ORGANIZER/ATTENDEE line,
+whose `CN=` parameter carries a participant name). The guard lives in
+`src/ical-limits.ts` (which says why the caps exist), runs ahead of the handlers' own
+checks, and takes three bounds rather than one: a per-field cap (64KB), a
+participant-count cap (500), and a cap on the combined text of the whole call (256KB).
+The third is not redundant. A per-field cap on its own is defeated by many fields each
+sitting just under it, which is trivial to arrange through the participants array.
+Sizes are measured in UTF-8 bytes, not JS characters, because what is sent and stored
+is UTF-8.
 
 It **rejects and never truncates.** Trimming an over-long description would produce an
 event that reads as successfully created while quietly missing content, and the caller
 would have no signal at all. The rejection names the field, its actual size and the
 limit, which is everything needed to fix it in one retry.
-
-The bounds are properties of that serializer, not of iCalendar or of Fastmail. If the
-folding is ever made linear, they are the thing to revisit; until then, removing them
-re-opens a denial of service reachable from ordinary tool input.
 
 ## Surfacing computed fields without leaking into `raw: true`
 

@@ -2157,8 +2157,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Coerce BEFORE the size guard below, so it measures the real array rather than a
         // lenient client's JSON string, which would slip through unmeasured.
         const participants = coerceParticipants((args as any).participants);
-        // Bound the text before anything folds it: iCal line folding is quadratic in the
-        // field length, so an unbounded value stalls the whole process. See ical-limits.ts.
+        // Bound the text before anything serializes it. See ical-limits.ts.
         assertICalTextLimits({ title, description, location, participants });
         if (!calendarId || !title || !start || !end) {
           throw new McpError(ErrorCode.InvalidParams, 'calendarId, title, start, and end are required');

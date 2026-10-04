@@ -212,8 +212,8 @@ springs quietly:
   `update_calendar_event` handlers. `src/ical-limits.ts` is fork-only so it
   survives any resolution untouched, but its two call sites live in `index.ts`
   and a `--theirs` resolution there drops them silently: the tools keep working,
-  and the quadratic `foldICalLine` goes back to being reachable without a bound
-  (see `docs/conventions.md`, "Bounding a quadratic serializer").
+  and calendar writes go back to accepting text of any size
+  (see `docs/conventions.md`, "Bounding calendar text").
 
 Then the full gate — `npx tsc --noEmit && npm test && npm run build` — and, because
 the live harness spawns `dist/index.js`, at least one live check of a path that

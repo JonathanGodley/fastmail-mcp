@@ -959,7 +959,7 @@ Two `TZID`-bearing values in *different* zones — a flight that departs in one 
 
 #### Calendar text size limits
 
-Every text field that ends up in the event (`title`, `description`, `location`, and each participant's `name` and `email`) is written as an iCalendar content line, which has to be folded to 75 octets per RFC 5545. That folding is quadratic in the length of the field, so an unbounded value is a way to stall or kill the server process. Both `create_calendar_event` and `update_calendar_event` therefore bound the input up front:
+Every text field that ends up in the event (`title`, `description`, `location`, and each participant's `name` and `email`) is sent to Fastmail and stored in the event, so both `create_calendar_event` and `update_calendar_event` bound the size of what one call writes, up front:
 
 | Bound | Limit |
 | --- | --- |
