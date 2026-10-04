@@ -205,6 +205,30 @@ describe('formatEditDraftResult', () => {
     const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: { id: 'draft-1' }, trashedOldDraftId: 'draft-1' });
     assert.match(text, /moved to Trash/);
     assert.doesNotMatch(text, /It contained/);
+    assert.match(text, /auto-purged\.$/);
+  });
+
+  it('lists exactly five recipients with no overflow count', () => {
+    const five = Array.from({ length: 5 }, (_, i) => `p${i}@example.com`);
+    const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: { id: 'draft-1', to: five }, trashedOldDraftId: 'draft-1' });
+    assert.match(text, /to p0@example\.com, p1@example\.com, p2@example\.com, p3@example\.com, p4@example\.com\./);
+  });
+
+  it('says the reason is unknown when the old draft could not be trashed for no stated reason', () => {
+    const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: { id: 'draft-1' }, orphanedOldDraftId: 'draft-1' });
+    assert.match(text, /could NOT be moved to Trash \(reason unknown\)/);
+  });
+
+  it('prints the body hash for the next edit', () => {
+    const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: { id: 'draft-1' }, trashedOldDraftId: 'draft-1', bodyHash: 'h-123' });
+    assert.match(text, /auto-purged\. Body hash for your next edit of this draft: h-123$/);
+  });
+
+  it('says why no body hash was issued', () => {
+    const text = formatEditDraftResult({
+      id: 'draft-2', replacedDraft: { id: 'draft-1' }, trashedOldDraftId: 'draft-1', bodyHashWithheld: 'the re-read failed',
+    });
+    assert.match(text, /auto-purged\. No body hash was issued: the re-read failed$/);
   });
 });
 
@@ -351,6 +375,17 @@ describe('simplifyMailbox', () => {
     const result = simplifyMailbox({ ...raw, path: { unexpected: true } }, { verbose: true, path: 'Archive/2026' });
     assert.equal(result.path, 'Archive/2026');
   });
+
+  it('keeps a null role and parentId out of the verbose result too', () => {
+    const result = simplifyMailbox({ ...raw, role: null, parentId: null }, { verbose: true });
+    assert.equal(result.role, undefined);
+    assert.equal(result.parentId, undefined);
+  });
+
+  it('copies no verbose key whose value is undefined', () => {
+    const result = simplifyMailbox({ ...raw, extra: undefined }, { verbose: true });
+    assert.equal('extra' in result, false);
+  });
 });
 
 // ---------- buildUnpathableMailboxNote ----------
@@ -415,6 +450,7 @@ describe('simplifyIdentity', () => {
     const blank = simplifyIdentity({ ...raw, textSignature: '', htmlSignature: '   ' });
     assert.equal(blank.textSignature, undefined);
     assert.equal(blank.htmlSignature, undefined);
+    assert.equal(simplifyIdentity({ ...raw, textSignature: '   ' }).textSignature, undefined);
 
     const wrongType = simplifyIdentity({ ...raw, textSignature: null, htmlSignature: 42 });
     assert.equal(wrongType.textSignature, undefined);
@@ -436,6 +472,19 @@ describe('simplifyIdentity', () => {
   it('omits replyTo when not present', () => {
     const result = simplifyIdentity({ id: 'id-2', name: 'Test', email: 'test@example.com' });
     assert.equal(result.replyTo, undefined);
+  });
+
+  it('omits a null replyTo and mayDelete, verbose or not', () => {
+    for (const verbose of [false, true]) {
+      const result = simplifyIdentity({ id: 'id-2', name: 'Test', email: 'test@example.com', replyTo: null, mayDelete: null }, { verbose });
+      assert.equal('replyTo' in result, false, `verbose=${verbose}`);
+      assert.equal('mayDelete' in result, false, `verbose=${verbose}`);
+    }
+  });
+
+  it('copies no verbose key whose value is undefined', () => {
+    const result = simplifyIdentity({ ...raw, extra: undefined }, { verbose: true });
+    assert.equal('extra' in result, false);
   });
 });
 
@@ -615,6 +664,44 @@ describe('simplifyContact', () => {
     const result = simplifyContact({ id: 'ct-4' });
     assert.equal(result.emails, undefined);
     assert.equal(result.phones, undefined);
+  });
+
+  it('builds a name from given alone', () => {
+    assert.equal(nameOf({ given: 'Ann' }), 'Ann');
+  });
+
+  it('emits nothing for a null or empty field, verbose or not', () => {
+    const fields = ['name', 'emails', 'phones', 'organizations', 'notes', 'addresses', 'titles', 'online', 'photos', 'anniversaries'];
+    for (const verbose of [false, true]) {
+      assert.deepEqual(simplifyContact({ id: 'ct-e', ...Object.fromEntries(fields.map((f) => [f, null])) }, { verbose }), { id: 'ct-e' });
+      // photos and anniversaries pass through whole, so an empty map is emitted as one.
+      const mapped = fields.filter((f) => f !== 'photos' && f !== 'anniversaries');
+      const fromEmpty = simplifyContact({ id: 'ct-e', ...Object.fromEntries(mapped.map((f) => [f, {}])) }, { verbose });
+      assert.deepEqual(JSON.parse(JSON.stringify(fromEmpty)), { id: 'ct-e' });
+    }
+  });
+
+  it('emits nothing for a field that is a string where an object belongs', () => {
+    const fields = ['emails', 'phones', 'addresses', 'photos', 'anniversaries'];
+    assert.deepEqual(simplifyContact({ id: 'ct-s', ...Object.fromEntries(fields.map((f) => [f, 'ab'])) }, { verbose: true }), { id: 'ct-s' });
+  });
+
+  it('emits nothing for verbose entries that carry no value', () => {
+    const result = simplifyContact({ id: 'ct-v', addresses: { a: null }, titles: { t: {} }, online: { o: {} } }, { verbose: true });
+    assert.deepEqual(result, { id: 'ct-v' });
+  });
+
+  it('omits an organization with a blank name', () => {
+    assert.equal('organization' in simplifyContact({ id: 'ct-o', organizations: { o: { name: '' } } }), false);
+  });
+
+  it('keeps the computed organization when the card carries a field of that name', () => {
+    const result = simplifyContact({ id: 'ct-o', organizations: { o: { name: 'Acme' } }, organization: 'Other' }, { verbose: true });
+    assert.equal(result.organization, 'Acme');
+  });
+
+  it('copies no verbose key whose value is undefined', () => {
+    assert.equal('extra' in simplifyContact({ id: 'ct-u', extra: undefined }, { verbose: true }), false);
   });
 });
 
@@ -912,6 +999,11 @@ describe('formatQuerySummary without paged', () => {
     const summary = formatQuerySummary({ items: rows(50) });
     assert.equal(summary, 'Showing 50 results; the total match count was not returned.');
   });
+
+  it('reads a negative position as the start', () => {
+    const summary = formatQuerySummary({ items: rows(5), total: 20, position: -3 }, { paged: true });
+    assert.equal(summary, 'Showing 5 of 20 results. nextPosition: 5 (pass position:5 for the next page).');
+  });
 });
 
 // list_calendar_events takes `position` (#169), so its listing is a paged one.
@@ -1019,8 +1111,7 @@ describe('simplifyContact notes extraction', () => {
       },
     };
     const result = simplifyContact(raw);
-    assert.ok(result.notes.includes('First note'));
-    assert.ok(result.notes.includes('Second note'));
+    assert.equal(result.notes, 'First note\nSecond note');
   });
 
   it('omits notes when empty', () => {
@@ -1364,6 +1455,11 @@ describe('buildAttachmentListContent', () => {
     const content = buildAttachmentListContent(RESULT, false);
     assert.equal(content.length, 1);
   });
+
+  it('types every content item as text', () => {
+    assert.deepEqual(buildAttachmentListContent(RESULT, false).map((c) => c.type), ['text']);
+    assert.deepEqual(buildAttachmentListContent(RESULT, true).map((c) => c.type), ['text', 'text']);
+  });
 });
 
 // ---------- formatLabelRemoval ----------
@@ -1466,6 +1562,11 @@ describe('formatLabelRemoval', () => {
     const text = formatLabelRemoval(['e1'], ['e1', 'e1']);
     assert.match(text, /Archive was added: e1\./);
     assert.match(text, /duplicates collapsed them to 1 distinct email; nothing was skipped\./);
+  });
+
+  it('lists exactly ten rescued ids with no overflow count', () => {
+    const ids = Array.from({ length: 10 }, (_, i) => `e${i}`);
+    assert.match(formatLabelRemoval(ids, 10), /Archive was added: e0, e1, e2, e3, e4, e5, e6, e7, e8, e9\.$/);
   });
 });
 
@@ -1600,7 +1701,7 @@ describe('formatArchiveResult', () => {
       { id: 'b', action: 'refused', mailboxes: ['Trash'], roles: ['trash'], reason: { role: 'trash' } },
       { id: 'c', action: 'refused', mailboxes: ['Spam'], roles: ['junk'], reason: { role: 'junk' } },
     ]);
-    assert.match(text, /2 refused: Fastmail offers no Archive action for a message in Trash\. Use move_email/);
+    assert.match(text, /^- 2 refused: Fastmail offers no Archive action for a message in Trash\. Use move_email/m);
     assert.match(text, /1 refused: .*in Spam\. Use move_email/);
   });
 
@@ -1961,6 +2062,56 @@ describe('formatArchiveResult', () => {
       assert.match(text, /Fastmail offers no Archive action/);
     }
   });
+
+  it('refuses a message with no stated role through the generic sentence', () => {
+    const text = build([{ id: 'a', action: 'refused' }]);
+    assert.match(text, /^- 1 refused: Fastmail offers no Archive action for a message in the "unknown" mailbox\. Use move_email/m);
+  });
+
+  it('renders a failure that carries no reason at all', () => {
+    const text = build([{ id: 'a', action: 'failed' }]);
+    assert.match(text, /^Archive: 1 email\(s\), 0 changed\.\n- 1 failed .*: a\.$/);
+  });
+
+  it('lists exactly ten mailbox names with no overflow count', () => {
+    const ten = Array.from({ length: 10 }, (_, i) => `Label ${i}`);
+    const text = build([{ id: 'a', action: 'removedFromInbox', mailboxes: ten }]);
+    assert.match(text, /"Label 9"\.$/m);
+  });
+
+  it('names only the unresolved ids when a message carries no mailbox names', () => {
+    const text = build([{ id: 'a', action: 'removedFromInbox', unresolvedMailboxIds: ['mb-x'] }]);
+    assert.match(text, /Now filed across these messages in: 1 mailbox id\(s\) that could not be resolved to a name: mb-x\./);
+  });
+
+  it('lists only the not-found ids in a mixed batch', () => {
+    const text = build([
+      { id: 'a', action: 'movedToArchive', mailboxes: ['Archive'], roles: ['archive'] },
+      { id: 'ghost', action: 'notFound' },
+    ]);
+    assert.match(text, /^- 1 not found \(the server has no such message\): ghost\.$/m);
+  });
+
+  it('counts both kinds of write as changed, one line per outcome', () => {
+    const text = build([
+      { id: 'a', action: 'movedToArchive', mailboxes: ['Archive'], roles: ['archive'] },
+      { id: 'b', action: 'removedFromInbox', mailboxes: ['Gmail'] },
+    ]);
+    assert.match(text, /^Archive: 2 email\(s\), 2 changed\./);
+    assert.equal(text.split('\n').length, 3, text);
+    assert.doesNotMatch(text, /already in Archive/);
+  });
+
+  it('writes exactly five failure bullets with no overflow line', () => {
+    const results = Array.from({ length: 5 }, (_, i) => ({
+      id: `e${i}`,
+      action: 'failed' as const,
+      reason: { setErrorType: 'serverFail', description: `failed on e${i}` },
+    }));
+    const text = build(results);
+    assert.equal(text.match(/1 failed \(serverFail/g)?.length, 5);
+    assert.doesNotMatch(text, /more failed/);
+  });
 });
 
 describe('buildCalendarWindowNote names the bound that was invented', () => {
@@ -1992,6 +2143,28 @@ describe('buildCalendarWindowNote names the bound that was invented', () => {
     assert.match(note, /Pass startDate and\/or endDate to query a different span/);
     // Not the one-sided wording, which would be a false account of what the caller passed.
     assert.doesNotMatch(note, /only startDate was given|only endDate was given/);
+    assert.match(note, /recurrence expansion/);
+  });
+
+  it('names endDate as given and startDate as the one to pass, when startDate was invented', () => {
+    const note = buildCalendarWindowNote({
+      invented: 'startDate',
+      start: '2027-02-01T00:00:00Z',
+      end: '2027-03-01T00:00:00Z',
+    });
+    assert.match(note, /only endDate was given/);
+    assert.match(note, /Pass startDate explicitly/);
+    assert.match(note, /recurrence expansion/);
+  });
+
+  it('puts an invented-bound note and a saturation note on separate lines', () => {
+    const note = buildCalendarWindowNote({
+      invented: 'endDate',
+      saturated: [{ bound: 'startDate', edge: 'earliest' }],
+      start: '0000-01-01T00:00:00Z',
+      end: '0000-02-01T00:00:00Z',
+    });
+    assert.ok(note.includes('across it.\nNote: startDate resolved before'), note);
   });
 });
 
@@ -2035,6 +2208,18 @@ describe('buildCalendarWindowNote names the edge a bound was saturated at', () =
     });
     assert.match(note, /endDate resolved past the last date this server can express/);
     assert.match(note, /startDate resolved before the earliest date this server can express/);
+  });
+
+  it('joins two bounds saturated at the same edge into one sentence', () => {
+    const note = buildCalendarWindowNote({
+      saturated: [
+        { bound: 'startDate', edge: 'latest' },
+        { bound: 'endDate', edge: 'latest' },
+      ],
+      start: '9999-12-31T23:59:58Z',
+      end: '9999-12-31T23:59:59Z',
+    });
+    assert.match(note, /Note: startDate and endDate resolved past the last date this server can express/);
   });
 
   it('says nothing about saturation for a window that was honoured exactly', () => {
