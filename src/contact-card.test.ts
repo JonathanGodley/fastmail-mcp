@@ -425,8 +425,6 @@ describe('refusedContactKind', () => {
 
 // ---------- stored values of the wrong shape ----------
 
-// A null or a string where an object belongs is read as absent, never spread into keys or
-// dereferenced.
 describe('contact-card helpers over a stored value of the wrong shape', () => {
   it('resolveEntryLabel reads no label from a null entry or a null or string contexts', () => {
     assert.equal(resolveEntryLabel(null), undefined);

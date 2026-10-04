@@ -3599,8 +3599,7 @@ describe('draft_email — what a refusal tells the caller to do', () => {
   });
 
   it('still names a cause when the token expanded but its block displays nothing', async () => {
-    // An identity whose html signature is non-blank markup with no visible content: the
-    // token expands, so no site carries a cause, and the refusal falls back to the block.
+    // Non-blank markup that displays nothing: the token expands, so no site carries a cause.
     const invisible = { ...UNSIGNED_IDENTITY, mayDelete: false, htmlSignature: '<div><br></div>' };
     const { client, calls } = plainClient(makeOriginal(), { getIdentities: async () => [invisible] });
     const message = await messageFrom(() => compose(
@@ -3611,8 +3610,7 @@ describe('draft_email — what a refusal tells the caller to do', () => {
   });
 
   it('refuses a draft whose body references an image the upload did not return', async () => {
-    // The upload is asked to embed "logo" and hands back a part without that Content-ID, so
-    // the stored body would point at nothing.
+    // The upload hands back the part without the Content-ID the body displays.
     const { client, calls } = plainClient(makeOriginal(), {}, [
       { blobId: 'blob-logo', type: 'image/png', name: 'logo.png', disposition: 'attachment' },
     ]);
