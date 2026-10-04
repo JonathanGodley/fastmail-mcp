@@ -371,7 +371,7 @@ const ARRAY_PARAM_COERCERS: Record<string, string> = {
   'edit_draft.attachments': 'edit-draft-handler.ts coerceAttachments',
   'edit_draft.removeAttachments': 'edit-draft-handler.ts coerceStringArrayStrict',
   'edit_draft.clearFields': 'edit-draft-handler.ts coerceStringArrayStrict',
-  'edit_draft.bodyEdits': 'edit-draft-handler.ts coerceBodyEdits (body-edits.ts)',
+  'edit_draft.bodyEdits': 'edit-draft-handler.ts coerceBodyEdits',
   'create_contact.emails': 'contacts-handler.ts coerceContactEmails',
   'create_contact.phones': 'contacts-handler.ts coerceContactPhones',
   'create_contact.addresses': 'contacts-handler.ts coerceContactAddresses',

@@ -1156,7 +1156,7 @@ src/
 ├── body-format.ts          # HTML as source of truth, and the derived text/plain fallback
 ├── body-tokens.ts          # The {{signature}}/{{quote}}/{{forward}} scan and single-pass substitution
 ├── body-hash.ts            # The draft bodyHash that get_email issues and edit_draft checks
-├── body-edits.ts           # edit_draft's exact find/replace bodyEdits: coercion, location, splice
+├── body-edits.ts           # edit_draft's exact find/replace bodyEdits: location, splice and wording
 ├── inline-images.ts        # Embedded (cid:) image identity, vetting and reconciliation
 ├── compose-inline.ts       # The embedded-image checks the compose path runs
 ├── inline-notes.ts         # The wording used when an image is carried, demoted or refused

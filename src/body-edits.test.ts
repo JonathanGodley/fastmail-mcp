@@ -1,105 +1,16 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { InvalidInputError } from './coerce.js';
-import {
-  coerceBodyEdits, locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
-  unmatchedSegments,
-} from './body-edits.js';
+import { locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits, unmatchedSegments } from './body-edits.js';
 
-/** Asserts `fn` throws `type` with exactly `message` (McpError prefixes its code). */
-function refuses(fn: () => unknown, type: typeof McpError | typeof InvalidInputError, message: string) {
+/** Asserts `fn` throws `type` with a message ending in `message`. */
+function refuses(fn: () => unknown, type: typeof InvalidInputError, message: string) {
   assert.throws(fn, (err: unknown) => {
     assert.ok(err instanceof type, `expected ${type.name}, got ${String(err)}`);
     assert.ok((err as Error).message.endsWith(message), `message was: ${(err as Error).message}`);
     return true;
   });
 }
-
-describe('coerceBodyEdits', () => {
-  it('reads an absent, null or blank value as omitted', () => {
-    assert.equal(coerceBodyEdits(undefined), undefined);
-    assert.equal(coerceBodyEdits(null), undefined);
-    assert.equal(coerceBodyEdits(''), undefined);
-    assert.equal(coerceBodyEdits('  \n '), undefined);
-  });
-
-  it('passes a well-formed array through', () => {
-    assert.deepEqual(coerceBodyEdits([{ find: 'a', replace: 'b' }, { find: 'c', replace: '' }]), [
-      { find: 'a', replace: 'b' },
-      { find: 'c', replace: '' },
-    ]);
-  });
-
-  it('never trims find or replace', () => {
-    assert.deepEqual(coerceBodyEdits([{ find: ' a\n', replace: '\tb ' }]), [{ find: ' a\n', replace: '\tb ' }]);
-    assert.deepEqual(coerceBodyEdits(['  {"find":" x ","replace":"  "}  ']), [{ find: ' x ', replace: '  ' }]);
-  });
-
-  it('accepts a JSON-encoded array, padded', () => {
-    assert.deepEqual(coerceBodyEdits(' [{"find":"a","replace":"b"}] '), [{ find: 'a', replace: 'b' }]);
-  });
-
-  it('accepts JSON-encoded object elements', () => {
-    assert.deepEqual(coerceBodyEdits([{ find: 'a', replace: 'b' }, '{"find":"c","replace":"d"}']), [
-      { find: 'a', replace: 'b' },
-      { find: 'c', replace: 'd' },
-    ]);
-  });
-
-  it('refuses an empty array, in either form', () => {
-    const msg = 'bodyEdits cannot be empty; omit it to leave the body unchanged.';
-    refuses(() => coerceBodyEdits([]), McpError, msg);
-    refuses(() => coerceBodyEdits('[]'), McpError, msg);
-  });
-
-  it('refuses a value that is not an array', () => {
-    const msg = 'bodyEdits must be an array of {find, replace} objects.';
-    refuses(() => coerceBodyEdits('not json'), McpError, msg);
-    refuses(() => coerceBodyEdits('{"find":"a","replace":"b"}'), McpError, msg);
-    refuses(() => coerceBodyEdits({ find: 'a', replace: 'b' }), McpError, msg);
-    refuses(() => coerceBodyEdits(3), McpError, msg);
-  });
-
-  it('refuses a bare-string element by index', () => {
-    refuses(
-      () => coerceBodyEdits([{ find: 'a', replace: 'b' }, 'find a']),
-      McpError,
-      'bodyEdits[1] must be a {find, replace} object, not a bare string.',
-    );
-    refuses(() => coerceBodyEdits(['{find']), McpError, 'bodyEdits[0] must be a {find, replace} object, not a bare string.');
-    refuses(() => coerceBodyEdits(['find}']), McpError, 'bodyEdits[0] must be a {find, replace} object, not a bare string.');
-  });
-
-  it('refuses a braced string element that is not JSON, by index', () => {
-    refuses(
-      () => coerceBodyEdits([{ find: 'a', replace: 'b' }, '{find: a}']),
-      McpError,
-      "bodyEdits[1] is a string that isn't valid JSON; pass a {find, replace} object.",
-    );
-  });
-
-  it('refuses a non-object element by index', () => {
-    for (const bad of [null, 7, ['a', 'b'], true]) {
-      refuses(() => coerceBodyEdits([{ find: 'a', replace: 'b' }, bad]), McpError, 'bodyEdits[1] must be a {find, replace} object.');
-    }
-  });
-
-  it('refuses unknown keys by index, naming them', () => {
-    refuses(
-      () => coerceBodyEdits([{ find: 'a', replace: 'b', all: true, with: 'x' }]),
-      McpError,
-      'bodyEdits[0] has unknown key(s): all, with. Valid: find, replace',
-    );
-  });
-
-  it('refuses a missing or non-string find or replace by index', () => {
-    refuses(() => coerceBodyEdits([{ replace: 'b' }]), McpError, 'bodyEdits[0].find must be a string.');
-    refuses(() => coerceBodyEdits([{ find: 1, replace: 'b' }]), McpError, 'bodyEdits[0].find must be a string.');
-    refuses(() => coerceBodyEdits([{ find: 'a', replace: 'b' }, { find: 'a' }]), McpError, 'bodyEdits[1].replace must be a string.');
-    refuses(() => coerceBodyEdits([{ find: 'a', replace: null }]), McpError, 'bodyEdits[0].replace must be a string.');
-  });
-});
 
 describe('locateBodyEdits', () => {
   it('locates a single exact occurrence', () => {

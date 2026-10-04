@@ -1,8 +1,7 @@
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { coerceRecipients, coerceStringArrayStrict, coerceAttachments, coerceBool, InvalidInputError } from './coerce.js';
+import { coerceRecipients, coerceStringArrayStrict, coerceAttachments, coerceBodyEdits, coerceBool, InvalidInputError } from './coerce.js';
 import type { AttachmentSpec } from './coerce.js';
 import { assertBodyInputs } from './body-format.js';
-import { coerceBodyEdits } from './body-edits.js';
 import type { BodyEdit } from './body-edits.js';
 import { rejectMissingBodyHash } from './inline-notes.js';
 import { assertDraftEditValues } from './jmap-client.js';

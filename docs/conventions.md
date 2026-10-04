@@ -186,7 +186,7 @@ most tools, so the helpers are centralised in `src/coerce.ts`:
   `participants`, a blank string reads as the empty list rather than omitted: `[]` is
   already refused on these arrays, so the blank string meets that refusal instead of passing
   as a silent no-op.
-- `coerceBodyEdits` (`src/body-edits.ts`, beside the matcher it feeds): `edit_draft`'s
+- `coerceBodyEdits`: `edit_draft`'s
   `bodyEdits` to `{ find, replace }[]`, on `coerceAttachments`' rules: the whole value or any
   element may arrive JSON-encoded, a blank string reads as omitted, and an unknown key, a
   bare-string element or a non-string `find`/`replace` is refused by index. `find` and

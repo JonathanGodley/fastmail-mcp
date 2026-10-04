@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, etcGmtOffsetNote, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, zoneCanonicalizationCacheHas, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError, PathAccessError, utcMsFromComponents } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceRecipients, coerceBool, coercePosition, clampLimit, coerceUtcDate, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, etcGmtOffsetNote, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, resolveConfiguredTimezone, canonicalZoneName, zoneCanonicalizationCacheSize, zoneCanonicalizationCacheHas, ZONE_CANONICALIZATION_CACHE_LIMIT, resolveCalendarInstantMs, zoneOffsetMsAt, zoneOffsetFormatterCacheSize, redactBearerTokens, redactedJson, registerSecret, describeUntrusted, describeUntrustedAt, requireNonEmpty, validateClearFields, parseAddress, assertKnownParams, coerceAttachments, coerceBodyEdits, coerceParticipants, coerceContactEmails, coerceContactPhones, coerceContactAddresses, coerceContactName, echoCallerText, echoPath, InvalidInputError, PathAccessError, utcMsFromComponents } from './coerce.js';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { describePart } from './inline-images.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -2900,5 +2900,95 @@ describe('coerceContactName shapes', () => {
 
   it('names every part when none is set', () => {
     rejectsAsInvalidInput(() => coerceContactName({}), /must set at least one of given, surname, full\.$/);
+  });
+});
+
+/** Asserts `fn` throws an InvalidParams McpError whose message ends with `message`. */
+function refusesParams(fn: () => unknown, message: string) {
+  assert.throws(fn, (err: unknown) => {
+    assert.ok(err instanceof McpError && err.code === ErrorCode.InvalidParams, `got ${String(err)}`);
+    assert.ok(err.message.endsWith(message), `message was: ${err.message}`);
+    return true;
+  });
+}
+describe('coerceBodyEdits', () => {
+  it('reads an absent, null or blank value as omitted', () => {
+    assert.equal(coerceBodyEdits(undefined), undefined);
+    assert.equal(coerceBodyEdits(null), undefined);
+    assert.equal(coerceBodyEdits(''), undefined);
+    assert.equal(coerceBodyEdits('  \n '), undefined);
+  });
+
+  it('passes a well-formed array through', () => {
+    assert.deepEqual(coerceBodyEdits([{ find: 'a', replace: 'b' }, { find: 'c', replace: '' }]), [
+      { find: 'a', replace: 'b' },
+      { find: 'c', replace: '' },
+    ]);
+  });
+
+  it('never trims find or replace', () => {
+    assert.deepEqual(coerceBodyEdits([{ find: ' a\n', replace: '\tb ' }]), [{ find: ' a\n', replace: '\tb ' }]);
+    assert.deepEqual(coerceBodyEdits(['  {"find":" x ","replace":"  "}  ']), [{ find: ' x ', replace: '  ' }]);
+  });
+
+  it('accepts a JSON-encoded array, padded', () => {
+    assert.deepEqual(coerceBodyEdits(' [{"find":"a","replace":"b"}] '), [{ find: 'a', replace: 'b' }]);
+  });
+
+  it('accepts JSON-encoded object elements', () => {
+    assert.deepEqual(coerceBodyEdits([{ find: 'a', replace: 'b' }, '{"find":"c","replace":"d"}']), [
+      { find: 'a', replace: 'b' },
+      { find: 'c', replace: 'd' },
+    ]);
+  });
+
+  it('refuses an empty array, in either form', () => {
+    const msg = 'bodyEdits cannot be empty; omit it to leave the body unchanged.';
+    refusesParams(() => coerceBodyEdits([]), msg);
+    refusesParams(() => coerceBodyEdits('[]'), msg);
+  });
+
+  it('refuses a value that is not an array', () => {
+    const msg = 'bodyEdits must be an array of {find, replace} objects.';
+    refusesParams(() => coerceBodyEdits('not json'), msg);
+    refusesParams(() => coerceBodyEdits('{"find":"a","replace":"b"}'), msg);
+    refusesParams(() => coerceBodyEdits({ find: 'a', replace: 'b' }), msg);
+    refusesParams(() => coerceBodyEdits(3), msg);
+  });
+
+  it('refuses a bare-string element by index', () => {
+    refusesParams(
+      () => coerceBodyEdits([{ find: 'a', replace: 'b' }, 'find a']),
+      'bodyEdits[1] must be a {find, replace} object, not a bare string.',
+    );
+    refusesParams(() => coerceBodyEdits(['{find']), 'bodyEdits[0] must be a {find, replace} object, not a bare string.');
+    refusesParams(() => coerceBodyEdits(['find}']), 'bodyEdits[0] must be a {find, replace} object, not a bare string.');
+  });
+
+  it('refuses a braced string element that is not JSON, by index', () => {
+    refusesParams(
+      () => coerceBodyEdits([{ find: 'a', replace: 'b' }, '{find: a}']),
+      "bodyEdits[1] is a string that isn't valid JSON; pass a {find, replace} object.",
+    );
+  });
+
+  it('refuses a non-object element by index', () => {
+    for (const bad of [null, 7, ['a', 'b'], true]) {
+      refusesParams(() => coerceBodyEdits([{ find: 'a', replace: 'b' }, bad]), 'bodyEdits[1] must be a {find, replace} object.');
+    }
+  });
+
+  it('refuses unknown keys by index, naming them', () => {
+    refusesParams(
+      () => coerceBodyEdits([{ find: 'a', replace: 'b', all: true, with: 'x' }]),
+      'bodyEdits[0] has unknown key(s): all, with. Valid: find, replace',
+    );
+  });
+
+  it('refuses a missing or non-string find or replace by index', () => {
+    refusesParams(() => coerceBodyEdits([{ replace: 'b' }]), 'bodyEdits[0].find must be a string.');
+    refusesParams(() => coerceBodyEdits([{ find: 1, replace: 'b' }]), 'bodyEdits[0].find must be a string.');
+    refusesParams(() => coerceBodyEdits([{ find: 'a', replace: 'b' }, { find: 'a' }]), 'bodyEdits[1].replace must be a string.');
+    refusesParams(() => coerceBodyEdits([{ find: 'a', replace: null }]), 'bodyEdits[0].replace must be a string.');
   });
 });
