@@ -33,7 +33,8 @@ import { listContactsTool, searchContactsTool } from './contacts-handler.js';
 import type { ContactsReadClient } from './contacts-handler.js';
 import { listCalendarEventsTool } from './calendar-list-handler.js';
 import type { CalendarListClient } from './calendar-list-handler.js';
-import { formatEmailQueryResult, formatRawQueryResult } from './response-formatters.js';
+import { listEmailsTool, searchEmailsTool } from './email-list-handler.js';
+import type { EmailListClient } from './email-list-handler.js';
 import type { QueryResult } from './jmap-client.js';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
@@ -1048,8 +1049,9 @@ const DECLARING_COUNT = 5;
 const POSITIONS = [0, 4];
 const TOTAL = 10;
 
-function emailPage(position: number): QueryResult {
-  return { items: [{ id: 'M1' }, { id: 'M2' }], total: TOTAL, position };
+function emailClient(position: number): EmailListClient {
+  const page = (): QueryResult => ({ items: [{ id: 'M1' }, { id: 'M2' }], total: TOTAL, position });
+  return { getEmails: async () => page(), searchEmails: async () => page() };
 }
 
 function contactsClient(position: number): ContactsReadClient {
@@ -1072,10 +1074,10 @@ function calendarClient(position: number): CalendarListClient {
 
 type Runner = (position: number) => Promise<string>;
 
-const emailRunners: Record<string, Runner> = {
-  simplified: async (position) => formatEmailQueryResult(emailPage(position)),
-  raw: async (position) => formatRawQueryResult(emailPage(position)),
-};
+const emailRunners = (run: typeof listEmailsTool): Record<string, Runner> => ({
+  simplified: async (position) => (await run({ position }, 2, emailClient(position)))[0].text,
+  raw: async (position) => (await run({ position, raw: true }, 2, emailClient(position)))[0].text,
+});
 
 const contactRunners = (run: typeof listContactsTool): Record<string, Runner> => ({
   simplified: async (position) => (await run({ query: 'q', position }, 2, contactsClient(position)))[0].text,
@@ -1083,10 +1085,8 @@ const contactRunners = (run: typeof listContactsTool): Record<string, Runner> =>
 });
 
 const RUNNERS: Record<string, Record<string, Runner>> = {
-  // The email tools page inline in the CallTool switch, so these run the two renderers that
-  // switch calls; that the switch calls them is not checked here.
-  list_emails: emailRunners,
-  search_emails: emailRunners,
+  list_emails: emailRunners(listEmailsTool),
+  search_emails: emailRunners(searchEmailsTool),
   list_contacts: contactRunners(listContactsTool),
   search_contacts: contactRunners(searchContactsTool),
   list_calendar_events: {
