@@ -3,9 +3,8 @@
 # where it would not find them itself. Values are never printed, logged, or written
 # to disk. Usage: python scripts/probes/run-probe.py <probe.mjs>
 #
-# Each variable comes from ~/.fastmail-mcp/.env if that file sets it, else from the
-# fastmail entry in ~/.claude.json, else the inherited environment is left as it is.
-# Either source may be absent.
+# Each variable comes from ~/.fastmail-mcp/.env, else the fastmail entry in
+# ~/.claude.json; either may be absent.
 #
 # FASTMAIL_API_TOKEN is required. The CalDAV credentials and display name are
 # injected only when a source carries them (a JMAP-only setup has no calendar app
