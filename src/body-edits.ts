@@ -176,12 +176,3 @@ export function unmatchedSegments(stored: string, located: readonly LocatedBodyE
   segments.push(stored.slice(cursor));
   return segments;
 }
-
-/** The receipt as one result line, sizes in the `chars` the replaced-draft sizes use. */
-export function formatBodyEditsReceipt(receipt: BodyEditsReceipt | undefined): string {
-  if (!receipt) return '';
-  const ops = receipt.ops.map(
-    (op, i) => `[${i}] at offset ${op.offset}, ${op.matchedSize} chars replaced with ${op.replacementSize}`,
-  );
-  return `\nbodyEdits applied to ${receipt.part}: ${ops.join('; ')}.`;
-}

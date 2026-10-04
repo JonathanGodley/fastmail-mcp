@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { McpError } from '@modelcontextprotocol/sdk/types.js';
 import { InvalidInputError } from './coerce.js';
 import {
-  coerceBodyEdits, formatBodyEditsReceipt, locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
+  coerceBodyEdits, locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
   unmatchedSegments,
 } from './body-edits.js';
 
@@ -302,25 +302,6 @@ describe('noteBodyEditsSplitSignature', () => {
       noteBodyEditsSplitSignature('textBody', 2),
       '2 {{signature}} tokens in textBody were formed where a bodyEdits replace meets the text beside it, ' +
         'so they are stored as literal text: only a token wholly inside a replace expands. Put the whole {{signature}} in one replace.',
-    );
-  });
-});
-
-describe('formatBodyEditsReceipt', () => {
-  it('is empty without a receipt', () => {
-    assert.equal(formatBodyEditsReceipt(undefined), '');
-  });
-
-  it('renders each op on one line, in order', () => {
-    assert.equal(
-      formatBodyEditsReceipt({
-        part: 'htmlBody',
-        ops: [
-          { offset: 12, matchedSize: 5, replacementSize: 9 },
-          { offset: 3, matchedSize: 2, replacementSize: 0 },
-        ],
-      }),
-      '\nbodyEdits applied to htmlBody: [0] at offset 12, 5 chars replaced with 9; [1] at offset 3, 2 chars replaced with 0.',
     );
   });
 });

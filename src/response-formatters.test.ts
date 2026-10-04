@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQuerySummary, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQuerySummary, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatBodyEditsReceipt, formatEditDraftResult,formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -120,6 +120,27 @@ describe('formatDraftEmailResult', () => {
   });
 });
 
+// ---------- formatBodyEditsReceipt ----------
+
+describe('formatBodyEditsReceipt', () => {
+  it('is empty without a receipt', () => {
+    assert.equal(formatBodyEditsReceipt(undefined), '');
+  });
+
+  it('renders each op on one line, in order', () => {
+    assert.equal(
+      formatBodyEditsReceipt({
+        part: 'htmlBody',
+        ops: [
+          { offset: 12, matchedSize: 5, replacementSize: 9 },
+          { offset: 3, matchedSize: 2, replacementSize: 0 },
+        ],
+      }),
+      '\nbodyEdits applied to htmlBody: [0] at offset 12, 5 chars replaced with 9; [1] at offset 3, 2 chars replaced with 0.',
+    );
+  });
+});
+
 // ---------- formatEditDraftResult ----------
 
 describe('formatEditDraftResult', () => {
@@ -199,6 +220,30 @@ describe('formatEditDraftResult', () => {
       notes: ['This draft embeds 1 image(s) (2 KB).'],
     });
     assert.match(text, /moved to Trash.*This draft embeds 1 image\(s\) \(2 KB\)\.$/s);
+  });
+
+  it('prints the bodyEdits receipt on its own line, after the hash and before the notes', () => {
+    const text = formatEditDraftResult({
+      id: 'draft-2',
+      replacedDraft: { id: 'draft-1' },
+      trashedOldDraftId: 'draft-1',
+      bodyHash: 'bh1-deadbeef',
+      bodyEdits: { part: 'htmlBody', ops: [{ offset: 3, matchedSize: 7, replacementSize: 10 }] },
+      notes: ['A note.'],
+    });
+    assert.ok(
+      text.endsWith(
+        'Body hash for your next edit of this draft: bh1-deadbeef' +
+          '\nbodyEdits applied to htmlBody: [0] at offset 3, 7 chars replaced with 10.' +
+          '\nA note.',
+      ),
+      text,
+    );
+  });
+
+  it('prints no bodyEdits line on an edit without bodyEdits', () => {
+    const text = formatEditDraftResult({ id: 'draft-2', replacedDraft: { id: 'draft-1' }, trashedOldDraftId: 'draft-1' });
+    assert.doesNotMatch(text, /bodyEdits/);
   });
 
   it('omits the echo-back sentence when the replaced draft had nothing to report', () => {

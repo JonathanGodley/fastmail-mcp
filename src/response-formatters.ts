@@ -6,6 +6,7 @@ import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo,
 import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
 import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
+import type { BodyEditsReceipt } from './body-edits.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
 import { buildIdCollapseNote } from './id-collapse-note.js';
 
@@ -145,7 +146,17 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
     : result.bodyHashWithheld
       ? ` No body hash was issued: ${describeUntrusted(result.bodyHashWithheld)}`
       : '';
-  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}${formatInlineNotes(result.notes)}`;
+  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}` +
+    `${formatBodyEditsReceipt(result.bodyEdits)}${formatInlineNotes(result.notes)}`;
+}
+
+/** The bodyEdits receipt as one result line, sizes in the `chars` the replaced-draft sizes use. */
+export function formatBodyEditsReceipt(receipt: BodyEditsReceipt | undefined): string {
+  if (!receipt) return '';
+  const ops = receipt.ops.map(
+    (op, i) => `[${i}] at offset ${op.offset}, ${op.matchedSize} chars replaced with ${op.replacementSize}`,
+  );
+  return `\nbodyEdits applied to ${receipt.part}: ${ops.join('; ')}.`;
 }
 
 // Reports what happened to the message the draft was composed from (#60).

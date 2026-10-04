@@ -20,7 +20,6 @@ import { attachDraftBodyHash } from './body-hash.js';
 import { composeDraftEmail } from './draft-email-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
 import { editDraft } from './edit-draft-handler.js';
-import { formatBodyEditsReceipt } from './body-edits.js';
 import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
@@ -2085,7 +2084,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: formatEditDraftResult(updateResult) + formatBodyEditsReceipt(updateResult.bodyEdits),
+              text: formatEditDraftResult(updateResult),
             },
           ],
         };
