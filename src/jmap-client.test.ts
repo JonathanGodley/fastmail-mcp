@@ -6100,6 +6100,34 @@ describe('updateDraft bodyEdits (#177)', () => {
     assert.deepEqual(result.bodyEdits!.ops, [{ offset: 14, matchedSize: 11, replacementSize: '<div><div>Test User</div></div>'.length }]);
     assert.equal(result.bodyHash, undefined);
     assert.ok(result.bodyHashWithheld);
+    // A stored token outside the matches plus one in a replace, and no split token: no note.
+    assert.equal(result.notes, undefined);
+  });
+
+  it('notes only the split token beside a stored one outside the matches', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING]);
+    const split = { ...PLANTED, bodyValues: { h: { value: '<p>A {{sigXX</p><q>{{signature}}</q><p>SIGN</p>' } } };
+    const makeReq = serve(split);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: 'XX', replace: 'nature}}' }, { find: '<p>SIGN</p>', replace: '{{signature}}' }],
+      expandSignature: true,
+      bodyHash: hashOf(split),
+    });
+    assert.equal(
+      created(makeReq).bodyValues.html.value,
+      '<p>A {{signature}}</p><q>{{signature}}</q><div><div>Test User</div></div>',
+    );
+    assert.deepEqual(result.notes, [noteBodyEditsSplitSignature('htmlBody', 1)]);
+  });
+
+  it('refuses a find on a draft with no body as not found', async () => {
+    const bodiless = { ...BASE, textBody: [], htmlBody: [], bodyValues: {} };
+    const makeReq = serve(bodiless);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', { bodyEdits: [{ find: 'x', replace: 'y' }], bodyHash: hashOf(bodiless) }),
+      (err: unknown) => err instanceof InvalidInputError && err.message.startsWith('bodyEdits[0].find not found;'),
+    );
+    wroteNothing(makeReq);
   });
 
   it('does not count a stored {{signature}} toward the flag', async () => {

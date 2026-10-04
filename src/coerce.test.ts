@@ -2951,6 +2951,7 @@ describe('coerceBodyEdits', () => {
   it('refuses a value that is not an array', () => {
     const msg = 'bodyEdits must be an array of {find, replace} objects.';
     refusesParams(() => coerceBodyEdits('not json'), msg);
+    refusesParams(() => coerceBodyEdits('[{'), msg);
     refusesParams(() => coerceBodyEdits('{"find":"a","replace":"b"}'), msg);
     refusesParams(() => coerceBodyEdits({ find: 'a', replace: 'b' }), msg);
     refusesParams(() => coerceBodyEdits(3), msg);

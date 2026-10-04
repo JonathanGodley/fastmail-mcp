@@ -1,7 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { InvalidInputError } from './coerce.js';
-import { locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits, unmatchedSegments } from './body-edits.js';
+import {
+  NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_NO_BODY, REJECT_BODY_EDITS_WITH_BODY,
+  REJECT_BODY_EDITS_WITHOUT_SIGNATURE, locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
+  unmatchedSegments,
+} from './body-edits.js';
 
 /** Asserts `fn` throws `type` with a message ending in `message`. */
 function refuses(fn: () => unknown, type: typeof InvalidInputError, message: string) {
@@ -180,6 +184,17 @@ describe('spliceBodyEdits', () => {
   it('keeps the untouched text byte for byte', () => {
     const stored = 'x &amp;  \r\n y';
     assert.equal(spliceBodyEdits(stored, [{ offset: 0, matchedSize: 1 }], ['z']), 'z &amp;  \r\n y');
+  });
+});
+
+describe('bodyEdits message constants', () => {
+  it('are distinct, non-empty strings', () => {
+    const all = [
+      REJECT_BODY_EDITS_WITH_BODY, NOTE_BODY_EDITS_DISCARDED_TEXT_PART,
+      REJECT_BODY_EDITS_WITHOUT_SIGNATURE, REJECT_BODY_EDITS_NO_BODY,
+    ];
+    for (const message of all) assert.ok(typeof message === 'string' && message.trim() !== '');
+    assert.equal(new Set(all).size, all.length);
   });
 });
 
