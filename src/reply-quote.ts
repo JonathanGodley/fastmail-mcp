@@ -46,8 +46,7 @@ function isQuotable(sanitized: string): boolean {
 
 /**
  * What a compose path gives a quote builder so it can resolve the original's embedded images
- * itself. Absent on the edit path, which passes a finished `cidMap` instead, so the builder
- * only rewrites and never mints.
+ * itself. Without it the builder carries no embedded image.
  */
 export interface QuoteImageInput {
   /** The original's parts (the gated union). Their Content-IDs are compared literally. */
@@ -95,18 +94,13 @@ export function emptyQuoteImages(): QuoteImageOutcome {
 function collectQuoteRefs(
   origHtml: string,
   images: QuoteImageInput | undefined,
-  cidMap: Map<string, string> | undefined,
 ): { html: string; refs: string[]; droppedDataImages: number; quotable: boolean; resolvedParts: CidPart[]; unresolvedRefs: string[] } {
   if (!origHtml) {
     return { html: '', refs: [], droppedDataImages: 0, quotable: false, resolvedParts: [], unresolvedRefs: [] };
   }
   const collected = sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: new Map() });
   const resolution = images ? resolveCidRefs(collected.refs, images.sourceParts ?? []) : null;
-  // On the edit path the resolution already happened elsewhere: the map holds exactly the
-  // references that resolved to a carriable part, so membership answers the same question.
-  const resolvesSomething = resolution
-    ? resolution.embeddableRefs.length > 0
-    : collected.refs.some((r) => cidMap?.has(r) === true);
+  const resolvesSomething = !!resolution && resolution.embeddableRefs.length > 0;
   return {
     html: collected.html,
     refs: collected.refs,
@@ -268,19 +262,16 @@ export function buildQuoteBlocks(input: {
   original: any;            // raw JMAP email from getEmailById (textBody/htmlBody arrays + bodyValues + date)
   htmlShips: boolean;
   timezone?: string;
-  // See QuoteImageInput: the edit path's rewrite-only channel.
-  cidMap?: Map<string, string>;
-  // See QuoteImageInput: the compose path's channel, where this builder runs both passes.
   quoteImages?: QuoteImageInput;
 }): QuoteBlocks {
-  const { original, htmlShips, timezone, cidMap, quoteImages } = input;
+  const { original, htmlShips, timezone, quoteImages } = input;
 
   const bodyValues = original?.bodyValues || {};
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
   const origHtml = readBodyList(original?.htmlBody, bodyValues, 'text/html', '<div>[…]</div>');
 
   // PASS 1: nothing is minted here.
-  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
+  const collected = collectQuoteRefs(origHtml, quoteImages);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
 
@@ -296,7 +287,7 @@ export function buildQuoteBlocks(input: {
         ...(quoteImages.mint && { mint: quoteImages.mint }),
       })
     : null;
-  const quoteMap = resolved ? resolved.cidMap : cidMap;
+  const quoteMap = resolved?.cidMap;
   const mapped = htmlQuotable && quoteMap
     ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
     : null;
@@ -403,12 +394,9 @@ export interface ForwardBlocks {
 export function buildForwardBlocks(input: {
   original: any;      // raw JMAP email from getEmailById (body lists + bodyValues + addresses)
   htmlShips: boolean;
-  // See QuoteImageInput: the edit path's rewrite-only channel.
-  cidMap?: Map<string, string>;
-  // See QuoteImageInput: the compose path's channel, where this builder runs both passes.
   quoteImages?: QuoteImageInput;
 }): ForwardBlocks {
-  const { original, htmlShips, cidMap, quoteImages } = input;
+  const { original, htmlShips, quoteImages } = input;
 
   const bodyValues = original?.bodyValues || {};
   const origText = readBodyList(original?.textBody, bodyValues, 'text/plain', '\n[…]');
@@ -416,7 +404,7 @@ export function buildForwardBlocks(input: {
 
   // PASS 1: nothing is minted. An image-only original becomes quotable here, so an html block over it
   // shows the picture rather than the header block alone.
-  const collected = collectQuoteRefs(origHtml, quoteImages, cidMap);
+  const collected = collectQuoteRefs(origHtml, quoteImages);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
 
@@ -435,7 +423,7 @@ export function buildForwardBlocks(input: {
         ...(quoteImages.mint && { mint: quoteImages.mint }),
       })
     : null;
-  const quoteMap = resolved ? resolved.cidMap : cidMap;
+  const quoteMap = resolved?.cidMap;
   const mapped = htmlQuotable && quoteMap
     ? sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: quoteMap })
     : null;
