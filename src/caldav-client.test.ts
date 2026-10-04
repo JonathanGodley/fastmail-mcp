@@ -5573,7 +5573,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
           () => client.createCalendarEvent({ ...base, [field]: value }),
           (err: Error) => {
             assert.equal(err.name, 'InvalidInputError', label);
-            assert.match(err.message, new RegExp(`^${field} cannot be empty; omit the field to leave it unchanged$`), label);
+            assert.match(err.message, new RegExp(`^${field} cannot be empty; omit the field for no ${field}$`), label);
             return true;
           },
         );
