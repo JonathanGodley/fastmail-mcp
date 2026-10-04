@@ -27,9 +27,10 @@ below before running it.
    node scripts/probes/inline-read.smoke.mjs
    ```
 
-If your credentials live in Claude Code's MCP server config rather than your
-shell, `run-probe.py` is a convenience launcher that reads them from that config
-into the child environment without printing them:
+If your credentials live in `~/.fastmail-mcp/.env` or Claude Code's MCP server
+config rather than your shell, `run-probe.py` is a convenience launcher that
+reads them into the child environment without printing them. Each variable comes
+from the `.env` file if it sets it, otherwise from the config:
 
 ```
 python scripts/probes/run-probe.py inline-read.smoke.mjs
