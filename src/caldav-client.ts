@@ -287,6 +287,28 @@ function markerLine(text: string): string | null {
   return structuralLine(text)?.toUpperCase() ?? null;
 }
 
+/**
+ * The write paths' component scans read PHYSICAL lines (callers splice physical indices), so a
+ * marker split across a fold is invisible to them. Any logical line that unfolds to a marker is
+ * refused up front, even a legal fold no producer seen here emits: fails closed with no
+ * logical-to-physical mapping. A property whose text merely CONTAINS a marker is unaffected.
+ */
+function refuseFoldedComponentMarkers(lines: string[]): void {
+  for (let i = 0; i < lines.length; i++) {
+    if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
+    let j = i + 1;
+    while (j < lines.length && isFoldedContinuation(lines[j])) j++;
+    if (j === i + 1) continue; // this logical line was never folded
+    const logical = lines[i] + lines.slice(i + 1, j).map(l => l.slice(1)).join('');
+    if (/^(BEGIN|END):/i.test(logical)) {
+      // Worded generically: a resource with no VTIMEZONE at all can trip this.
+      throw new InvalidInputError(
+        'Stored calendar resource has a component boundary hidden behind a folded line.'
+      );
+    }
+  }
+}
+
 /** Every VEVENT block in a payload, as verbatim substrings of it. */
 function extractVEventBlocks(data: string): string[] {
   const lines = icalContentLines(data);
@@ -322,10 +344,13 @@ export function extractVEvent(data: string): string | null {
  * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. The reads
  * are position-aware (`ownPropertyLines`) and ignore it, so such an event reads as one-off
  * while update/delete refuse it as repeating. The split is deliberate: the payload is
- * malformed, and refusing an irreversible write is the fail-closed direction.
+ * malformed, and refusing an irreversible write is the fail-closed direction. For the same
+ * reason a marker hidden behind a fold throws: the block count cannot see the VEVENT it opens.
  */
 export function isRecurringSeriesResource(icalData: string | null | undefined): boolean {
-  const blocks = extractVEventBlocks(icalData || '');
+  if (!icalData) return false;
+  refuseFoldedComponentMarkers(icalData.split(/\r?\n/));
+  const blocks = extractVEventBlocks(icalData);
   if (blocks.length === 0) return false;
   if (blocks.length > 1) return true;
   return blocks.some((block) =>
@@ -635,6 +660,7 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
 
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
+  refuseFoldedComponentMarkers(lines);
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
@@ -707,6 +733,7 @@ export function removeAllICalProperties(icalData: string, key: string): string {
 
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
+  refuseFoldedComponentMarkers(lines);
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
@@ -767,6 +794,7 @@ export function removeAllICalProperties(icalData: string, key: string): string {
 export function insertBeforeEndVEvent(icalData: string, newLine: string): string {
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
+  refuseFoldedComponentMarkers(lines);
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
@@ -1755,23 +1783,7 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * (#57, #111). A bare `BEGIN:`/`END:` is ignored.
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
-  // The depth scan reads PHYSICAL lines (callers splice its physical indices), so a marker split
-  // across a fold would be invisible to it. Any logical line that unfolds to a marker is refused
-  // up front, even a legal fold no producer seen here emits: fails closed with no
-  // logical-to-physical mapping. A property whose text merely CONTAINS a marker is unaffected.
-  for (let i = 0; i < lines.length; i++) {
-    if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
-    let j = i + 1;
-    while (j < lines.length && isFoldedContinuation(lines[j])) j++;
-    if (j === i + 1) continue; // this logical line was never folded
-    const logical = lines[i] + lines.slice(i + 1, j).map(l => l.slice(1)).join('');
-    if (/^(BEGIN|END):/i.test(logical)) {
-      // Worded generically: a resource with no VTIMEZONE at all can trip this.
-      throw new InvalidInputError(
-        'Stored calendar resource has a component boundary hidden behind a folded line.'
-      );
-    }
-  }
+  refuseFoldedComponentMarkers(lines);
 
   const blocks: Array<{ tzid: string; start: number; end: number }> = [];
   const stack: string[] = [];
