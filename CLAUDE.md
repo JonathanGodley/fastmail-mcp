@@ -2,8 +2,6 @@
 
 @CONTRIBUTING.md
 
-What follows is guidance for working in this repo with Claude Code, on top of CONTRIBUTING.md.
-
 ## Building and testing, in practice
 
 A new pin is proved by a lever that turns it red at that assertion. A lever that trips an earlier assertion proves nothing about a later one. A claim about a set (every call site, every tool, every field) is proved by enumerating the set, never by sampling it.
@@ -14,14 +12,14 @@ CI is the finish line, not the local suite. Nothing is required to pass before a
 
 ## Review findings: where each disposition lands here
 
-The global rule (every finding is fixed, tracked, consciously declined with a written home, or surfaced) applies; in this repo the homes are:
+Where each finding's disposition lands in this repo:
 
 - Tracked → a fork GitHub issue (`--repo JonathanGodley/fastmail-mcp`), never a code `TODO`.
 - Consciously declined → an in-code comment for a local call, or the `docs/*` rationale files for a cross-cutting/accepted residual (e.g. the inherent path-guard TOCTOU limit).
 
 A comment earns its place by changing what the next reader would do. `attachMailboxInfo` is the model: its comment says why the resolver neither throws nor omits. State a fact once, at the definition, and reference it from call sites; a decision nobody challenged needs no defence beside it. How the code got here belongs in the commit message and the issue; anything spanning several tools belongs in `docs/`. `node scripts/comment-share.mjs <commit>` measures a change against the file's own comment density; a figure far above it is nearly always restatement or history, not domain complexity - `/trim` is the pass that cuts it.
 
-**Fix it rather than filing it.** A small defect with an obvious fix is fixed in the change in front of you, or, where nothing is in flight, in the pass that found it; a build that touches an area owns the defects it finds there. A defect that would leave the merged build broken is never trackable: if it genuinely cannot be fixed now, the build does not merge and it goes to the operator. File a finding only when the work genuinely cannot land now: the fix is design work of its own (judged on the minimal fix, not the ideal one), it needs a decision with a real trade-off nobody has made, it is the residual half of a partly-fixed change, or the area is fenced off from the current session. A review that surfaces a question answers it or surfaces it to the operator; it does not file it. A symmetric case scoped out of a fix is a finding like any other and needs its own disposition. Upstream bookkeeping is exempt: the per-PR adoption issues and the `docs/upstream-sync.md` ledger are filed unfiltered.
+**Fix it rather than filing it.** A small defect with an obvious fix is fixed in the change in front of you, or, where nothing is in flight, in the pass that found it; a build that touches an area owns the defects it finds there. A defect that would leave the merged build broken is never trackable: if it genuinely cannot be fixed now, the build does not merge and it goes to the operator. File a finding only when the work genuinely cannot land now: the fix is design work of its own (judged on the minimal fix, not the ideal one), it needs a decision with a real trade-off nobody has made, it is the residual half of a partly-fixed change, or the area is fenced off from the current session. A review that surfaces a question answers it or surfaces it to the operator; it does not file it. A symmetric case scoped out of a fix is a finding like any other and needs its own disposition. Upstream bookkeeping is exempt: the per-PR adoption issues and the sync's audit-ledger issue (`docs/upstream-sync.md`) are filed unfiltered.
 
 ## Parallel work
 
@@ -47,14 +45,12 @@ Per-feature behaviour rationale lives in the relevant fork GitHub issue, e.g. `e
 
 `upstream` = `MadLlama25/fastmail-mcp` (the fork's base); `origin` = `JonathanGodley/fastmail-mcp`. `gh` resolves bare commands to the fork: `gh repo set-default JonathanGodley/fastmail-mcp` is stored in this checkout (`remote.origin.gh-resolved`). Pass `--repo MadLlama25/fastmail-mcp` only when upstream is deliberately the target, such as reading their PRs for the adopt issues below, and never write there.
 
-Strategy. Track upstream by *generally merging it into the fork whenever that is doable*: a periodic mainline sync that re-bases the fork's differentiators (response simplification, the calendar work) on top of upstream's latest, supplemented by the fork's own fixes carried ahead of upstream as open PRs *against* upstream. Never block fork progress on upstream review.
+Strategy. Track upstream by merging it into the fork whenever that is doable: a periodic two-parent merge of upstream's latest that keeps the fork's differentiators (response simplification, the calendar work). Fixes are not offered back upstream.
 
 Doing the sync itself: the method lives in `docs/upstream-sync.md`. The trigger is a release; the `/release` skill carries the drift check.
 
-Adopting an upstream PR (their work → ours). File a fork issue for every open third-party upstream PR (every PR authored by someone other than us, excluding bot dependency bumps), one issue per PR, titled so it names the PR. Do NOT pre-filter by whether a PR looks worth carrying: the adopt-or-decline call is made *in the issue*. In the issue, capture what the PR adds and how it interacts with the fork's differentiators (especially response simplification: the fork trims the body from *output* but still *fetches* it, so "metadata-only / never-fetch" PRs are NOT redundant with us). Where the fork's structure has diverged, reimplement in the fork's style rather than cherry-pick verbatim. Link the upstream PR with the fully-qualified `MadLlama25/fastmail-mcp#NN` form (a bare `#NN` in a fork issue links to a fork issue).
+Adopting an upstream PR. File a fork issue for every open third-party upstream PR (every PR authored by someone other than us, excluding bot dependency bumps), one issue per PR, titled so it names the PR. Do NOT pre-filter by whether a PR looks worth carrying: the adopt-or-decline call is made *in the issue*. In the issue, capture what the PR adds and how it interacts with the fork's differentiators (especially response simplification: the fork trims the body from *output* but still *fetches* it, so "metadata-only / never-fetch" PRs are NOT redundant with us). Where the fork's structure has diverged, reimplement in the fork's style rather than cherry-pick verbatim. Link the upstream PR with the fully-qualified `MadLlama25/fastmail-mcp#NN` form (a bare `#NN` in a fork issue links to a fork issue).
 
-Offering a fix back (our work → theirs). Any fix that addresses an upstream issue or a general bug (not a fork-differentiator feature) should be offered back as a focused, single-purpose PR once it lands and tests pass on the fork: cut a branch with just that fix (a `git worktree` off `upstream/main`), reference the issue it closes, and don't drag in fork-only changes. Fork-only differentiators are not auto-offered.
-
-⚠️ **Write the closing keyword in the fully-qualified `Closes MadLlama25/fastmail-mcp#NN` form, never a bare `Closes #NN`.** A bare number in a commit destined for upstream closes their issue when they merge it, and then closes this repository's unrelated issue of the same number the moment upstream's history is merged back here. The qualified form is inert coming back. For the same reason, a CLOSED/COMPLETED state on a fork issue is not trustworthy without checking that the closing commit is actually about it. The mechanical guard is tracked as #158.
+⚠️ **A sync can close an unrelated fork issue.** Upstream's commits can carry closing keywords against upstream's own issue numbers, and a bare `Closes #NN` in one closes this repository's issue of the same number when the merge lands on `main`. So a CLOSED/COMPLETED state on a fork issue is not trustworthy without checking that the closing commit is actually about it. The mechanical guard is tracked as #158. When a fork commit cites an upstream issue, write `MadLlama25/fastmail-mcp#NN`, never a bare `#NN`.
 
 The fork's OWN issues are fine for Claude to open, comment on, and close. Close a fork issue as part of shipping its fix, but validate first: confirm the fix is complete, genuinely resolves the issue, and is pushed to `origin/main`, then close with a commit-citing comment. A tagged release is NOT a precondition for closing.
