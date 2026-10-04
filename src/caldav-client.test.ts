@@ -2815,6 +2815,11 @@ describe('parseICalDuration from a zoned start', () => {
     assert.equal(parseICalDuration('P1DT1H', '2026-04-04T02:30:00', SYDNEY), '2026-04-05T02:30:00');
   });
 
+  it('falls back to plain arithmetic when the nominal end cannot be resolved', () => {
+    // The nominal end, 10000-01-02, has no four-digit year for the resolver to read.
+    assert.equal(parseICalDuration('P2D', '9999-12-31T10:00:00', SYDNEY), '10000-01-02T10:00:00');
+  });
+
   it('applies the nominal days before the exact time: P1DT6H from 23:00 across a spring-forward', () => {
     // P1D lands on 3 October 23:00 AEST; PT6H then crosses the transition.
     assert.equal(parseICalDuration('P1DT6H', '2026-10-02T23:00:00', SYDNEY), '2026-10-04T06:00:00');

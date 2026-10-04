@@ -969,14 +969,15 @@ function formatWallClockIso(ms: number): string {
  *
  * `tzid` is the start's zone. A wall-clock start in a zone ICU can resolve gets the RFC 5545
  * §3.3.6 split (`resolveDurationEndMs`) and its end is that zone's wall clock. Every other
- * start is plain arithmetic: exact for a UTC or date-only start, and for a floating one or one
- * whose TZID cannot be resolved (a vendor name), on its wall clock with no transitions.
+ * start is plain arithmetic: exact for a UTC or date-only start, and for a floating one, one
+ * whose TZID cannot be resolved (a vendor name) or one whose nominal end cannot be resolved
+ * (past year 9999), on its wall clock with no transitions.
  */
 export function parseICalDuration(duration: string, start: string, tzid?: string): string | undefined {
   if (tzid && WALL_CLOCK_ISO_RE.test(start) && isUsableTimezone(tzid)) {
     const endMs = resolveDurationEndMs(duration, start, tzid);
-    if (endMs === undefined || Number.isNaN(endMs)) return undefined;
-    return formatWallClockIso(endMs + zoneOffsetMsAt(endMs, tzid));
+    if (endMs === undefined) return undefined;
+    if (!Number.isNaN(endMs)) return formatWallClockIso(endMs + zoneOffsetMsAt(endMs, tzid));
   }
 
   const parsed = parseICalDurationComponents(duration);
