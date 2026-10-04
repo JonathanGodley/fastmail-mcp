@@ -1515,10 +1515,10 @@ staged differently. Do not "unify" them.
 
 - **A reference in HTML** (`<img src="cid:...">`) is a URL, so per RFC 2392 its value is
   percent-encoded. It must be DECODED FIRST and the decoded key compared against part
-  Content-IDs. `cidKey` (`src/inline-images.ts`) is that key function; the collecting
-  sanitizer pass reports references already in that decoded form, so the compose and edit
-  paths that match body references to parts inherit the staging rather than re-deriving
-  it. `cidKey`'s other production caller is the download path below, as its fallback.
+  Content-IDs. `cidKey` (`src/inline-images.ts`) is that key function; `sanitizeQuoteHtml`
+  reports references already in that decoded form in both modes, so the compose and edit
+  paths (which run it in `collect` mode) and the quote builders (`map` mode) match body
+  references to parts without re-deriving the staging. `cidKey`'s other production caller is the download path below, as its fallback.
 - **`download_attachment`'s `cid:<value>` parameter** is a handle that round-tripped from
   `get_email`'s output, where the `cid` is echoed VERBATIM. It is therefore compared
   LITERALLY first, and only falls back to the same `cidKey` decode when the literal
