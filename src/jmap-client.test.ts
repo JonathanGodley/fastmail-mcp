@@ -16,7 +16,8 @@ import {
   rejectMissingBodyHash, rejectRepeatedSignatureToken, rejectStaleBodyHash,
 } from './inline-notes.js';
 import {
-  NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_WITH_BODY, REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
+  NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_NO_BODY, REJECT_BODY_EDITS_WITH_BODY,
+  REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
   noteBodyEditsSplitSignature,
 } from './body-edits.js';
 
@@ -6007,6 +6008,20 @@ describe('updateDraft bodyEdits (#177)', () => {
     );
     wroteNothing(makeReq);
   });
+
+  for (const [label, fixture, find] of [
+    ['text-only', TEXT_ONLY, TEXT],
+    ['html', DUAL, HTML],
+  ] as const) {
+    it(`refuses, naming bodyEdits, an edit that empties the ${label} draft's body`, async () => {
+      const makeReq = serve(fixture);
+      await assert.rejects(
+        () => client.updateDraft('draft-1', { bodyEdits: [{ find, replace: '' }], bodyHash: hashOf(fixture) }),
+        (err: unknown) => err instanceof InvalidInputError && err.message === REJECT_BODY_EDITS_NO_BODY,
+      );
+      wroteNothing(makeReq);
+    });
+  }
 
   it('refuses an ambiguous find without writing', async () => {
     const makeReq = serve(DUAL);

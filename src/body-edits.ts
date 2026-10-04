@@ -46,6 +46,10 @@ export function noteBodyEditsSplitSignature(part: BodyEditPart, count: number): 
   );
 }
 
+export const REJECT_BODY_EDITS_NO_BODY =
+  'bodyEdits would leave the draft with no body; keep some text in the edited part, or replace the body ' +
+  'whole with htmlBody or textBody.';
+
 const BODY_EDIT_KEYS = new Set(['find', 'replace']);
 const BODY_EDITS_SHAPE = 'bodyEdits must be an array of {find, replace} objects.';
 

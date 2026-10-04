@@ -9,7 +9,8 @@ import { defaultIdentity, identityFor, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenExpansion, BodyTokenScan } from './body-tokens.js';
 import {
-  NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_WITH_BODY, REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
+  NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_NO_BODY, REJECT_BODY_EDITS_WITH_BODY,
+  REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
   locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits, unmatchedSegments,
 } from './body-edits.js';
 import type { BodyEdit, BodyEditPart, BodyEditsReceipt, LocatedBodyEdit } from './body-edits.js';
@@ -2585,7 +2586,9 @@ export class JmapClient {
     // may run against a draft with no body yet. `touchesBody`, not `wroteAnyBody`, so
     // clearing the last body is caught.
     if (touchesBody && isBlank(textBodyValue) && isBlank(htmlBodyValue)) {
-      throw new InvalidInputError('a draft needs a body; supply textBody or htmlBody (this edit would leave it with neither).');
+      throw new InvalidInputError(editedPart
+        ? REJECT_BODY_EDITS_NO_BODY
+        : 'a draft needs a body; supply textBody or htmlBody (this edit would leave it with neither).');
     }
 
     // ---- Part assembly: apply the removals resolved earlier, work out what the surviving
