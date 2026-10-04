@@ -377,7 +377,6 @@ for (const { tool, run } of READ_TOOLS) {
     }
 
     it('refuses a negative position without the email-only ascending hint', async () => {
-      // The contacts tools have no `ascending` parameter to point the caller at.
       const { client } = makeReadClient({ ids: ['C1'], total: 1, position: 0 });
       await assert.rejects(
         () => run({ position: -1 }, 20, client),

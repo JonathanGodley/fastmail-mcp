@@ -1,9 +1,5 @@
-// Does Fastmail's ContactCard/query give `list_contacts` and `search_contacts` stable pages
-// under a first-name sort, and where in that order do cards with no given name, and names
-// differing only in case, land? (#94)
-//
-// The tools send `sort: [name/given, name/surname, uid]`, all ascending, and page with
-// `position`. Cyrus's source accepts those three comparators and compares them byte-wise
+// `list_contacts` and `search_contacts` send `sort: [name/given, name/surname, uid]`, all
+// ascending, and page with `position` (#94). Cyrus's source accepts those three comparators and compares them byte-wise
 // with an absent component read as the empty string, which would put nameless cards first
 // and make the order case-sensitive. Whether Fastmail runs that code cannot be read off the
 // source, so this measures it:

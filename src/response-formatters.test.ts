@@ -914,8 +914,6 @@ describe('formatContactQueryResult', () => {
   });
 });
 
-// list_contacts and search_contacts take `position`, so both their renderers carry the
-// paged summary: nextPosition exactly while more remain.
 describe('the contacts listings are paged on both paths', () => {
   const contacts = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `ct-${i}` }));
   const renderers = [

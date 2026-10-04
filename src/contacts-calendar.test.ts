@@ -77,8 +77,6 @@ describe('contacts reads', () => {
     assert.equal(get[1].accountId, CONTACTS_ACCOUNT);
   });
 
-  // The sort is what makes `position` mean the same card on every call: without it the
-  // server order is unspecified, and `uid` is the tiebreak for cards with equal names.
   const CONTACT_SORT = [
     { property: 'name/given', isAscending: true },
     { property: 'name/surname', isAscending: true },
