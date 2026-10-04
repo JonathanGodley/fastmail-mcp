@@ -35,6 +35,14 @@ function stubMakeRequest(client: ContactsCalendarClient, response: any) {
   return mock.method(client, 'makeRequest', async (_request: JmapRequest) => response);
 }
 
+const USING = ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:contacts'];
+
+function clientWithSession(session: any): ContactsCalendarClient {
+  const client = new ContactsCalendarClient(new FastmailAuth({ apiToken: 'fake-token' }));
+  mock.method(client, 'getSession', async () => session);
+  return client;
+}
+
 function queryAndGetResponse(list: any[]) {
   return {
     methodResponses: [
@@ -149,6 +157,63 @@ describe('contacts reads', () => {
     });
     assert.equal((await client.getContacts(2, 500)).position, 0);
     assert.equal((await client.searchContacts('ada', 2, 500)).position, 0);
+  });
+
+  it('queries ContactCard and gets the ids by back-reference, with the total', async () => {
+    for (const read of [(c: ContactsCalendarClient) => c.getContacts(10), (c: ContactsCalendarClient) => c.searchContacts('ada', 10)]) {
+      const reader = makeClient();
+      const makeReq = stubMakeRequest(reader, queryAndGetResponse([{ id: 'C1' }]));
+      await read(reader);
+      const request = callArguments(makeReq)[0];
+      assert.deepEqual(request.using, USING);
+      const [query, get] = request.methodCalls;
+      assert.equal(query[0], 'ContactCard/query');
+      assert.equal(query[1].calculateTotal, true);
+      assert.equal(get[0], 'ContactCard/get');
+      assert.deepEqual(get[1]['#ids'], { resultOf: query[2], name: 'ContactCard/query', path: '/ids' });
+    }
+  });
+
+  it('gets one card by id from getContactById', async () => {
+    const makeReq = stubMakeRequest(client, {
+      methodResponses: [['ContactCard/get', { list: [{ id: 'C1' }] }, 'contact']],
+    });
+    await client.getContactById('C1');
+    const request = callArguments(makeReq)[0];
+    assert.deepEqual(request.using, USING);
+    assert.equal(request.methodCalls[0][0], 'ContactCard/get');
+    assert.deepEqual(request.methodCalls[0][1], { accountId: CONTACTS_ACCOUNT, ids: ['C1'] });
+  });
+
+  it('refuses every reader when the session lacks the contacts capability', async () => {
+    client = clientWithSession({
+      capabilities: {},
+      primaryAccounts: { 'urn:ietf:params:jmap:contacts': CONTACTS_ACCOUNT },
+    });
+    const makeReq = stubMakeRequest(client, queryAndGetResponse([{ id: 'C1' }]));
+    await assert.rejects(() => client.getContacts(10), /Contacts access not available/);
+    await assert.rejects(() => client.searchContacts('ada', 10), /Contacts access not available/);
+    await assert.rejects(() => client.getContactById('C1'), /Contacts access not available/);
+    assert.equal(makeReq.mock.calls.length, 0);
+  });
+
+  it('names the failure of a single read or a search', async () => {
+    mock.method(client, 'makeRequest', async (_request: JmapRequest) => { throw new Error('boom'); });
+    await assert.rejects(() => client.getContactById('C1'), /Contact access not supported: boom/);
+    await assert.rejects(() => client.searchContacts('ada', 10), /Contact search not supported: boom/);
+  });
+
+  it('says how to enable contacts when the session reports no primary accounts at all', async () => {
+    client = clientWithSession({ capabilities: { 'urn:ietf:params:jmap:contacts': {} } });
+    await assert.rejects(
+      () => client.getContacts(10),
+      (err: Error) => {
+        assert.match(err.message, /"urn:ietf:params:jmap:contacts"/);
+        assert.match(err.message, /enable contacts for the token/);
+        assert.match(err.message, /Manage API tokens/);
+        return true;
+      },
+    );
   });
 
   it('addresses the contacts account from getContactById', async () => {
@@ -272,6 +337,50 @@ describe('createContact', () => {
     assert.deepEqual(card.emails, { e0: { address: 'ada@example.com', label: 'work' } });
     assert.deepEqual(card.phones, { p0: { number: '+1 555 0100' } });
     assert.deepEqual(card.notes, { n0: { note: 'test note' } });
+  });
+
+  const created = { methodResponses: [['ContactCard/set', { created: { newContact: { id: 'C1' } } }, 'createContact']] };
+  const cardFrom = (makeReq: RecordedCalls<[any]>) => callArguments(makeReq)[0].methodCalls[0][1].create.newContact;
+
+  it('sends a version 1.0 card under the contacts capability', async () => {
+    const makeReq = stubMakeRequest(client, created);
+    await client.createContact({ name: { full: 'Ada' } });
+    assert.deepEqual(callArguments(makeReq)[0].using, USING);
+    assert.equal(cardFrom(makeReq).version, '1.0');
+  });
+
+  it('writes only the name parts and fields the caller gave', async () => {
+    for (const [name, expected] of <[any, any][]>[
+      [{ full: 'Ada' }, { full: 'Ada' }],
+      [{ given: 'Ada' }, { components: [{ kind: 'given', value: 'Ada' }] }],
+      [{ surname: 'Lovelace' }, { components: [{ kind: 'surname', value: 'Lovelace' }] }],
+    ]) {
+      const writer = makeClient();
+      const makeReq = stubMakeRequest(writer, created);
+      await writer.createContact({ name });
+      assert.deepEqual(cardFrom(makeReq).name, expected);
+    }
+    const makeReq = stubMakeRequest(client, created);
+    await client.createContact({ emails: [{ address: 'ada@example.com' }], addresses: [{ full: '1 Main St' }] });
+    const card = cardFrom(makeReq);
+    assert.deepEqual(card.addresses, { a0: { full: '1 Main St' } });
+    for (const absent of ['name', 'phones', 'notes']) assert.ok(!(absent in card), absent);
+    const nameOnly = makeClient();
+    const nameOnlyReq = stubMakeRequest(nameOnly, created);
+    await nameOnly.createContact({ name: { full: 'Ada' } });
+    for (const absent of ['emails', 'addresses']) assert.ok(!(absent in cardFrom(nameOnlyReq)), absent);
+  });
+
+  it('names the create in a refusal, and refuses a response with no created id', async () => {
+    stubMakeRequest(client, {
+      methodResponses: [['ContactCard/set', { notCreated: { newContact: { type: 'invalidProperties' } } }, 'createContact']],
+    });
+    await assert.rejects(() => client.createContact({ name: { full: 'X' } }), /Failed to create contact: invalidProperties/);
+    for (const setResult of [{}, { created: {} }]) {
+      const writer = makeClient();
+      stubMakeRequest(writer, { methodResponses: [['ContactCard/set', setResult, 'createContact']] });
+      await assert.rejects(() => writer.createContact({ name: { full: 'X' } }), /Contact creation returned no id/);
+    }
   });
 
   it('throws rather than writing to the mail account when no contacts primary exists', async () => {
@@ -687,6 +796,37 @@ describe('updateContact merge', () => {
     });
   });
 
+  it('names the ambiguous field, and writes replaced phones under p keys', async () => {
+    const phones = [{ number: '+1 555 0199' }];
+    for (const [patch, field] of <[any, string][]>[
+      [{ emails: [{ address: 'ada@example.com' }, { address: 'typo@example.com' }] }, 'emails'],
+      [{ phones }, 'phones'],
+    ]) {
+      const refused = makeClient();
+      stubUpdate(refused, storedCard());
+      await assert.rejects(() => refused.updateContact('C1', patch), new RegExp(`This ${field} edit`));
+    }
+    const makeReq = stubUpdate(client, storedCard());
+    await client.updateContact('C1', { phones, allowEntryReplace: true });
+    assert.deepEqual(patchFrom(makeReq).phones, { p0: { number: '+1 555 0199' } });
+  });
+
+  it('writes an address with no label as its full text alone', async () => {
+    const makeReq = stubUpdate(client, storedCard());
+    await client.updateContact('C1', { addresses: [{ full: '2 New Street' }] });
+    assert.deepEqual(patchFrom(makeReq).addresses, { a0: { full: '2 New Street' } });
+  });
+
+  it('reads the card, then writes and reads it back in one request, under the contacts capability', async () => {
+    const makeReq = stubUpdate(client, storedCard());
+    await client.updateContact('C1', { notes: 'x' });
+    const [read, write] = [callArguments(makeReq, 0)[0], callArguments(makeReq, 1)[0]];
+    assert.deepEqual(read.using, USING);
+    assert.deepEqual(write.using, USING);
+    assert.equal(write.methodCalls[1][0], 'ContactCard/get');
+    assert.deepEqual(write.methodCalls[1][1], { accountId: CONTACTS_ACCOUNT, ids: ['C1'] });
+  });
+
   it('scopes allowEntryReplace to the array that was actually ambiguous', async () => {
     // The flag says "I accept the loss on the edit you refused", not "rewrite everything".
     // emails here is the ambiguous one; phones merges cleanly in the same call and must keep
@@ -828,6 +968,7 @@ describe('updateContact merge', () => {
         () => client.updateContact('C1', { [field]: [] }),
         (err: Error) => {
           assert.equal(err.name, 'InvalidInputError');
+          assert.match(err.message, new RegExp(`${field}: \\[\\] is not accepted`));
           assert.match(err.message, new RegExp(`clearFields:\\['${field}'\\]`));
           return true;
         },
@@ -1024,6 +1165,13 @@ describe('deleteContact', () => {
     assert.deepEqual(destroyRequest(makeReq).methodCalls[1][1].destroy, ['C1']);
   });
 
+  it('reads the card by id under the contacts capability, in both requests', async () => {
+    const makeReq = stubMakeRequest(client, destroyResponse({ id: 'C1' }, { destroyed: ['C1'] }));
+    await client.deleteContact('C1');
+    for (const index of [0, 1]) assert.deepEqual(callArguments(makeReq, index)[0].using, USING);
+    assert.deepEqual(destroyRequest(makeReq).methodCalls[0][1], { accountId: CONTACTS_ACCOUNT, ids: ['C1'] });
+  });
+
   it('reads the card in the same request as the destroy, before it', async () => {
     // A card fetched in an earlier round trip could have changed before the destroy landed,
     // so the echo would not be what was actually deleted. Ordering the get ahead of the set
@@ -1187,6 +1335,7 @@ describe('deleteContact', () => {
       (err: Error) => {
         assert.notEqual(err.name, 'InvalidInputError');
         assert.match(err.message, /neither confirmed nor refused/);
+        assert.match(err.message, /get_contact/);
         return true;
       },
     );
