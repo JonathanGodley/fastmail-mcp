@@ -349,3 +349,60 @@ describe('CDATA in HTML — the failure the guard prevents', () => {
     assert.match(htmlToText('<p>Some XML uses ]]> to end</p>'), /Some XML uses \]\]> to end/);
   });
 });
+
+describe('assertBodyInputs — a real tag with no closing tag', () => {
+  it('accepts escaped markup beside a real void element', () => {
+    assert.doesNotThrow(() => assertBodyInputs({ htmlBody: 'Write &lt;b&gt;word&lt;/b&gt;<br>to bold it.' }));
+  });
+});
+
+describe('htmlToText — edges of the converter options', () => {
+  it('gives a whitespace-only alt the placeholder, not the whitespace', () => {
+    assert.equal(htmlToText('<img src="cid:logo" alt="   ">', 'unconditional'), '[image]');
+  });
+
+  it('writes no placeholder under resolve when no map is given, and converts the rest as usual', () => {
+    const html = '<ul><li>one</li></ul><img src="cid:logo">';
+    assert.equal(htmlToText(html, 'resolve'), htmlToText('<ul><li>one</li></ul>'));
+  });
+
+  it('writes a link once when its text is its address', () => {
+    assert.equal(htmlToText('<a href="https://x.example/">https://x.example/</a>'), 'https://x.example/');
+  });
+});
+
+// The converter recurses per element, so a deeply enough nested body overflows the stack and
+// htmlToText falls back to its tag strip.
+describe('htmlToText — the fallback when the converter throws', () => {
+  it('strips tags, style and script, decodes the four entities and collapses whitespace', () => {
+    const depth = 20_000;
+    const inner =
+      'A&nbsp;B &amp; &lt;C&gt;  D<style>.x { color: red }</style>E<script>var y = 1</script>F G<br>H';
+    const html = '<div>'.repeat(depth) + inner + '</div>'.repeat(depth);
+    assert.equal(htmlToText(html), 'A B & <C> D E F G H');
+  });
+});
+
+describe('htmlHasVisibleContent — markup the scan removes or reads', () => {
+  it('splits rather than joins at a removed comment or CDATA section', () => {
+    assert.equal(htmlHasVisibleContent('<div style="background-<!-- -->image:url(a.png)"></div>'), false);
+    assert.equal(htmlHasVisibleContent('<div style="background-<![CDATA[x]]>image:url(a.png)"></div>'), false);
+  });
+
+  it('ignores an image tag inside a CDATA section', () => {
+    assert.equal(htmlHasVisibleContent('<![CDATA[<img src=x ]]>'), false);
+  });
+
+  it('reads background-image with or without spaces around the colon', () => {
+    assert.equal(htmlHasVisibleContent('<div style="background-image:url(a.png)"></div>'), true);
+    assert.equal(htmlHasVisibleContent('<div style="background-image : url(a.png)"></div>'), true);
+    assert.equal(htmlHasVisibleContent('<div style="background-image:none"></div>'), false);
+  });
+});
+
+describe('normalizeBodies and buildBodyParts — with no body at all', () => {
+  it('return an empty object, with no undefined keys', () => {
+    assert.deepEqual(normalizeBodies({}), {});
+    assert.deepEqual(buildBodyParts({}), {});
+  });
+});
