@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './load-env-file.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -97,7 +98,7 @@ function getAuthConfig(): FastmailConfig {
   if (!apiToken) {
     throw new McpError(
       ErrorCode.InvalidRequest,
-      'FASTMAIL_API_TOKEN environment variable is required'
+      'FASTMAIL_API_TOKEN is required: set it in the environment or in ~/.fastmail-mcp/.env'
     );
   }
   // Register for value-based redaction so an exact token occurrence in any error
@@ -2130,7 +2131,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'list_calendars': {
         const davClient = initializeCalDAVClient();
         if (!davClient) {
-          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
+          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD in the environment or in ~/.fastmail-mcp/.env.');
         }
         // A collection that failed to list has no name and no type to put in a row, so it is
         // reported in a trailing note rather than a JSON field a caller could ignore (#136).
@@ -2144,7 +2145,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { calendarId, limit, startDate, endDate } = args as any;
         const davClient = initializeCalDAVClient();
         if (!davClient) {
-          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
+          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD in the environment or in ~/.fastmail-mcp/.env.');
         }
         const { events, total, windowClamp, brokenCollections } = await davClient.getCalendarEvents(calendarId, clampLimit(limit, 50, 500), startDate, endDate);
         // Unpaged: this tool takes no `position`, so formatQueryResult offers no nextPosition.
@@ -2161,7 +2162,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const davClient = initializeCalDAVClient();
         if (!davClient) {
-          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
+          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD in the environment or in ~/.fastmail-mcp/.env.');
         }
         const { event, otherCopies, addressedByUrl, addressCollision, brokenCollections } = await davClient.getCalendarEventById(eventId);
         // The `otherCopies` merge lives in calendarEventBody rather than here: it is a branch,
@@ -2185,7 +2186,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const davClient = initializeCalDAVClient();
         if (!davClient) {
-          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
+          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD in the environment or in ~/.fastmail-mcp/.env.');
         }
         const result = await davClient.createCalendarEvent({
           calendarId, title, description, start, end, location, participants, timeZone, transparency,
@@ -2212,7 +2213,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const davClient = initializeCalDAVClient();
         if (!davClient) {
-          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
+          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD in the environment or in ~/.fastmail-mcp/.env.');
         }
         const fields = { title, description, start, end, location, participants, clearFields, timeZone, transparency };
         const result = await davClient.updateCalendarEvent(eventId, fields);
@@ -2226,7 +2227,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const davClient = initializeCalDAVClient();
         if (!davClient) {
-          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD.');
+          throw new McpError(ErrorCode.InvalidRequest, 'CalDAV not configured. Set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD in the environment or in ~/.fastmail-mcp/.env.');
         }
         const deleted = await davClient.deleteCalendarEvent(eventId);
         return { content: [{ type: 'text', text: `Calendar event deleted. Event ID: "${describeUntrustedAt(deleted.eventId, CALENDAR_UID_ECHO_LIMIT)}", resource url: "${describeUntrustedAt(deleted.url, CALENDAR_URL_ECHO_LIMIT)}"${buildBrokenCollectionNote(deleted.brokenCollections, 'write')}` }] };
@@ -2658,7 +2659,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const calendarAvailable = caldavConfigured;
         const calendarNote = caldavConfigured
           ? 'Calendar is available via CalDAV'
-          : 'Calendar access not available - set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD (a Fastmail app password)';
+          : 'Calendar access not available - set FASTMAIL_CALDAV_USERNAME and FASTMAIL_CALDAV_PASSWORD (a Fastmail app password) in the environment or in ~/.fastmail-mcp/.env';
 
         // Contacts need BOTH the capability and a contacts primary account: every contacts
         // method addresses that account and throws when the session reports none.
@@ -2710,7 +2711,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 '1. Log into Fastmail web interface',
                 '2. Go to Settings → Privacy & Security, and in the "Connected apps & API tokens" section click "Manage app passwords and access"',
                 '3. Create an app password with calendar (CalDAV) access',
-                '4. Set FASTMAIL_CALDAV_USERNAME (your Fastmail address) and FASTMAIL_CALDAV_PASSWORD (that app password), then restart the server'
+                '4. Set FASTMAIL_CALDAV_USERNAME (your Fastmail address) and FASTMAIL_CALDAV_PASSWORD (that app password) in the environment or in ~/.fastmail-mcp/.env, then restart the server'
               ],
               documentation: 'https://www.fastmail.com/help/technical/servernamesandports.html'
             }

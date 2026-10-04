@@ -21,7 +21,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -947,4 +947,80 @@ describe('update_calendar_event clearFields', () => {
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 6. ~/.fastmail-mcp/.env, read by the real process
+// ---------------------------------------------------------------------------
+//
+// An unusable FASTMAIL_TIMEZONE in the file is the observable: the server refuses to start
+// and names the value only if it read the file, and needs no credential or network to do so.
+
+describe('the home .env file', () => {
+  before(() => assertDistIsCurrent());
+
+  const BAD_ZONE_FILE = 'FASTMAIL_TIMEZONE=Not/AZone\n';
+
+  function homeWithEnvFile(content: string): string {
+    const home = freshHome();
+    mkdirSync(join(home, '.fastmail-mcp'));
+    writeFileSync(join(home, '.fastmail-mcp', '.env'), content);
+    return home;
+  }
+
+  // Empty stdin: a server that starts reads EOF and exits 0 on its own, so this never hangs.
+  function runServer(env: Record<string, string>) {
+    return spawnSync(process.execPath, [SERVER_ENTRY], { encoding: 'utf8', env, input: '', timeout: 10_000 });
+  }
+
+  it('is read from the home the server runs with', () => {
+    const result = runServer(testEnv(homeWithEnvFile(BAD_ZONE_FILE)));
+    assert.equal(result.status, 1, `expected exit 1, got ${result.status}; stderr: ${result.stderr}`);
+    assert.match(result.stderr, /FASTMAIL_TIMEZONE is set to "Not\/AZone"/);
+  });
+
+  it('is not read from any other home', () => {
+    homeWithEnvFile(BAD_ZONE_FILE);
+    const result = runServer(testEnv());
+    assert.equal(result.status, 0, `expected exit 0, got ${result.status}; stderr: ${result.stderr}`);
+    assert.match(result.stderr, /running on stdio/);
+  });
+
+  it('never overrides a variable the environment sets, even to an empty string', () => {
+    for (const value of ['Australia/Sydney', '']) {
+      const env = testEnv(homeWithEnvFile(BAD_ZONE_FILE));
+      env.FASTMAIL_TIMEZONE = value;
+      const result = runServer(env);
+      assert.equal(result.status, 0, `FASTMAIL_TIMEZONE=${JSON.stringify(value)}: exit ${result.status}; stderr: ${result.stderr}`);
+    }
+  });
+
+  it('stops the server with one stderr line naming the path when it cannot be loaded', () => {
+    const home = freshHome();
+    const path = join(home, '.fastmail-mcp', '.env');
+    mkdirSync(path, { recursive: true });
+    const result = runServer(testEnv(home));
+    assert.equal(result.status, 1, `expected exit 1, got ${result.status}; stderr: ${result.stderr}`);
+    const lines = result.stderr.trim().split(/\r?\n/);
+    assert.equal(lines.length, 1, `expected one line, got: ${result.stderr}`);
+    assert.ok(lines[0].includes(path), `expected ${path} in: ${lines[0]}`);
+  });
+
+  it('is kept from a harness client unless it asks for the home its env names', async () => {
+    const env = testEnv(homeWithEnvFile(BAD_ZONE_FILE));
+
+    const isolated = createClient({ env });
+    try {
+      await isolated.init();
+    } finally {
+      isolated.close();
+    }
+
+    const inheriting = createClient({ env, inheritHome: true });
+    try {
+      await assert.rejects(inheriting.init(), /server exited/);
+    } finally {
+      inheriting.close();
+    }
+  });
 });
