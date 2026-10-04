@@ -432,9 +432,8 @@ function collectHandlerFunctions(): Map<string, SourceLine[]> {
   return functions;
 }
 
-// Each case body plus the body of every handler-module function the case calls by name, so a
-// tool whose logic lives in a module is checked where that logic is. One level only: a
-// function that calls on into another is not followed.
+// Each case body plus the body of every handler-module function the case calls by name. One
+// level only: a function that calls on into another is not followed.
 function collectResolvedCaseBodies(): Map<string, SourceLine[]> {
   const functions = collectHandlerFunctions();
   const resolved = new Map<string, SourceLine[]>();

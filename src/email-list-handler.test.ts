@@ -169,7 +169,6 @@ describe('searchEmailsTool', () => {
     }]);
   });
 
-  // Dropping an uncoercible scope array would silently widen the query.
   it('rejects an uncoercible mailbox array before the query', async () => {
     for (const param of ['requiredMailboxes', 'excludeMailboxes']) {
       const stub = stubClient();
