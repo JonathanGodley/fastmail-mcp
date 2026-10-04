@@ -8,7 +8,10 @@ import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from '
 import { defaultIdentity, identityFor, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenExpansion, BodyTokenScan } from './body-tokens.js';
-import { REJECT_BODY_EDITS_WITH_BODY, locateBodyEdits, spliceBodyEdits } from './body-edits.js';
+import {
+  NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_WITH_BODY, REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
+  locateBodyEdits, spliceBodyEdits,
+} from './body-edits.js';
 import type { BodyEdit, BodyEditPart, BodyEditsReceipt, LocatedBodyEdit } from './body-edits.js';
 import {
   bodyHash, classifyPartType, collectDraftBodyParts, draftInterleavedTextType, draftPartKey,
@@ -2340,6 +2343,8 @@ export class JmapClient {
       const located = locateBodyEdits(stored, updates.bodyEdits!, editedPart);
       edited = { stored, located };
       const spliced = spliceBodyEdits(stored, located, updates.bodyEdits!.map((op) => op.replace));
+      // The guards a whole-body hand-back of the spliced part meets.
+      assertBodyInputs({ [editedPart]: spliced });
       if (editedPart === 'htmlBody') authoredHtml = spliced;
       else authoredText = spliced;
     }
@@ -2382,7 +2387,11 @@ export class JmapClient {
       // The only text-keyed refusal on this tool: the flag claims the written part as the
       // caller's own. After the hash check, so a stale caller is told to re-read first.
       const placed = writtenParts.reduce((n, p) => n + ownSignatures(p.part), 0);
-      if (placed === 0) throw new InvalidInputError(rejectExpandSignatureWithoutToken(wroteAnyBody));
+      if (placed === 0) {
+        throw new InvalidInputError(
+          editedPart ? REJECT_BODY_EDITS_WITHOUT_SIGNATURE : rejectExpandSignatureWithoutToken(wroteAnyBody),
+        );
+      }
       for (const p of writtenParts) {
         const n = ownSignatures(p.part);
         if (n > 1) throw new InvalidInputError(rejectRepeatedSignatureToken(p.part, n));
@@ -2484,6 +2493,11 @@ export class JmapClient {
           reportedEscapes.add(e.text);
           tokenNotes.push(noteEscapedTokenShips(e.text));
         }
+      } else if (p.part === editedPart) {
+        // A token a replace completes with the stored text beside it is in no string the flag
+        // expands, so it ships literally.
+        const surplus = scan.counts.signature - storedScan.counts.signature - ownSignatures(p.part);
+        if (surplus > 0) tokenNotes.push(noteSignatureTokenStored(p.part, surplus));
       }
       // Count rise per token, the signature note's gate: a `{{quote}}` sitting in the quoted
       // history is the original author's text and rides along on every edit.
@@ -2515,7 +2529,7 @@ export class JmapClient {
 
     // An html-alone edit drops a stored text part that may have been hand-written; say so.
     if (wroteHtml && !wroteText && !clearedText && !isBlank(existingTextValue)) {
-      tokenNotes.push(noteDiscardedTextPart());
+      tokenNotes.push(editedPart ? NOTE_BODY_EDITS_DISCARDED_TEXT_PART : noteDiscardedTextPart());
     }
 
     // A reply or forward prefix edited ONTO a draft that cannot thread (#188), with the

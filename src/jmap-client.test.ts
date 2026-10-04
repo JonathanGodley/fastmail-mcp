@@ -12,10 +12,12 @@ import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-ha
 import { callArguments, findCallArguments } from './testing/mock-calls.js';
 import { noteEditSubjectPrefix } from './subject-prefix.js';
 import {
-  noteDiscardedTextPart, noteSignatureTokenStored, rejectExpandSignatureWithoutToken,
+  noteDiscardedTextPart, noteSignatureTokenStored,
   rejectMissingBodyHash, rejectRepeatedSignatureToken, rejectStaleBodyHash,
 } from './inline-notes.js';
-import { REJECT_BODY_EDITS_WITH_BODY } from './body-edits.js';
+import {
+  NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_WITH_BODY, REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
+} from './body-edits.js';
 
 // ---------- helpers ----------
 
@@ -5927,7 +5929,8 @@ describe('updateDraft bodyEdits (#177)', () => {
     });
     assert.ok(result.bodyHash);
     assert.equal(result.bodyHashWithheld, undefined);
-    assert.ok(result.notes?.includes(noteDiscardedTextPart()));
+    assert.deepEqual(result.notes, [NOTE_BODY_EDITS_DISCARDED_TEXT_PART]);
+    assert.equal(result.notes?.includes(noteDiscardedTextPart()), false);
   });
 
   it('matches the html as stored, entities included', async () => {
@@ -6091,7 +6094,7 @@ describe('updateDraft bodyEdits (#177)', () => {
         expandSignature: true,
         bodyHash: hashOf(PLANTED),
       }),
-      { message: rejectExpandSignatureWithoutToken(true) },
+      { message: REJECT_BODY_EDITS_WITHOUT_SIGNATURE },
     );
   });
 
@@ -6121,6 +6124,56 @@ describe('updateDraft bodyEdits (#177)', () => {
     assert.deepEqual(result.bodyEdits!.ops, [{ offset: 14, matchedSize: 11, replacementSize: 13 }]);
     assert.ok(result.notes?.includes(noteSignatureTokenStored('htmlBody', 1)));
     assert.ok(result.bodyHash);
+  });
+
+  it('notes a {{signature}} a replace completes with the stored text beside it, under the flag', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING]);
+    const split = { ...PLANTED, bodyValues: { h: { value: '<p>Hi</p><p>A {{sigXX</p>' } } };
+    const makeReq = serve(split);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: 'Hi', replace: 'Hi {{signature}}' }, { find: 'XX', replace: 'nature}}' }],
+      expandSignature: true,
+      bodyHash: hashOf(split),
+    });
+    assert.equal(created(makeReq).bodyValues.html.value, '<p>Hi <div><div>Test User</div></div></p><p>A {{signature}}</p>');
+    assert.ok(result.notes?.includes(noteSignatureTokenStored('htmlBody', 1)));
+  });
+
+  // -- the spliced part meets the guards a whole-body hand-back of it meets --
+
+  it('refuses a replace that puts a CDATA section in the html', async () => {
+    const draft = { ...PLANTED, bodyValues: { h: { value: '<p>See you Friday.</p>' } } };
+    const makeReq = serve(draft);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        bodyEdits: [{ find: 'Friday', replace: '<![CDATA[Friday at 3]]>' }], bodyHash: hashOf(draft),
+      }),
+      (err: unknown) => err instanceof InvalidInputError && /^htmlBody contains a CDATA section/.test(err.message),
+    );
+    wroteNothing(makeReq);
+  });
+
+  it('refuses a replace that leaves the html entirely escaped', async () => {
+    const draft = { ...PLANTED, bodyValues: { h: { value: '<p>x</p>' } } };
+    const makeReq = serve(draft);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        bodyEdits: [{ find: '<p>x</p>', replace: '&lt;p&gt;x&lt;/p&gt;' }], bodyHash: hashOf(draft),
+      }),
+      (err: unknown) => err instanceof InvalidInputError && /^htmlBody appears to be HTML-escaped/.test(err.message),
+    );
+    wroteNothing(makeReq);
+  });
+
+  it('refuses a replace that wraps a text-only draft in CDATA', async () => {
+    const makeReq = serve(TEXT_ONLY);
+    await assert.rejects(
+      () => client.updateDraft('draft-1', {
+        bodyEdits: [{ find: 'Hi Bob,', replace: '<![CDATA[Hi Bob,' }], bodyHash: hashOf(TEXT_ONLY),
+      }),
+      (err: unknown) => err instanceof InvalidInputError && /^textBody is wrapped in a CDATA section/.test(err.message),
+    );
+    wroteNothing(makeReq);
   });
 
   it('stays silent about a stored {{signature}} an unflagged edit leaves in place', async () => {

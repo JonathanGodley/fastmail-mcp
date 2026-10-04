@@ -25,7 +25,18 @@ export const REJECT_BODY_EDITS_WITH_BODY =
   'bodyEdits cannot be combined with htmlBody, textBody, or a clearFields entry naming either: ' +
   'bodyEdits changes part of the stored body, and those replace or remove the whole of it. Use one or the other.';
 
-const BODY_EDIT_KEYS =new Set(['find', 'replace']);
+/** In place of the html-alone note, whose remedy (send textBody alongside) bodyEdits refuses. */
+export const NOTE_BODY_EDITS_DISCARDED_TEXT_PART =
+  'This edit changed htmlBody through bodyEdits, so the draft\'s stored plain-text part was replaced by a ' +
+  'fallback derived from the edited html. If that part was hand-written, re-send both parts as htmlBody ' +
+  'and textBody instead of using bodyEdits.';
+
+export const REJECT_BODY_EDITS_WITHOUT_SIGNATURE =
+  'expandSignature: true was passed but no bodyEdits replace carries {{signature}}, so there is nothing ' +
+  'to expand; a {{signature}} already in the stored body is not expanded. Put {{signature}} in the replace ' +
+  'where the sign-off goes, or drop the flag and the replacements are stored as written.';
+
+const BODY_EDIT_KEYS = new Set(['find', 'replace']);
 const BODY_EDITS_SHAPE = 'bodyEdits must be an array of {find, replace} objects.';
 
 /**
