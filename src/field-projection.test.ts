@@ -180,6 +180,17 @@ describe('parseEmailFields', () => {
     assert.throws(() => parseEmailFields({ id: true }), InvalidInputError);
   });
 
+  it('says what the value must be, names its type and lists every valid field', () => {
+    assert.throws(
+      () => parseEmailFields(42),
+      (err: Error) => {
+        assert.match(err.message, /^fields must be an array of simplified field names .*, not number\. /);
+        assert.ok(err.message.endsWith(`Valid fields: ${EMAIL_FIELD_NAMES.join(', ')}.`), err.message);
+        return true;
+      },
+    );
+  });
+
   it('rejects fields together with raw:true instead of letting raw win silently', () => {
     assert.throws(
       () => parseEmailFields(['id'], { raw: true }),
