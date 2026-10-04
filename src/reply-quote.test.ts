@@ -365,13 +365,23 @@ describe('the image outcome the builders report', () => {
     }
   });
 
-  it('counts an unsupported image only when the html was rewritten', () => {
+  it('counts an unsupported image when html ships, with or without an image channel', () => {
     const html = original('<p>x</p><img src="ftp://img.example/a.png">');
-    const rewritten = { htmlShips: true, quoteImages: { sourceParts: [] } };
-    assert.equal(buildQuoteBlocks({ original: html, ...rewritten }).images.droppedUnsupportedImages, 1);
-    assert.equal(buildForwardBlocks({ original: html, ...rewritten }).images.droppedUnsupportedImages, 1);
-    assert.equal(buildQuoteBlocks({ original: html, htmlShips: true }).images.droppedUnsupportedImages, 0);
-    assert.equal(buildForwardBlocks({ original: html, htmlShips: true }).images.droppedUnsupportedImages, 0);
+    for (const quoteImages of [{ sourceParts: [] }, undefined]) {
+      for (const [htmlShips, count] of [[true, 1], [false, 0]] as const) {
+        assert.equal(buildQuoteBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+        assert.equal(buildForwardBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+      }
+    }
+  });
+
+  it('reports an image dropped from html that is not quoted, when html ships', () => {
+    const html = fwdOriginal({ sentAt: undefined, bodyValues: { t: { value: 'plain body' }, h: { value: '<img src="foo.png">' } } });
+    const quoteImages = { sourceParts: [] };
+    for (const [htmlShips, count] of [[true, 1], [false, 0]] as const) {
+      assert.equal(buildQuoteBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+      assert.equal(buildForwardBlocks({ original: html, htmlShips, quoteImages }).images.droppedUnsupportedImages, count);
+    }
   });
 
   it('writes no placeholder in the text form for an image the message does not carry', () => {

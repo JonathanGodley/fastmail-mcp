@@ -2518,7 +2518,8 @@ its own counter with its own sentence, kept apart from a `data:` image (content 
 declines to re-encode) and from an unmatched embedded-image reference (which named a part
 that was not there). It is a **map-mode-only** count, because `collect` drops none of these
 — it leaves them to the sanitiser, which passes a relative URL through. The count is
-reported only for a quote that ships, so it names images the sent quote loses. An `<img>`
+reported whenever the message ships html, including when the original is quoted as text
+because nothing in its html survived. An `<img>`
 with no `src` at all is not counted; there was no image to lose.
 
 Quotability is read from pass one's html, so an image counts only if it would ship. An

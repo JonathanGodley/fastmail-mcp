@@ -64,8 +64,8 @@ export interface QuoteImageOutcome {
   unresolvedRefs: string[];
   droppedDataImages: number;
   /**
-   * Images whose src was neither a cid reference nor http(s). Non-zero only on a branch that
-   * actually rewrote the quote's html.
+   * Images whose src was neither a cid reference nor http(s), dropped from the html. Zero when
+   * no html ships. Both passes drop the same ones, so pass one counts them.
    */
   droppedUnsupportedImages: number;
   htmlQuoteShips: boolean;
@@ -92,9 +92,9 @@ export function emptyQuoteImages(): QuoteImageOutcome {
 function collectQuoteRefs(
   origHtml: string,
   images: QuoteImageInput | undefined,
-): { html: string; refs: string[]; droppedDataImages: number; quotable: boolean; resolvedParts: CidPart[]; unresolvedRefs: string[] } {
+): { html: string; refs: string[]; droppedDataImages: number; droppedUnsupportedImages: number; quotable: boolean; resolvedParts: CidPart[]; unresolvedRefs: string[] } {
   if (!origHtml) {
-    return { html: '', refs: [], droppedDataImages: 0, quotable: false, resolvedParts: [], unresolvedRefs: [] };
+    return { html: '', refs: [], droppedDataImages: 0, droppedUnsupportedImages: 0, quotable: false, resolvedParts: [], unresolvedRefs: [] };
   }
   const collected = sanitizeQuoteHtml(origHtml, { mode: 'map', cidMap: new Map() });
   const resolution = images ? resolveCidRefs(collected.refs, images.sourceParts ?? []) : null;
@@ -103,6 +103,7 @@ function collectQuoteRefs(
     html: collected.html,
     refs: collected.refs,
     droppedDataImages: collected.droppedDataImages,
+    droppedUnsupportedImages: collected.droppedUnsupportedImages,
     quotable: isQuotable(collected.html) || resolvesSomething,
     resolvedParts: resolution?.resolvedParts ?? [],
     unresolvedRefs: resolution?.unresolvedRefs ?? [],
@@ -297,8 +298,7 @@ export function buildQuoteBlocks(input: {
     resolvedParts: collected.resolvedParts,
     unresolvedRefs: collected.unresolvedRefs,
     droppedDataImages: collected.droppedDataImages,
-    // Only the rewriting pass drops a reference form it cannot carry, and only its output ships.
-    droppedUnsupportedImages: htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0,
+    droppedUnsupportedImages: htmlShips ? collected.droppedUnsupportedImages : 0,
     htmlQuoteShips,
   };
 
@@ -445,7 +445,7 @@ export function buildForwardBlocks(input: {
       resolvedParts: collected.resolvedParts,
       unresolvedRefs: collected.unresolvedRefs,
       droppedDataImages: collected.droppedDataImages,
-      droppedUnsupportedImages: htmlQuoteShips && mapped ? mapped.droppedUnsupportedImages : 0,
+      droppedUnsupportedImages: htmlShips ? collected.droppedUnsupportedImages : 0,
       htmlQuoteShips,
     },
   };
