@@ -346,7 +346,7 @@ function forwardHeaderLines(original: any): string[] {
   const joinAddrs = (list: any[] | undefined | null): string =>
     (list ?? [])
       .filter((a: any) => a && (a.email || a.name))
-      .map((a: any) => normalizeName(formatAddress(a)))
+      .map((a: any) => normalizeName(a.email ? formatAddress(a) : a.name))
       .filter(Boolean)
       .join(', ');
   const lines: string[] = [FORWARD_MARKER_LINE];

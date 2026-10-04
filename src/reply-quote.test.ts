@@ -319,6 +319,10 @@ describe('buildForwardBlocks — the header block (canonical Fastmail shape)', (
     assert.match(textBlockFor({ to }), /\nTo: Bob <bob@example\.com>, dee@example\.com\n/);
   });
 
+  it('shows an address entry with a name and no email as the name alone', () => {
+    assert.match(textBlockFor({ to: [{ name: 'Bob' }] }), /\nTo: Bob\n/);
+  });
+
   it('puts a text-only original into the html block as escaped text', () => {
     const { htmlBlock } = buildForwardBlocks({ original: fwdOriginal({ htmlBody: [] }), htmlShips: true });
     assert.ok(htmlBlock.endsWith('<div type="cite">original text</div>'), htmlBlock);
