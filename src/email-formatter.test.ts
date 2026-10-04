@@ -44,6 +44,12 @@ describe('toLocalIso', () => {
     assert.equal(toLocalIso('2026-07-15T12:00:00Z', 'America/New_York'), '2026-07-15T08:00:00-04:00');
   });
 
+  it('renders an instant whose zone offset has seconds in UTC instead (Monrovia 1920, -00:44:30)', () => {
+    const out = toLocalIso('1920-05-01T00:00:00Z', 'Africa/Monrovia');
+    assert.equal(out, '1920-05-01T00:00:00+00:00');
+    assert.equal(new Date(out).toISOString(), '1920-05-01T00:00:00.000Z');
+  });
+
   it('falls back gracefully on an invalid timezone (never throws)', () => {
     let out: string | undefined;
     assert.doesNotThrow(() => {

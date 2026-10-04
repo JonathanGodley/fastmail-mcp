@@ -165,6 +165,9 @@ function renderLocalIso(date: Date, zone: string | undefined): string {
   // 'GMT+10:00' / 'GMT-05:30' → '+10:00' / '-05:30'; bare 'GMT' (UTC) → '+00:00'.
   const stripped = offsetPart.replace('GMT', '');
   const offset = stripped === '' ? '+00:00' : stripped;
+  // A local-mean-time offset carries seconds, which ISO 8601 and new Date() reject; UTC
+  // renders the same instant.
+  if (!/^[+-]\d\d:\d\d$/.test(offset)) return renderLocalIso(date, 'UTC');
 
   return `${year}-${month}-${day}T${hour}:${minute}:${second}${offset}`;
 }
