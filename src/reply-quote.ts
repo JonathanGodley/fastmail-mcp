@@ -29,9 +29,9 @@ function stripSentinels(s: string): string {
 // Both block builders sanitize the original's html twice with the `map` pass in
 // src/inline-images.ts (posture in docs/conventions.md). Pass one uses an empty map: it reports
 // references, and its html is what ships less the images pass two embeds. Not `collect`, which
-// keeps a relative src that `map` drops, so an attribution would open over an empty quote. Pass two
-// rewrites resolved references to the Content-IDs this draft attaches, and runs only when pass
-// one decides an html quote ships, since minting commits the call to attaching a part.
+// keeps a relative src that `map` drops, so an attribution would open over an empty quote.
+// Pass two rewrites resolved references to the Content-IDs this draft attaches, and runs only
+// when pass one decides an html quote ships, since minting commits the call to attaching a part.
 
 // Content-based, NOT a string trim: an embedded-image-only original sanitizes to e.g.
 // <div></div>, which must not count or an orphan "On … wrote:" ships over an empty quote
@@ -274,6 +274,9 @@ export function buildQuoteBlocks(input: {
   const collected = collectQuoteRefs(origHtml, quoteImages);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
+  // The dropped-image notes say the rest of the quote was kept, so with no quote they
+  // count nothing.
+  const quoted = htmlQuotable || textQuotable;
 
   // The text side's image policy follows this: without an html quote, a placeholder would
   // describe an absent image.
@@ -298,13 +301,13 @@ export function buildQuoteBlocks(input: {
     mappings: resolved?.mappings ?? [],
     resolvedParts: collected.resolvedParts,
     unresolvedRefs: collected.unresolvedRefs,
-    droppedDataImages: collected.droppedDataImages,
-    droppedUnsupportedImages: htmlShips ? collected.droppedUnsupportedImages : 0,
+    droppedDataImages: quoted ? collected.droppedDataImages : 0,
+    droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
     htmlQuoteShips,
   };
 
   // No block in either format, so no orphan "On … wrote:" over an empty quote.
-  if (!htmlQuotable && !textQuotable) return { images };
+  if (!quoted) return { images };
 
   const senderRaw = original?.from?.[0]?.name || original?.from?.[0]?.email || '';
   const name = normalizeName(senderRaw);
@@ -406,6 +409,9 @@ export function buildForwardBlocks(input: {
   const collected = collectQuoteRefs(origHtml, quoteImages);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
+  // The dropped-image notes say the rest of the quote was kept, so with no quote they
+  // count nothing.
+  const quoted = htmlQuotable || textQuotable;
 
   const lines = forwardHeaderLines(original);
   const headerText = lines.join('\n');
@@ -445,8 +451,8 @@ export function buildForwardBlocks(input: {
       mappings: resolved?.mappings ?? [],
       resolvedParts: collected.resolvedParts,
       unresolvedRefs: collected.unresolvedRefs,
-      droppedDataImages: collected.droppedDataImages,
-      droppedUnsupportedImages: htmlShips ? collected.droppedUnsupportedImages : 0,
+      droppedDataImages: quoted ? collected.droppedDataImages : 0,
+      droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
       htmlQuoteShips,
     },
   };

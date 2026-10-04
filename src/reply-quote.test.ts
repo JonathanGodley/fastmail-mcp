@@ -395,6 +395,19 @@ describe('the image outcome the builders report', () => {
     }
   });
 
+  it('reports no dropped image when nothing of the original is quoted', () => {
+    for (const img of ['<img src="/logo.png">', '<img src="//cdn.example.com/a.png">', '<img src="data:image/png;base64,AA">']) {
+      const nothing = original(img);
+      const quoteImages = { sourceParts: [] };
+      for (const { images } of [
+        buildQuoteBlocks({ original: nothing, htmlShips: true, quoteImages }),
+        buildForwardBlocks({ original: nothing, htmlShips: true, quoteImages }),
+      ]) {
+        assert.deepEqual([images.droppedDataImages, images.droppedUnsupportedImages], [0, 0], img);
+      }
+    }
+  });
+
   it('writes no placeholder in the text form for an image the message does not carry', () => {
     const html = original('<p>x</p><img src="cid:gone@x.example">');
     const quoteImages = { sourceParts: [] };

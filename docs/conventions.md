@@ -2519,18 +2519,18 @@ its own counter with its own sentence, kept apart from a `data:` image (content 
 declines to re-encode) and from an unmatched embedded-image reference (which named a part
 that was not there). It is a **map-mode-only** count, because `collect` drops none of these
 — it leaves them to the sanitiser, which passes a relative URL through. The count is
-reported whenever the message ships html, including when the original is quoted as text
-because nothing in its html survived. An `<img>`
-with no `src` at all is not counted; there was no image to lose.
+reported whenever the message ships html and quotes the original, including as text
+because nothing in its html survived. With no quote at all nothing is counted, since
+the note says the rest of the quote was kept. An `<img>` with no `src` at all is not
+counted; there was no image to lose.
 
 Quotability is read from pass one's html, so an image counts only if it would ship. An
 original whose only image has a relative src is therefore not quotable. An original whose
 only content is embedded images sanitises in pass one to something visually empty
 (`<div></div>`), so it is judged quotable by whether at least one of its references would
 really embed — resolved to exactly one part, that part declaring itself an image and
-carrying a blob. Testing mere *resolution*
-would open an attribution over a quote showing nothing; testing the sanitised string would
-call an image-only message unquotable.
+carrying a blob. Testing mere *resolution* would open an attribution over a quote showing
+nothing; testing the sanitised string would call an image-only message unquotable.
 
 Accepted threat floor (documented in README): `sanitize-html` is a string-to-string
 sanitiser (roughly the bar Gmail / Apple Mail emit) and does not fully eliminate exotic
