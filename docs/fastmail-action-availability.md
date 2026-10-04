@@ -6,8 +6,6 @@ and Fastmail's own MCP publishes tool *descriptions* rather than behaviour. So w
 needs to know what an action means — not what the protocol allows — the answer comes from measuring
 the client.
 
-This file records those measurements; how to extend it is at the end.
-
 ## How these were measured
 
 Two independent methods, and a row is only trusted where they agree:
@@ -65,9 +63,8 @@ supported reading, and it is the one implemented.
 
 ## Availability: where Archive is offered
 
-Seven of the account's nine role mailboxes were measured. `archive` and `memos` are marked
-**unmeasured** rather than left blank, because a blank cell reads as "checked, absent" to the next
-person.
+Seven of the account's nine role mailboxes were measured; `archive` and `memos` are marked
+**unmeasured**.
 
 | Message state / view | Actions offered | Archive? |
 | --- | --- | --- |
@@ -89,10 +86,9 @@ hides Archive even when viewed from inside a label.
 
 That `snoozed` row is the ONLY refusing role measured from inside a label view. Whether a label
 view also hides Archive for a message that is in Sent, Drafts, Scheduled, Spam or Trash is
-unmeasured, and is left that way on purpose: generalising from the one measured role to the other
-five would be inferring a view from a role's name, which the extension rule at the end of this
-file forbids. This matters beyond bookkeeping, because `src/jmap-client.ts` cites this table as
-the evidence that its refusal set is exactly the set that was measured.
+unmeasured, and is not to be inferred from the `snoozed` row (see "Extending this file").
+`src/jmap-client.ts` cites this table as the evidence that its refusal set is exactly the set
+that was measured.
 
 **Role mailboxes are not uniformly exclusive.** Two real messages on this account are filed in both
 `snoozed` and `sent`, so "which refusal applies" is a live case rather than a hypothetical. Inbox
@@ -148,9 +144,8 @@ rendered live.
 mailbox that appears in *both* pickers, so it is the one mailbox belonging to both namespaces. "Move
 to" is the folder namespace, "Labels" is the label namespace, and every other role mailbox sits in
 the folder namespace alone - a message cannot be given Archive, Trash, Spam, Drafts, Sent, Snoozed
-or Scheduled the way it is given a label, because the client never offers it. This is the general
-form of the observation in the Inbox + Trash caveat above, which reached the same conclusion for
-Trash alone by watching a client Delete replace the whole `mailboxIds` value.
+or Scheduled the way it is given a label, because the client never offers it. The Inbox + Trash
+caveat above reached the same conclusion for Trash alone.
 
 **Corroboration, by the second method.** The greying matches the live JMAP probe recorded in fork
 issue #43, which moved a message into each destination in turn and found `scheduled` and `snoozed` -
@@ -202,29 +197,25 @@ the client. Settling it needs a real call against their endpoint.
 
 ## Authoring: what the client writes for a calendar event
 
-Same charter, a different surface. Everything above measures the message-action screens; this
-section measures what the client *writes*, because the client's own stored bytes are the reference
-for what this server's write path should author. Nothing here is inferred from what iCalendar
-permits — RFC 5545 allows floating time, UTC and offsets, and the client uses none of them.
+This section measures what the client *writes*: its stored bytes are the reference for what this
+server's write path should author. Nothing here is inferred from what iCalendar permits; RFC 5545
+allows floating time, UTC and offsets, and the client uses none of them.
 
 **Method, and the instrument.** Six reference events were authored in the Fastmail **mobile** app on
 22 August 2026, one per shape below, and the stored iCalendar was fetched back over CalDAV the same
 day. Four further events were authored in the **web** client on 23 August 2026 and fetched back the
-same way, covering the recurrence and DST shapes the first pass left open. The mobile and web
-clients share their authoring logic, so these are recorded as the client's shapes rather than either
-app's; that sharing is the operator's statement, and the second pass is the first *measured* support
-for it — on the four shapes it covers the web client wrote the same model as the mobile one (a zone
-name plus a wall clock, `VALUE=DATE` for all-day). That is agreement on four shapes, not a
-measurement of every shape, and it is agreement on the *model*, not on every spelling: the two
-clients wrote the same three-day all-day event with different end properties (see the storage
-paragraph below). This is a third method alongside the two at the top of
-the file — not a reading of pixels and not a `mailboxIds` diff, but the resource's bytes as the
-server stored them. Bytes need no second
-method to corroborate them, which is why one pass settles these rows.
+same way, covering the recurrence and DST shapes the first pass left open. The rows are recorded as
+the client's shapes rather than either app's, on the operator's statement that the two share their
+authoring logic. The second pass supports that on four shapes only, and on the *model* (a zone name
+plus a wall clock, `VALUE=DATE` for all-day) rather than every spelling: the two clients wrote the
+same three-day all-day event with different end properties (see the storage paragraph below). This
+is a third method alongside the two at the top of the file: the resource's bytes as the server
+stored them. Bytes need no second method to corroborate them, which is why one pass settles these
+rows.
 
 | Event kind | What the client wrote |
 | --- | --- |
-| Timed, all defaults | `DTSTART;TZID=Australia/Sydney:20260822T090000` + `DURATION:PT1H`, with a `VTIMEZONE` for the zone that Cyrus's JMAP→iCalendar converter added — the client's own JSCalendar carries no such component (see "The platform" below) |
+| Timed, all defaults | `DTSTART;TZID=Australia/Sydney:20260822T090000` + `DURATION:PT1H`, with a `VTIMEZONE` for the zone that Cyrus's JMAP→iCalendar converter added — the client's own JSCalendar carries no such component (see "How this server's writes render in the client" below) |
 | Timed, zone chosen in the picker | `DTSTART;TZID=Asia/Hong_Kong:20260822T090000` + `DTEND;TZID=Asia/Hong_Kong:20260822T100000`, with a Cyrus-added `VTIMEZONE` carrying `TZID:Asia/Hong_Kong` |
 | All-day, single day | `DTSTART;VALUE=DATE:20260822` + `DURATION:P1D`, plus `TRANSP:TRANSPARENT` |
 | All-day, three days | `DTSTART;VALUE=DATE:20260822` + `DTEND;VALUE=DATE:20260825` — an **exclusive** end |
@@ -236,26 +227,23 @@ method to corroborate them, which is why one pass settles these rows.
 | All-day **daily series** across the same DST change | `DTSTART;VALUE=DATE:20261003` + `DURATION:P1D` + `RRULE:FREQ=DAILY;COUNT=3` + `TRANSP:TRANSPARENT` |
 
 **`UNTIL` is UTC, and it is the last second of the chosen local day.** The picker was given a date,
-"Last occurs on Wed, 23 Sep 2026", and the client wrote `UNTIL=20260923T135959Z` — 23:59:59 on the
+"Last occurs on Wed, 23 Sep 2026", and the client wrote `UNTIL=20260923T135959Z`, 23:59:59 on the
 23rd in `Australia/Sydney`, converted to UTC. So among the values that *schedule* the series,
-`UNTIL` is the one the client writes as a `Z`, and the bound it means is a whole local day rather
-than the series' own clock time. (The resource's housekeeping timestamps — `CREATED`, `DTSTAMP`,
-`LAST-MODIFIED`, and `TZUNTIL` and `LAST-MODIFIED` inside the `VTIMEZONE` — are UTC as well, but
-none of them schedules anything, so they are not what this claim is about.) Note
-also what is **absent**: the weekly rule carries no `BYDAY`, so the weekday is taken from `DTSTART`
-and a reader must not expect the rule to restate it. The monthly "3rd Tuesday" rule does carry
-`BYDAY=3TU`, because there the weekday is not derivable from `DTSTART` alone. Reading the series
-back, the client's own popup rendered the `UNTIL` as a count plus a last date — "It occurs 5 times,
-starting on Wed, Aug 26, 2026 and last occurring on Wed, Sep 23, 2026" — so a count in the UI is not
-evidence of a `COUNT` on the wire.
+`UNTIL` is the one the client writes as a `Z` (the housekeeping timestamps are UTC too; see "The
+client never writes a floating or absolute time" below), and the bound it means is a whole local
+day rather than the series' own clock time. Note also what is **absent**: the weekly rule carries no
+`BYDAY`, so the weekday is taken from `DTSTART` and a reader must not expect the rule to restate it.
+The monthly "3rd Tuesday" rule does carry `BYDAY=3TU`, because there the weekday is not derivable
+from `DTSTART` alone. Reading the series back, the client's own popup rendered the `UNTIL` as a
+count plus a last date ("It occurs 5 times, starting on Wed, Aug 26, 2026 and last occurring on
+Wed, Sep 23, 2026"), so a count in the UI is not evidence of a `COUNT` on the wire.
 
 **A DST boundary leaves no trace in an all-day value.** Both October fixtures run across the Sydney
 transition (DST starts 02:00 on Sun 4 Oct 2026) and neither records it: the single event is
 `DTSTART;VALUE=DATE:20261003` + `DURATION:P3D`, the series is the same start + `DURATION:P1D` +
 `RRULE:FREQ=DAILY;COUNT=3`, and neither carries a zone or an embedded `VTIMEZONE` at all. A
 multi-day all-day event spanning a transition is a plain run of dates, which is what makes the
-date-only reading in the window filter safe across one. (The noise these four carry differs from
-the first pass's — see the client-noise paragraph below.)
+date-only reading in the window filter safe across one.
 
 **The client never writes a floating or absolute time.** Every timed value in all six is an IANA
 zone *name* plus a local wall clock. Not one `Z` form, not one numeric offset, not one bare
@@ -276,24 +264,20 @@ read as the full multi-day local span with no day added, and an all-day value is
 an instant. This server's create path already serialises date-only input the same way.
 
 **An all-day event is free by policy, and the editor is where that is measured.** Read off the
-Fastmail client's event editor on 10 September 2026: the editor offers a **busy/free control**, and
-its default follows the event's frame — **free** on an all-day event, **busy** on a timed one. That
-is the client's pixels rather than its bytes, the same method the "How this server's writes render
-in the client" subsection below uses, and it settles a question the byte fixtures could not settle
-on their own. All three all-day rows in the table above carry `TRANSP:TRANSPARENT` — a single day,
-a three-day span, a daily series — but three resources authored through one all-day UI are equally
-consistent with that UI merely happening to set the property; a control whose default is *keyed on
-the frame* makes it a deliberate policy. It also explains the absence on the other side: **no timed
-row carries `TRANSP` at all** because the timed default is busy and RFC 5545 §3.8.2.7 already reads
-an absent `TRANSP` as `OPAQUE`, so on that path the client has nothing to write. This is the
-measurement this server's create path was changed to match ([#195](https://github.com/JonathanGodley/fastmail-mcp/issues/195)):
+Fastmail client's event editor on 10 September 2026 (its pixels, not its bytes): the editor offers
+a **busy/free control**, and its default follows the event's frame, **free** on an all-day event and
+**busy** on a timed one. All three all-day rows in the table above carry `TRANSP:TRANSPARENT` (a
+single day, a three-day span, a daily series), but three resources authored through one all-day UI
+are equally consistent with that UI merely happening to set the property; a control whose default
+is *keyed on the frame* makes it a deliberate policy. It also explains why **no timed row carries
+`TRANSP` at all**: the timed default is busy, and RFC 5545 §3.8.2.7 already reads an absent `TRANSP`
+as `OPAQUE`. This server's create path matches it ([#195](https://github.com/JonathanGodley/fastmail-mcp/issues/195)):
 by **default** a date-only write emits `TRANSP:TRANSPARENT` and a timed write emits nothing.
 
-The measurement bears on `create_calendar_event`, which picks that default, and on nothing else.
-Either tool's `transparency` parameter overrides it outright ([#194](https://github.com/JonathanGodley/fastmail-mcp/issues/194)),
-and `update_calendar_event` writes `TRANSP` only when the caller passes `transparency` or clears
-it, so how the client spells busy — as `TRANSP:OPAQUE` or as no property at all, both of which
-§3.8.2.7 reads the same way — never has to be told apart on the update path.
+Only `create_calendar_event`'s default rests on this measurement. `update_calendar_event` writes
+`TRANSP` only when the caller asks (see "Free/busy crosses four tools" in `docs/conventions.md`), so
+how the client spells busy, as `TRANSP:OPAQUE` or as no property at all, never has to be told apart
+on the update path.
 
 **Still unmeasured about the client, as of 10 September 2026: what the editor writes when the
 busy/free control is moved OFF its default**, in either direction — a timed event set to free, and
@@ -359,10 +343,8 @@ rest on. Read an unmarked one as measured.
   from a pre-edit fetch. Noise either way, but it suggests the block is rewritten rather than
   patched.
 
-So the two edit modes have nothing in common on the wire: editing one occurrence adds a sibling
-override block beside the master, editing the whole series mutates the master and leaves the
-resource single-block. Nothing structural distinguishes a whole-series edit from an event that was
-never edited — only `SEQUENCE` and the timestamps record that anything happened.
+Nothing structural distinguishes a whole-series edit from an event that was never edited: only
+`SEQUENCE` and the timestamps record that anything happened.
 
 **The occurrence picker offers exactly two choices.** Editing an occurrence of a series pops "This
 event only" and "All occurrences", and nothing else. There is no "this and future occurrences", so
@@ -390,9 +372,19 @@ ordinary event nobody configured specially, so a parser must survive each of tho
 being present *and* being absent, and must not read an absence as meaning the event came from
 somewhere other than this client. What made the two passes differ on the `VALARM` was not
 identified — an account-level default alarm setting is the obvious candidate and was not checked.
-All four of the second pass additionally carry `STATUS:CONFIRMED` and the Cyrus `PRODID`. Read that
-as a fact about those four rather than a rule about the client: the first pass's six are mixed
-between the Cyrus and the Fastmail `PRODID`, per the storage-serialisation paragraph above.
+All four of the second pass additionally carry `STATUS:CONFIRMED` and the Cyrus `PRODID`; that is a
+fact about those four, not a rule about the client, since the first pass's six are mixed.
+
+**Unmeasured.** Not yet authored in the client, and so not known:
+
+- **`BYMONTHDAY`** — the monthly picker's other option, "on the 15th". Only the "3rd Tuesday" branch
+  was authored, so nothing here says how a day-of-month rule is written.
+- **The weekly picker's multi-day form** ("on Saturday & Sunday"). A `BYDAY` list is the obvious
+  guess and a guess is not a measurement; the single-weekday case wrote no `BYDAY` at all, which is
+  reason enough not to assume the multi-day case by extension.
+- **A timed series crossing a DST boundary.** Both DST fixtures here are date-only. Whether a
+  weekly 9:00 series holds its wall clock or its offset across a transition is the case that
+  matters most for a zone-name-plus-wall-clock reader, and it has not been measured.
 
 ### How this server's writes render in the client
 
@@ -405,8 +397,7 @@ server's own create path (`create_calendar_event`, driven against the built `dis
 harness, no participants) into a collection minted by
 `scripts/probes/server-authored-events.probe.mjs` with `MKCALENDAR`, and each was opened in the
 Fastmail **web** client the same day. The account's configured zone was `Australia/Sydney`, on AEST
-at the time. This is a fourth method in this file: the pixels of the client's event popup, read
-against bytes this server wrote rather than bytes the client wrote. Also measured in passing: the
+at the time. This is a fourth method in this file. Also measured in passing: the
 `MKCALENDAR`'d collection appeared in the client's calendar list under its display name with no
 further step.
 
@@ -421,47 +412,30 @@ Note that all four end with `DTEND`. This server never writes the `DURATION` for
 writes it on some resources and this server's parser reads both — see "Storage serialisation varies
 by path" above.
 
-**A bare `TZID` with no `VTIMEZONE` renders exactly as one of the client's own events does.** Every
-timed event the client authors ends up stored with a `VTIMEZONE` for its zone (the two timed rows in
-the section above both do) — but that component is Cyrus's, added by its JMAP→iCalendar converter
-(`icalcomponent_add_required_timezones`, see "The platform" below) as it turns the client's own
-zone-name-only JSCalendar into the iCalendar this measurement reads; the client itself sends no
-`VTIMEZONE`. At the time of this 22-23 August measurement this server wrote none either, and the
+**A bare `TZID` with no `VTIMEZONE` renders exactly as one of the client's own events does.** The
+client's own timed events are stored with a `VTIMEZONE` that Cyrus's JMAP→iCalendar converter adds
+(`icalcomponent_add_required_timezones`; both timed rows in the authoring table); the client itself
+sends none, and at the time of this 22-23 August measurement this server wrote none either. The
 popup for the explicitly-zoned event was identical in format to the client's own zone-picker
-reference event authored on 22 August, whose popup — read on 23 August in the same web client,
-since the 22 August section records bytes only — gave `11:00 AM – 12:00 PM AEST` over
-`9:00 AM – 10:00 AM HKST`. So the absence had no visible effect in the Fastmail client, which
-resolves the zone name itself. **This did not measure interoperability**: whether a
-`VTIMEZONE`-less resource resolves the same way in some *other* CalDAV client was never tested.
+reference event, whose popup (read on 23 August in the same web client) gave
+`11:00 AM – 12:00 PM AEST` over `9:00 AM – 10:00 AM HKST`. So the absence had no visible effect in
+the Fastmail client, which resolves the zone name itself. **This did not measure interoperability**:
+whether a `VTIMEZONE`-less resource resolves the same way in some *other* CalDAV client was never
+tested.
 
 One bound on this whole subsection: a client popup is not a byte-level check. The bytes in the left
 column were verified by the probe's CalDAV `REPORT` fetch-back of the stored resource, and only the
 right column is pixels.
 
-**Unmeasured.** The 23 August pass closed four of the gaps the first one left: `UNTIL`, a `BYDAY`
-expansion, all-day events spanning a DST boundary, and a whole-series edit are all measured above.
-What is still not authored, and so still not known:
-
-- **`BYMONTHDAY`** — the monthly picker's other option, "on the 15th". Only the "3rd Tuesday" branch
-  was authored, so nothing here says how a day-of-month rule is written.
-- **The weekly picker's multi-day form** ("on Saturday & Sunday"). A `BYDAY` list is the obvious
-  guess and a guess is not a measurement; the single-weekday case wrote no `BYDAY` at all, which is
-  reason enough not to assume the multi-day case by extension.
-- **A timed series crossing a DST boundary.** Both DST fixtures here are date-only. Whether a
-  weekly 9:00 series holds its wall clock or its offset across a transition is the case that
-  matters most for a zone-name-plus-wall-clock reader, and it has not been measured.
-
 ## The platform: whether the server will hand this one a `VTIMEZONE`
 
-The subsection above leaves interoperability open (#166) — this server used to write a bare
-`TZID` where a Fastmail-authored event ends up carrying a `VTIMEZONE` (added by Cyrus's
-JMAP→iCalendar converter, not by the client itself), and the decision was to match that stored
-shape. That left a question the client cannot answer, because it is about the server rather than
-the client: where the block would come from. RFC 7808 timezone data distribution would supply one
-by zone name, and Cyrus implements that service, so asking for it would be the cheap answer.
-**Cyrus implementing it is not evidence Fastmail exposes it.** The service is gated on a
-per-deployment config switch, and no amount of source reading says which way that switch is set
-on an account, which is why this was measured.
+Where this server could get a `VTIMEZONE` for the zones it writes, rather than leaving a bare
+`TZID` (the interoperability question the subsection above leaves open, #166), is a question about
+the server, not the client. RFC 7808 timezone data distribution would supply one by zone name, and
+Cyrus implements that service, so asking for it would be the cheap answer. **Cyrus implementing it
+is not evidence Fastmail exposes it.** The service is gated on a per-deployment config switch, and
+no amount of source reading says which way that switch is set on an account, which is why this was
+measured.
 
 **Measured on 17 September 2026** by `scripts/probes/calendar-tzdist.probe.mjs` — raw CalDAV and
 HTTP over bare `fetch`, one account, read-only, creating nothing. This is a fifth method in this
@@ -491,30 +465,22 @@ collection or on the calendar home. Together they say the whole time-zones-by-re
 here, not that one property happens to be missing.
 
 **What follows for this server.** Any `VTIMEZONE` it embeds has to come from somewhere other than the
-platform — bundled, or generated from timezone rules it carries itself. #166 cannot be closed by a
-fetch.
-
-**Superseding update, 25 September 2026.** #166 is closed by generating the block instead: Node's
-own ICU timezone data already backs `zoneOffsetMsAt` (`src/coerce.ts`), and `src/vtimezone.ts` walks
-it to synthesise a `VTIMEZONE` per referenced zone — not byte-identical to Cyrus's own (no `RRULE`
-observances, no reproduction of its exact trimming), but resolving to the same offsets across the
-event's span, which is the property a reader needs. `create_calendar_event` writes one for every
-zone `start`/`end` uses; `update_calendar_event` regenerates it whenever `start`/`end` changes. See
-[README.md's "Writing calendar times"](../README.md#writing-calendar-times) and
-`docs/conventions.md`'s "VTIMEZONE residual" for the shipped model.
+platform. `src/vtimezone.ts` generates one from Node's own ICU timezone data (#166): not
+byte-identical to Cyrus's own, but resolving to the same offsets across the event's span; the
+shipped model is in [README.md's "Writing calendar times"](../README.md#writing-calendar-times) and
+`docs/conventions.md`'s "VTIMEZONE residual".
 
 **Dated, not permanent.** One account, one deployment, one day. A config switch is exactly the kind
 of thing that changes with no announcement, so re-ask rather than cite this row as settled: the probe
 reproduces all four rows above, prints PASS/FAIL per condition and needs no fixture. (The zone-id row
-is reported there and deliberately not gated — a deployment may serve the timezone service with no
-zone id set on any collection, so a condition over it would fail a working service.) **What it does
+is reported there, not gated.) **What it does
 not cover** is whether the service is reachable on some other Fastmail host or for some other
 account, and whether Fastmail serves timezone data by any route that is not RFC 7808. Neither was
 measured.
 
 ### A 404 at this host names a tier before it names a fact
 
-Found while measuring the above, and the half of it that generalises. `caldav.fastmail.com` sits
+`caldav.fastmail.com` sits
 behind nginx, and **nginx answers root paths itself** rather than passing them to the CalDAV backend:
 `GET /.well-known/caldav` returns an nginx `301` to `/dav/calendars`, which is a proxy rewrite and
 not Cyrus's own well-known bootstrap. So a `404` on a root path here is a fact about the edge and
@@ -586,7 +552,7 @@ Three things follow.
 ## Extending this file
 
 Add a row by **measuring the view**, never by inferring from a role's name. A role that has not been
-looked at gets an explicit `unmeasured`, not a blank and not a guess.
+looked at gets an explicit `unmeasured`, not a blank (a blank reads as "checked, absent") and not a guess.
 
 Fork issue #121 is the standing audit that fills in the rest of the availability axis; #125 covers
 the sibling axis this file only touches for Archive — what each client action *does* to membership
