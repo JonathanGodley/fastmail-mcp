@@ -28,8 +28,8 @@ function stripSentinels(s: string): string {
 
 // Both block builders sanitize the original's html twice with the `map` pass in
 // src/inline-images.ts (posture in docs/conventions.md). Pass one uses an empty map: it reports
-// references and yields the html that ships when nothing is minted. Not `collect`, which keeps a
-// relative src that `map` drops, so an attribution would open over an empty quote. Pass two
+// references, and its html is what ships less the images pass two embeds. Not `collect`, which
+// keeps a relative src that `map` drops, so an attribution would open over an empty quote. Pass two
 // rewrites resolved references to the Content-IDs this draft attaches, and runs only when pass
 // one decides an html quote ships, since minting commits the call to attaching a part.
 

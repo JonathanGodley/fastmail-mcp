@@ -2500,8 +2500,9 @@ The order is the whole point: minting an identifier commits the call to attachin
 and a part nothing references is a stray file on the finished message. So pass one decides
 whether an html quote ships at all, and pass two runs only on a branch that really ships
 one. Both passes run `map`. Pass one maps with an empty map: it reports the references, and
-its html is what ships when nothing is minted. Pass two maps with the identifiers just
-minted. A text-only reply mints nothing.
+its html is what ships less the images pass two embeds. Pass two maps with the identifiers
+just minted, and runs whenever an html quote ships, even with nothing minted. Pass one's html
+ships itself only when the caller passes no image channel. A text-only reply mints nothing.
 
 `map` mode is **default-deny**: an `<img>` survives only when the transform affirmatively
 emits a `src` — a mapped identifier, or a value whose normalised scheme is http/https.
@@ -2525,9 +2526,9 @@ with no `src` at all is not counted; there was no image to lose.
 Quotability is read from pass one's html, so an image counts only if it would ship. An
 original whose only image has a relative src is therefore not quotable. An original whose
 only content is embedded images sanitises in pass one to something visually empty
-(`<div></div>`), so it is judged
-quotable by whether at least one of its references would really embed — resolved to exactly
-one part, that part declaring itself an image and carrying a blob. Testing mere *resolution*
+(`<div></div>`), so it is judged quotable by whether at least one of its references would
+really embed — resolved to exactly one part, that part declaring itself an image and
+carrying a blob. Testing mere *resolution*
 would open an attribution over a quote showing nothing; testing the sanitised string would
 call an image-only message unquotable.
 
