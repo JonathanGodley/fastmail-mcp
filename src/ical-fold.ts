@@ -20,7 +20,8 @@ export function foldICalLine(line: string, lineEnding: string = '\r\n'): string 
     else if (isLow && i > start && (line.charCodeAt(i - 1) & 0xFC00) === 0xD800) size = 1;
     else size = 3;
     if (octets + size > 75) {
-      // Don't split a surrogate pair: a cut before any low surrogate, even a lone one, moves back a unit.
+      // A cut before any low surrogate moves back one unit, keeping a pair whole; before a lone low
+      // that follows a pair, that lands inside the pair and splits it.
       const cut = isLow ? i - 1 : i;
       parts.push(line.slice(start, cut));
       start = cut;
