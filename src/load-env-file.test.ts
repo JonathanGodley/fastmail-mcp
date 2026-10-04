@@ -1,5 +1,6 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -34,6 +35,22 @@ function homeWith(content: string | null): string {
     writeFileSync(envFilePath(home), content);
   }
   return home;
+}
+
+// chmod cannot remove read access on Windows, so there an ACL entry denies it instead.
+function denyRead(file: string): void {
+  if (process.platform === 'win32') icacls(file, '/deny', `${process.env.USERNAME}:(R)`);
+  else chmodSync(file, 0o000);
+}
+
+function allowRead(file: string): void {
+  if (process.platform === 'win32') icacls(file, '/remove:d', `${process.env.USERNAME}`);
+  else chmodSync(file, 0o600);
+}
+
+function icacls(...args: string[]): void {
+  const result = spawnSync('icacls', args, { encoding: 'utf8' });
+  assert.equal(result.status, 0, `icacls ${args.join(' ')} failed: ${result.stdout}${result.stderr}`);
 }
 
 describe('loadHomeEnvFile', () => {
@@ -97,24 +114,19 @@ describe('loadHomeEnvFile', () => {
 
   it(
     'throws naming the path when the file cannot be read',
-    {
-      skip:
-        process.platform === 'win32'
-          ? 'chmod cannot remove read access on Windows'
-          : process.getuid?.() === 0
-            ? 'root reads a file whatever its mode'
-            : false,
-    },
+    { skip: process.platform !== 'win32' && process.getuid?.() === 0 ? 'root reads a file whatever its mode' : false },
     () => {
-      const home = homeWith(`${VAR}=from-file\n`);
-      chmodSync(envFilePath(home), 0o000);
+      const home = homeWith(`${VAR}=from-file
+`);
+      const file = envFilePath(home);
+      denyRead(file);
       try {
         assert.throws(
           () => loadHomeEnvFile(home),
-          (err: Error) => err.message.includes(envFilePath(home)) && err.cause instanceof Error,
+          (err: Error) => err.message.includes(file) && err.cause instanceof Error,
         );
       } finally {
-        chmodSync(envFilePath(home), 0o600);
+        allowRead(file);
       }
     },
   );

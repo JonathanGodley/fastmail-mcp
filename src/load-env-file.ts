@@ -2,7 +2,7 @@
 // other, so the file is in place before any module, dependencies included, reads a setting
 // at import. It therefore imports only Node built-ins.
 
-import { statSync } from 'node:fs';
+import { closeSync, openSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,14 +25,25 @@ export function envFilePath(home: string): string {
  */
 export function loadHomeEnvFile(home: string): void {
   const path = envFilePath(home);
+  // Opened here first because process.loadEnvFile does not report an unreadable file on every
+  // Node version and platform: some load nothing silently, and on Windows it says ENOENT.
+  try {
+    closeSync(openSync(path, 'r'));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw loadError(path, err);
+  }
   try {
     process.loadEnvFile(path);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    // Node's own error for a directory differs by platform, and on Windows misstates the cause.
-    if (isDirectory(path)) throw new Error(`${path} is a directory, not a file`, { cause: err });
-    throw new Error(`${path} exists but could not be loaded: ${(err as Error).message}`, { cause: err });
+    throw loadError(path, err);
   }
+}
+
+function loadError(path: string, err: unknown): Error {
+  // Node's own error for a directory differs by platform, and on Windows misstates the cause.
+  if (isDirectory(path)) return new Error(`${path} is a directory, not a file`, { cause: err });
+  return new Error(`${path} exists but could not be loaded: ${(err as Error).message}`, { cause: err });
 }
 
 try {
