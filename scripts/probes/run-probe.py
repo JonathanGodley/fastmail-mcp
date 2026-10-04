@@ -4,7 +4,7 @@
 # to disk. Usage: python scripts/probes/run-probe.py <probe.mjs>
 #
 # Each variable comes from ~/.fastmail-mcp/.env, else the fastmail entry in
-# ~/.claude.json; either may be absent.
+# ~/.claude.json, else the inherited environment; any of them may be absent.
 #
 # FASTMAIL_API_TOKEN is required. The CalDAV credentials and display name are
 # injected only when a source carries them (a JMAP-only setup has no calendar app
@@ -34,8 +34,10 @@ def read_env_file(path):
             line = line[len('export '):]
         key, value = line.split('=', 1)
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
-            value = value[1:-1]
+        # As process.loadEnvFile: a quoted value ends at its closing quote, and an
+        # unquoted one at the first '#'.
+        end = value.find(value[0], 1) if value and value[0] in '"\'`' else -1
+        value = value[1:end] if end > 0 else value.split('#', 1)[0].strip()
         out[key.strip()] = value
     return out
 
@@ -58,8 +60,8 @@ for key in KEYS:
     if value:
         env[key] = value
 
-if not (file_env.get('FASTMAIL_API_TOKEN') or cfg_env.get('FASTMAIL_API_TOKEN')):
-    sys.exit(f'FASTMAIL_API_TOKEN not found in {ENV_PATH} or the fastmail entry in {CFG_PATH}')
+if not env.get('FASTMAIL_API_TOKEN'):
+    sys.exit(f'FASTMAIL_API_TOKEN not found in {ENV_PATH}, the fastmail entry in {CFG_PATH}, or the environment')
 
 script = sys.argv[1]
 args = sys.argv[2:]

@@ -30,7 +30,8 @@ below before running it.
 If your credentials live in `~/.fastmail-mcp/.env` or Claude Code's MCP server
 config rather than your shell, `run-probe.py` is a convenience launcher that
 reads them into the child environment without printing them. Each variable comes
-from the `.env` file if it sets it, otherwise from the config:
+from the `.env` file if it sets it, otherwise from the config, otherwise from
+your shell:
 
 ```
 python scripts/probes/run-probe.py inline-read.smoke.mjs
