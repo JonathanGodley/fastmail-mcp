@@ -403,6 +403,16 @@ describe('the image outcome the builders report', () => {
     }
   });
 
+  it('counts a dropped data: image only when html ships', () => {
+    const html = original('<p>x</p><img src="data:image/png;base64,AA">');
+    for (const quoteImages of [{ sourceParts: [] }, undefined]) {
+      for (const [htmlShips, count] of [[true, 1], [false, 0]] as const) {
+        assert.equal(buildQuoteBlocks({ original: html, htmlShips, quoteImages }).images.droppedDataImages, count);
+        assert.equal(buildForwardBlocks({ original: html, htmlShips, quoteImages }).images.droppedDataImages, count);
+      }
+    }
+  });
+
   it('reports no dropped image when nothing of the original is quoted', () => {
     for (const img of ['<img src="/logo.png">', '<img src="//cdn.example.com/a.png">', '<img src="data:image/png;base64,AA">']) {
       const nothing = original(img);

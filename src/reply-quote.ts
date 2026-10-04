@@ -301,7 +301,7 @@ export function buildQuoteBlocks(input: {
     mappings: resolved?.mappings ?? [],
     resolvedParts: collected.resolvedParts,
     unresolvedRefs: collected.unresolvedRefs,
-    droppedDataImages: quoted ? collected.droppedDataImages : 0,
+    droppedDataImages: quoted && htmlShips ? collected.droppedDataImages : 0,
     droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
     htmlQuoteShips,
   };
@@ -452,7 +452,7 @@ export function buildForwardBlocks(input: {
       mappings: resolved?.mappings ?? [],
       resolvedParts: collected.resolvedParts,
       unresolvedRefs: collected.unresolvedRefs,
-      droppedDataImages: quoted ? collected.droppedDataImages : 0,
+      droppedDataImages: quoted && htmlShips ? collected.droppedDataImages : 0,
       droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
       htmlQuoteShips,
     },
