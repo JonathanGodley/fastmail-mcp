@@ -11,11 +11,8 @@
 //      Never write a token to a file to get it there; scripts/probes/run-probe.py
 //      shows one way to inject it from an MCP client's config in memory.
 //
-// The server reads ~/.fastmail-mcp/.env at startup. By default the harness points
-// HOME and USERPROFILE at a fresh empty temp dir, removed when the server exits, so
-// that file is never read and the default download directory is not your own.
-// Pass `inheritHome: true` to keep the home the env names: the CLI below does, and
-// so does any probe that relies on the real home.
+// The server runs with an empty temp home unless the caller passes `inheritHome`
+// (see mcp-harness.d.mts).
 //
 // Importing from outside the repo on Windows: an absolute path in an ESM `import`
 // fails with ERR_UNSUPPORTED_ESM_URL_SCHEME, so import via a file:/// URL instead.
