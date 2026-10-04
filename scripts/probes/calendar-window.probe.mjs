@@ -134,9 +134,14 @@ try {
     /^Showing \d+ of \d+ results\.?/.test(summary),
     summary,
   );
-  // nextPosition would be an instruction the caller cannot follow: this tool declares no
-  // `position` parameter, so passing one back is rejected by the unknown-parameter guard.
-  check('the summary offers no nextPosition on this unpaged tool', !summary.includes('nextPosition'));
+  const counts = /^Showing (\d+) of (\d+) results/.exec(summary);
+  const next = /nextPosition: (\d+)/.exec(summary);
+  const moreRemain = counts !== null && Number(counts[1]) < Number(counts[2]);
+  check(
+    'the summary offers nextPosition exactly while rows remain, equal to the number returned',
+    counts !== null && (moreRemain ? next !== null && Number(next[1]) === Number(counts[1]) : next === null),
+    summary,
+  );
 
   if (!Array.isArray(events)) {
     console.log('\nNo event array to inspect; stopping.');

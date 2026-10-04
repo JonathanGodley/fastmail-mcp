@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQueryResult, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -891,6 +891,30 @@ describe('formatQuerySummary on an unpaged tool', () => {
   it('says a missing total is missing, without the paging consequence', () => {
     const summary = formatQueryResult({ items: rows(50) }).split('\n')[0];
     assert.equal(summary, 'Showing 50 results; the total match count was not returned.');
+  });
+});
+
+// list_calendar_events takes `position` (#169), so its listing is a paged one.
+describe('formatCalendarEventList', () => {
+  const events = (count: number) => Array.from({ length: count }, (_, i) => ({ id: `ev-${i}@fm`, url: `/cal/work/ev-${i}.ics`, title: `Event ${i}` }));
+  const clamp = { invented: 'both' as const, start: '2027-03-01T00:00:00Z', end: '2027-04-01T00:00:00Z' };
+
+  it('offers nextPosition while rows remain, with the notes still after the JSON', () => {
+    const text = formatCalendarEventList({ events: events(2), total: 5, position: 2, windowClamp: clamp, brokenCollections: ['/cal/broken/'] });
+    const [summary, json] = text.split('\n');
+    assert.equal(summary, 'Showing 2 of 5 results from position 2. nextPosition: 4 (pass position:4 for the next page).');
+    assert.deepEqual(JSON.parse(json).map((e: { id: string }) => e.id), ['ev-0@fm', 'ev-1@fm']);
+    assert.equal(text, `${summary}\n${json}${buildCalendarWindowNote(clamp)}${buildBrokenCollectionNote(['/cal/broken/'], 'read')}`);
+  });
+
+  it('offers no nextPosition on the last page', () => {
+    const summary = formatCalendarEventList({ events: events(1), total: 5, position: 4 }).split('\n')[0];
+    assert.equal(summary, 'Showing 1 of 5 results from position 4.');
+  });
+
+  it('states the real total on an empty page past the end', () => {
+    const summary = formatCalendarEventList({ events: [], total: 5, position: 50 }).split('\n')[0];
+    assert.equal(summary, 'Showing 0 of 5 results from position 50.');
   });
 });
 

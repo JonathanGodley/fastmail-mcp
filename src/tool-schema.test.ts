@@ -89,6 +89,7 @@ const HANDLER_FILES = [
   'send-draft-handler.ts',
   'mailbox-handler.ts',
   'contacts-handler.ts',
+  'calendar-list-handler.ts',
 ];
 
 function readLines(file: string): string[] {
@@ -668,6 +669,11 @@ describe('the limit bound is owned by the handlers', () => {
         `it never told the caller about: ${mismatches.join('; ')}`,
     );
   });
+
+  // The email tools' cap; `position` reaches the rest.
+  it('caps list_calendar_events at 100', () => {
+    assert.deepEqual(collectClamps().get('list_calendar_events'), { fallback: 50, max: 100 });
+  });
 });
 
 // Handler wiring in the untestable CallTool switch. archive_email's contract says `notFound`
@@ -1066,6 +1072,7 @@ function findStringifyAliases(source: string): number[] {
 // for a payload serialisation leaves the count at 2 and passes. Everything else has to go
 // through toolJson / redactedJson (see the header for what that does and does not buy).
 const NON_PAYLOAD_STRINGIFY: Record<string, { count: number; why: string }> = {
+  'caldav-client.ts': { count: 1, why: 'the last-resort sort key for calendar rows, never emitted' },
   'coerce.ts': { count: 2, why: 'the seams themselves - toolJson and redactedJson' },
   'contact-card.ts': { count: 2, why: 'quotes a dropped/added value into a prose sentence' },
   'jmap-client.ts': { count: 1, why: 'the HTTP request body POSTed to the JMAP endpoint' },
@@ -1453,9 +1460,9 @@ describe('check_function_availability lists every tool', () => {
 // `nextPosition` to pass back as `position`, and assertKnownParams rejects any key the
 // schema does not declare. A newly paged tool is added to this list.
 describe('the listed paged tools declare position', () => {
-  it('declares position on list_emails, search_emails, list_contacts and search_contacts', () => {
+  it('declares position on list_emails, search_emails, list_contacts, search_contacts and list_calendar_events', () => {
     const params = collectToolParams();
-    const missing = ['list_emails', 'search_emails', 'list_contacts', 'search_contacts']
+    const missing = ['list_emails', 'search_emails', 'list_contacts', 'search_contacts', 'list_calendar_events']
       .filter((tool) => !params.get(tool)?.has('position'));
     assert.deepEqual(
       missing,

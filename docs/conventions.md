@@ -1439,24 +1439,25 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
 
 **`nextPosition` is gated on the calling tool accepting `position`.** `formatQuerySummary`
 takes a `paged` flag, and a tool gets it from the renderer its handler picks:
-`formatRawQueryResult` and the simplified listing renderers set it, `formatQueryResult` does
-not. A tool that declares no `position` renders through `formatQueryResult`, because a
-caller following a `nextPosition` it cannot pass back would have the call rejected outright
-by the unknown-parameter guard — an instruction the caller cannot act on is worse than none.
-Paging is carried by the renderer rather than by a flag at every call site because a
-forgotten flag would silently drop a promised signal, while a wrong function name is visible
-in the handler. A paged listing also needs an order the server keeps from call to call, or
-an offset points somewhere different on each page: the contacts queries send an explicit
-sort ending in `uid` for that reason (#94). Paginating the calendar listing is tracked on
-[#169](https://github.com/JonathanGodley/fastmail-mcp/issues/169).
+`formatRawQueryResult`, `formatCalendarEventList` and the simplified listing renderers set
+it, `formatQueryResult` does not. A tool that declares no `position` renders through
+`formatQueryResult`, because a caller following a `nextPosition` it cannot pass back would
+have the call rejected outright by the unknown-parameter guard — an instruction the caller
+cannot act on is worse than none. Paging is carried by the renderer rather than by a flag at
+every call site because a forgotten flag would silently drop a promised signal, while a
+wrong function name is visible in the handler. A paged listing also needs an order the
+server keeps from call to call, or an offset points somewhere different on each page: the
+contacts queries send an explicit sort ending in `uid` for that reason (#94).
 
 **The CalDAV calendar listing joins the same discipline, over a different protocol.**
 `list_calendar_events` does not go through JMAP at all, so nothing hands it a server-computed
 `total` — it counts what it gathered. `getCalendarEvents` therefore returns
 `{ events, total }`, where `total` is the number of events that matched *after* the window
-re-filter and *before* `limit` trimmed the list, and the handler renders it through the same
-`formatQuerySummary` as everything else (unpaged, so no `nextPosition`, since the tool takes
-no `position`). The count is load-bearing here rather than cosmetic: recurrence expansion
+re-filter and *before* the page was cut, and the handler renders it through the same
+`formatQuerySummary` as everything else (paged, since the tool takes `position`). Each page
+re-reads every calendar and slices the sorted set at `position`, so `sortEventsByStart`
+breaks ties between rows sharing an instant on fixed keys, and an unchanged calendar is cut
+at the same place on every read. The count is load-bearing here rather than cosmetic: recurrence expansion
 turns one fortnightly series across a quarter into seven rows, so the cap is reached far
 sooner than it was when a series counted once, and a caller reading a capped page as the
 whole answer is exactly the false negative this section exists to prevent (#64, #100).

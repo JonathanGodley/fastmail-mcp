@@ -92,11 +92,13 @@ export interface CalendarEvent {
   transparency?: string;
 }
 
-// `total` is how many matched before `limit` trimmed the page: `limit` is a hard cap with no
-// paging, and a capped page read as the whole answer looks like an empty calendar (#100).
+// `total` is how many matched before the page was cut, since a capped page read as the whole
+// answer looks like an empty calendar (#100).
 export interface CalendarEventQueryResult {
   events: CalendarEvent[];
   total: number;
+  // The offset the page starts at, for the summary's "from position N" and `nextPosition`.
+  position?: number;
   // Set only when the window queried was narrower than the one the caller described. Structure,
   // not prose: the formatter owns the wording, as `QueryResult.exclusion` does for email.
   windowClamp?: CalendarWindowClamp;
@@ -287,6 +289,28 @@ function markerLine(text: string): string | null {
   return structuralLine(text)?.toUpperCase() ?? null;
 }
 
+/**
+ * The write paths' component scans read PHYSICAL lines (callers splice physical indices), so a
+ * marker split across a fold is invisible to them. Any logical line that unfolds to a marker is
+ * refused up front, even a legal fold no producer seen here emits: fails closed with no
+ * logical-to-physical mapping. A property whose text merely CONTAINS a marker is unaffected.
+ */
+function refuseFoldedComponentMarkers(lines: string[]): void {
+  for (let i = 0; i < lines.length; i++) {
+    if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
+    let j = i + 1;
+    while (j < lines.length && isFoldedContinuation(lines[j])) j++;
+    if (j === i + 1) continue; // this logical line was never folded
+    const logical = lines[i] + lines.slice(i + 1, j).map(l => l.slice(1)).join('');
+    if (/^(BEGIN|END):/i.test(logical)) {
+      // Worded generically: a resource with no VTIMEZONE at all can trip this.
+      throw new InvalidInputError(
+        'Stored calendar resource has a component boundary hidden behind a folded line.'
+      );
+    }
+  }
+}
+
 /** Every VEVENT block in a payload, as verbatim substrings of it. */
 function extractVEventBlocks(data: string): string[] {
   const lines = icalContentLines(data);
@@ -322,10 +346,13 @@ export function extractVEvent(data: string): string | null {
  * The scan is VEVENT-WIDE, not position-aware, so a marker inside a VALARM counts. The reads
  * are position-aware (`ownPropertyLines`) and ignore it, so such an event reads as one-off
  * while update/delete refuse it as repeating. The split is deliberate: the payload is
- * malformed, and refusing an irreversible write is the fail-closed direction.
+ * malformed, and refusing an irreversible write is the fail-closed direction. For the same
+ * reason a marker hidden behind a fold throws: the block count cannot see the VEVENT it opens.
  */
 export function isRecurringSeriesResource(icalData: string | null | undefined): boolean {
-  const blocks = extractVEventBlocks(icalData || '');
+  if (!icalData) return false;
+  refuseFoldedComponentMarkers(icalData.split(/\r?\n/));
+  const blocks = extractVEventBlocks(icalData);
   if (blocks.length === 0) return false;
   if (blocks.length > 1) return true;
   return blocks.some((block) =>
@@ -635,6 +662,7 @@ export function replaceICalProperty(icalData: string, key: string, newLine: stri
 
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
+  refuseFoldedComponentMarkers(lines);
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
@@ -707,6 +735,7 @@ export function removeAllICalProperties(icalData: string, key: string): string {
 
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
+  refuseFoldedComponentMarkers(lines);
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
@@ -767,6 +796,7 @@ export function removeAllICalProperties(icalData: string, key: string): string {
 export function insertBeforeEndVEvent(icalData: string, newLine: string): string {
   const lineEnding = detectLineEnding(icalData);
   const lines = icalData.split(/\r?\n/);
+  refuseFoldedComponentMarkers(lines);
 
   // structuralLine, not `.trim()`: a trimmed compare reads a FOLDED continuation
   // (` BEGIN:VEVENT`) as a component marker.
@@ -1283,14 +1313,30 @@ export function unescapeICalText(value: string): string {
 }
 
 /**
+ * Stripped from every text and parameter value written: controls (HTAB is legal in both; each
+ * writer handles CR and LF first), DEL, C1, and the bidi overrides and isolates, which let a
+ * title display as different text and a name as a different address. LRM/RLM are deliberately
+ * kept: they cannot reorder surrounding text and occur legitimately in Arabic and Hebrew names.
+ */
+const UNSAFE_ICAL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g;
+
+/**
+ * `requireNonEmpty`, judged on what `escapeICalText` will leave: a value made only of stripped
+ * characters survives `trim()` but would be written as an empty property.
+ */
+function requireNonEmptyText(value: unknown, fieldName: string, hint?: string): string {
+  if (typeof value === 'string') requireNonEmpty(value.replace(UNSAFE_ICAL_CHARS, ''), fieldName, hint);
+  return requireNonEmpty(value, fieldName, hint);
+}
+
+/**
  * Escape a text value for use in an iCalendar property (RFC 5545 §3.3.11).
  */
 export function escapeICalText(value: string): string {
   return value
     // A bare CR would otherwise pass through and act as a line terminator downstream.
     .replace(/\r\n?/g, '\n')
-    // HTAB is legal in iCal TEXT; LF is escaped below.
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(UNSAFE_ICAL_CHARS, '')
     .replace(/\\/g, '\\\\')
     .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')
@@ -1469,10 +1515,7 @@ function validateOrganizerUsername(username: string): void {
  */
 export function quoteParamValue(value: string): string {
   let cleaned = value.replace(/[\r\n]+/g, ' ');
-  // Controls (HTAB is legal here), DEL, C1, and the bidi overrides and isolates, which let a
-  // name display as a different address. LRM/RLM are deliberately kept: they cannot reorder
-  // surrounding text and occur legitimately in Arabic and Hebrew names.
-  cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g, '');
+  cleaned = cleaned.replace(UNSAFE_ICAL_CHARS, '');
   cleaned = cleaned.replace(/"/g, "'");
   if (/[,;:]/.test(cleaned) || value.includes('"')) {
     return `"${cleaned}"`;
@@ -1742,23 +1785,7 @@ function collectZoneInstants(labeled: Array<{ label: string; frame: DateProperty
  * (#57, #111). A bare `BEGIN:`/`END:` is ignored.
  */
 function extractVTimezoneBlocks(lines: string[]): Array<{ tzid: string; start: number; end: number }> {
-  // The depth scan reads PHYSICAL lines (callers splice its physical indices), so a marker split
-  // across a fold would be invisible to it. Any logical line that unfolds to a marker is refused
-  // up front, even a legal fold no producer seen here emits: fails closed with no
-  // logical-to-physical mapping. A property whose text merely CONTAINS a marker is unaffected.
-  for (let i = 0; i < lines.length; i++) {
-    if (isFoldedContinuation(lines[i])) continue; // only ever reached as part of the group below
-    let j = i + 1;
-    while (j < lines.length && isFoldedContinuation(lines[j])) j++;
-    if (j === i + 1) continue; // this logical line was never folded
-    const logical = lines[i] + lines.slice(i + 1, j).map(l => l.slice(1)).join('');
-    if (/^(BEGIN|END):/i.test(logical)) {
-      // Worded generically: a resource with no VTIMEZONE at all can trip this.
-      throw new InvalidInputError(
-        'Stored calendar resource has a component boundary hidden behind a folded line.'
-      );
-    }
-  }
+  refuseFoldedComponentMarkers(lines);
 
   const blocks: Array<{ tzid: string; start: number; end: number }> = [];
   const stack: string[] = [];
@@ -2045,6 +2072,9 @@ export function eventIntersectsWindow(
  * with the window filter (#139, #162).
  *
  * An unreadable or absent start sorts FIRST: last is where `limit` truncates.
+ *
+ * Rows sharing an instant (and the unreadable group) fall to `compareEventTiebreak`, so every
+ * read orders them the same way and a page boundary cuts the same place each time (#169).
  */
 export function sortEventsByStart(events: CalendarEvent[], zone: string | undefined): void {
   const instants = new Map<CalendarEvent, number>();
@@ -2054,12 +2084,32 @@ export function sortEventsByStart(events: CalendarEvent[], zone: string | undefi
   events.sort((a, b) => {
     const aMs = instants.get(a)!;
     const bMs = instants.get(b)!;
-    if (Number.isNaN(aMs) || Number.isNaN(bMs)) {
-      if (Number.isNaN(aMs) && Number.isNaN(bMs)) return 0;
-      return Number.isNaN(aMs) ? -1 : 1;
-    }
-    return aMs - bMs;
+    const aNaN = Number.isNaN(aMs);
+    const bNaN = Number.isNaN(bMs);
+    if (aNaN !== bNaN) return aNaN ? -1 : 1;
+    if (!aNaN && aMs !== bMs) return aMs - bMs;
+    return compareEventTiebreak(a, b);
   });
+}
+
+// `url` separates one UID held in two calendars; `recurrenceId` (absent first) an override
+// from the occurrence it shares an instant with; the raw `start` two spellings of one instant
+// and the unreadable group. Rows equal on all four (a record's duplicated block) fall to their
+// whole serialisation, so only identical rows tie, and those are interchangeable. Code-unit
+// comparison throughout, so the order does not depend on the host's locale.
+const EVENT_TIEBREAK_KEYS = ['url', 'id', 'recurrenceId', 'start'] as const;
+
+function compareEventTiebreak(a: CalendarEvent, b: CalendarEvent): number {
+  for (const key of EVENT_TIEBREAK_KEYS) {
+    const x = a[key];
+    const y = b[key];
+    if (x === y) continue;
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    return x < y ? -1 : 1;
+  }
+  const [x, y] = [a, b].map((row) => JSON.stringify(row));
+  return x === y ? 0 : x < y ? -1 : 1;
 }
 
 /**
@@ -3269,7 +3319,7 @@ export class CalDAVCalendarClient {
     return { calendars: listed, brokenCollections: asBrokenCollectionsField(brokenCollections) };
   }
 
-  async getCalendarEvents(calendarId?: string, limit: number = 50, startDate?: string, endDate?: string): Promise<CalendarEventQueryResult> {
+  async getCalendarEvents(calendarId?: string, limit: number = 50, startDate?: string, endDate?: string, position: number = 0): Promise<CalendarEventQueryResult> {
     const client = await this.getClient();
     const { calendars, brokenCollections } = await this.discoverCalendars();
 
@@ -3437,8 +3487,9 @@ export class CalDAVCalendarClient {
     sortEventsByStart(allEvents, configuredZone);
 
     return {
-      events: allEvents.slice(0, limit),
+      events: allEvents.slice(position, position + limit),
       total: allEvents.length,
+      position,
       windowClamp,
       // Collections that failed at discovery (#136). A calendar that listed and then failed on
       // its event read still fails the whole call.
@@ -3588,7 +3639,7 @@ export class CalDAVCalendarClient {
   }): Promise<CreateCalendarEventResult> {
     // Before discovery, and by update's rules.
     assertTextType('title', event.title);
-    const title = requireNonEmpty(event.title, 'title', 'pass the event title');
+    const title = requireNonEmptyText(event.title, 'title', 'pass the event title');
     assertTextType('description', event.description);
     assertTextType('location', event.location);
 
@@ -3835,12 +3886,12 @@ export class CalDAVCalendarClient {
 
     if (fields.title !== undefined) {
       assertTextType('title', fields.title);
-      const title = requireNonEmpty(fields.title, 'title');
+      const title = requireNonEmptyText(fields.title, 'title');
       data = replaceICalProperty(data, 'SUMMARY', fold(`SUMMARY:${escapeICalText(title)}`));
     }
 
     if (fields.description !== undefined) {
-      const description = requireNonEmpty(fields.description, 'description');
+      const description = requireNonEmptyText(fields.description, 'description');
       data = replaceICalProperty(data, 'DESCRIPTION', fold(`DESCRIPTION:${escapeICalText(description)}`));
     }
 
@@ -3908,7 +3959,7 @@ export class CalDAVCalendarClient {
     }
 
     if (fields.location !== undefined) {
-      const location = requireNonEmpty(fields.location, 'location');
+      const location = requireNonEmptyText(fields.location, 'location');
       data = replaceICalProperty(data, 'LOCATION', fold(`LOCATION:${escapeICalText(location)}`));
     }
 

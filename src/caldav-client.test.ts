@@ -28,6 +28,7 @@ import {
   regenerateVTimezones,
   removeExceptionVEvents,
   insertBeforeEndVEvent,
+  isRecurringSeriesResource,
   validateAttendeeEmail,
   quoteParamValue,
   sortEventsByStart,
@@ -45,6 +46,7 @@ import {
   isBrokenCalendarHomeEntry,
   findBrokenCalendarHomeCollections,
 } from './caldav-client.js';
+import type { CalendarEvent } from './caldav-client.js';
 // The assertion on the login refusal compares against this helper's OWN output rather than a
 // hand-written expectation, so the test cannot drift from the bound the helper enforces.
 import { describeUntrustedAt } from './coerce.js';
@@ -58,9 +60,14 @@ import { defaultCalendarMultiGet, makeMockDAVClient } from './testing/caldav-moc
 // the single place it is stored, so a test that asserts on a window has to pin that zone.
 import { setDefaultTimezone } from './email-formatter.js';
 import { toolJson, isUsableTimezone, resolveCalendarInstantMs, InvalidInputError } from './coerce.js';
-import { buildBrokenCollectionNote, formatQueryResult } from './response-formatters.js';
+import { buildBrokenCollectionNote, formatCalendarEventList, formatQueryResult } from './response-formatters.js';
 import { generateVTimezone } from './vtimezone.js';
 import { foldICalLine } from './ical-fold.js';
+
+// The fold guard's own message names no component: the scan that throws it runs over the
+// whole payload before any VTIMEZONE has been located, so it must stay true of a payload
+// holding no VTIMEZONE at all, not just a VTIMEZONE-nested case.
+const FOLD_GUARD_MESSAGE = /Stored calendar resource has a component boundary hidden behind a folded line\./;
 
 // The mocked DAVClient methods below declare these parameter lists rather than
 // taking no arguments. A `mock.fn(async () => …)` stub records its arguments as an
@@ -3539,6 +3546,21 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     }
   });
 
+  it('rejects a title, description or location made only of characters the writer strips, without writing', async () => {
+    for (const [field, value] of [
+      ['title', '\u202E'],
+      ['description', '\u0085 \u2067'],
+      ['location', '\u202E'],
+    ] as const) {
+      const { client, mockDAVClient } = createMockedPatchClient([{ data: makeRichIcal('evtA@fm'), url: '/cal/evtA.ics' }]);
+      await assert.rejects(
+        () => client.updateCalendarEvent('evtA@fm', { [field]: value }),
+        new RegExp(`${field} cannot be empty`),
+      );
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0, `wrote for ${field}`);
+    }
+  });
+
   it('empty title throws InvalidInputError so the index maps calendar input to InvalidParams (#41 collateral)', async () => {
     // Pins the class, which the message assertion above cannot: it holds the calendar tools to
     // coerce.ts's requireNonEmpty (#41) rather than a local plain-Error copy.
@@ -3565,6 +3587,20 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.ok(updatedData.includes('SUMMARY:Original Title'));
     assert.ok(updatedData.includes('DESCRIPTION:Original description'));
     assert.ok(updatedData.includes('LOCATION:Room A'));
+  });
+
+  // Pins the end-to-end refusal only: the series guard and every write helper on this path refuse
+  // this payload, so each helper's own call is proved by its direct test.
+  it('end to end: a participants-only update of an event whose VALARM marker is split across a fold is refused and writes nothing', async () => {
+    const ical = makeRichIcal('evtFold@fm').replace(/BEGIN:VALARM(\r?\n)/, 'BEGI$1 N:VALARM$1');
+    assert.ok(ical.includes(' N:VALARM'), 'fixture carries the split fold');
+    const { client, mockDAVClient } = createMockedPatchClient([{ data: ical, url: '/cal/evtFold.ics' }]);
+
+    await assert.rejects(
+      () => client.updateCalendarEvent('evtFold@fm', { participants: [{ email: 'carol@example.com' }] }),
+      FOLD_GUARD_MESSAGE,
+    );
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
   });
 
   it('clearFields: ["location"] removes the LOCATION line', async () => {
@@ -4117,6 +4153,32 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
     await assert.rejects(() => client.deleteCalendarEvent('lone@fm'), isInvalidInput);
     assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
   });
+
+  it('isRecurringSeriesResource reads a missing or empty payload as not a series', () => {
+    for (const data of [null, undefined, '']) {
+      assert.equal(isRecurringSeriesResource(data), false, `for ${JSON.stringify(data)}`);
+    }
+  });
+
+  for (const [label, lineEnding] of [['CRLF', '\r\n'], ['LF', '\n']] as const) {
+    it(`refuses to delete a resource whose second VEVENT is hidden behind a folded BEGIN: (${label})`, async () => {
+      const hiddenOverride = [
+        'BEGIN:VCALENDAR', 'VERSION:2.0',
+        'BEGIN:VEVENT',
+        'UID:hidden@fm', 'DTSTAMP:20260401T000000Z',
+        'DTSTART:20260406T100000Z', 'DTEND:20260406T110000Z', 'SUMMARY:Looks single',
+        'END:VEVENT',
+        'BEG', ' IN:VEVENT',
+        'UID:hidden@fm', 'RECURRENCE-ID:20260413T100000Z', 'DTSTAMP:20260401T000000Z',
+        'DTSTART:20260413T100000Z', 'DTEND:20260413T110000Z', 'SUMMARY:Looks single',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join(lineEnding);
+      const { client, mockDAVClient } = createMockedRecurringClient(hiddenOverride, '/cal/hidden.ics');
+      await assert.rejects(() => client.deleteCalendarEvent('hidden@fm'), FOLD_GUARD_MESSAGE);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
+    });
+  }
 
   // A series that LISTS its occurrences as RDATEs instead of stating a rule (RFC 5545
   // §3.8.5.2). One block, no RRULE, no RECURRENCE-ID — so an RRULE-only detector read it as an
@@ -4739,6 +4801,14 @@ describe('escapeICalText control-character hardening', () => {
   it('keeps horizontal tabs (legal in iCal TEXT)', () => {
     assert.equal(escapeICalText('a\tb'), 'a\tb');
   });
+
+  it('strips C1 controls and the bidi overrides and isolates', () => {
+    assert.equal(escapeICalText('a\u0085b\u009Fc\u202Ed\u2067e'), 'abcde');
+  });
+
+  it('keeps LRM and RLM', () => {
+    assert.equal(escapeICalText('a\u200Eb\u200Fc'), 'a\u200Eb\u200Fc');
+  });
 });
 
 describe('parseICalDateAsUTC', () => {
@@ -4830,6 +4900,28 @@ describe('replaceICalProperty insert position with VALARM', () => {
       'END:VEVENT',
       'END:VCALENDAR',
     ]);
+  });
+});
+
+describe('VEVENT write helpers refuse a nested BEGIN: split across a fold', () => {
+  // Neither physical line of `BEGI` / ` N:VALARM` reads as a BEGIN:, so a physical-line depth scan
+  // would take END:VALARM for the end of the VEVENT and write inside the alarm.
+  const splitFoldedAlarm = [
+    'BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:split-fold@example.com', 'DTSTART:20260320T093000Z',
+    'BEGI', ' N:VALARM', 'ACTION:EMAIL', 'ATTENDEE:mailto:alarm@example.com', 'TRIGGER:-PT15M',
+    'END:VALARM', 'END:VEVENT', 'END:VCALENDAR',
+  ].join('\n');
+
+  it('insertBeforeEndVEvent refuses rather than inserting inside the alarm', () => {
+    assert.throws(() => insertBeforeEndVEvent(splitFoldedAlarm, 'ATTENDEE:mailto:guest@example.com'), FOLD_GUARD_MESSAGE);
+  });
+
+  it('replaceICalProperty refuses rather than inserting an absent property inside the alarm', () => {
+    assert.throws(() => replaceICalProperty(splitFoldedAlarm, 'LOCATION', 'LOCATION:Room 1'), FOLD_GUARD_MESSAGE);
+  });
+
+  it('removeAllICalProperties refuses rather than removing the alarm\'s own ATTENDEE', () => {
+    assert.throws(() => removeAllICalProperties(splitFoldedAlarm, 'ATTENDEE'), FOLD_GUARD_MESSAGE);
   });
 });
 
@@ -5452,6 +5544,7 @@ describe('createCalendarEvent rejects date spellings that would be resolved by g
     for (const [label, patch, message] of [
       ['numeric title', { title: 5 }, /title must be a string; received number/],
       ['whitespace-only title', { title: '   ' }, /title cannot be empty; pass the event title/],
+      ['title of only stripped characters', { title: '\u0085 \u2067' }, /title cannot be empty; pass the event title/],
       ['array description', { description: ['x'] }, /description must be a string; received array/],
       ['numeric description', { description: 5 }, /description must be a string; received number/],
       ['object location', { location: {} }, /location must be a string; received object/],
@@ -7902,10 +7995,6 @@ describe('VTIMEZONE embedding (#166)', () => {
       'END:VEVENT', 'END:VTIMEZONE', 'END:VCALENDAR',
     ].join('\r\n');
 
-    // The fold guard's own message names no component: the scan that throws it runs over the
-    // whole payload before any VTIMEZONE has been located, so it must stay true of a payload
-    // holding no VTIMEZONE at all, not just this VTIMEZONE-nested case.
-    const FOLD_GUARD_MESSAGE = /Stored calendar resource has a component boundary hidden behind a folded line\./;
     // The depth-tracked "malformed" path's own message — what the control below asserts, so the
     // fold is the only difference between it and its folded twin above.
     const MALFORMED_VTIMEZONE_MESSAGE = /Stored calendar resource has a malformed VTIMEZONE block\./;
@@ -10552,8 +10641,8 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
     ] as any[];
     sortEventsByStart(events, 'Australia/Sydney');
     // Read in the same (Sydney) fallback zone, identical wall-clock digits are simultaneous,
-    // so the pre-existing stable order is preserved rather than either one jumping ahead.
-    assert.deepEqual(events.map(e => e.id), ['windows', 'sydney']);
+    // so the tiebreak orders them: neither has a url, and 'sydney' sorts before 'windows'.
+    assert.deepEqual(events.map(e => e.id), ['sydney', 'windows']);
   });
 
   it('reads a leading-slash TZID the same way the window filter does (#162)', () => {
@@ -10568,8 +10657,152 @@ describe('sortEventsByStart orders by the instant, not the spelling', () => {
     ] as any[];
     sortEventsByStart(events, 'Australia/Sydney');
     // New York is behind Sydney, so the same wall-clock digits there are a LATER instant.
-    // Falling back to Sydney would make the two simultaneous and leave the input order.
+    // Falling back to Sydney would make the two simultaneous, and the tiebreak would then put
+    // 'newyork' first.
     assert.deepEqual(events.map(e => e.id), ['sydney', 'newyork']);
+  });
+
+  // Each page is a fresh read sliced at `position` (#169), so rows that share an instant must
+  // land in the same order on every read, or one repeats across a page boundary and another
+  // is never shown.
+  it('orders rows sharing an instant the same way whatever order they arrive in', () => {
+    const rows = [
+      // One UID held in two calendars.
+      { id: 'dup@fm', url: '/cal/work/dup.ics', title: 'Dup', start: '2027-03-02T09:00:00Z' },
+      { id: 'dup@fm', url: '/cal/personal/dup.ics', title: 'Dup', start: '2027-03-02T09:00:00Z' },
+      // A series' first occurrence and an override moved onto the same instant: same id, url
+      // and start, told apart only by the override's recurrenceId.
+      { id: 's@fm', url: '/cal/work/s.ics', title: 'S', start: '2027-03-02T09:00:00Z', isRecurring: true },
+      { id: 's@fm', url: '/cal/work/s.ics', title: 'S', start: '2027-03-02T09:00:00Z', isRecurring: true, recurrenceId: '2027-03-05T09:00:00Z' },
+      // The same instant spelled as a Sydney wall clock (AEDT, UTC+11).
+      { id: 'solo@fm', url: '/cal/work/solo.ics', title: 'Solo', start: '2027-03-02T20:00:00' },
+      // The unreadable group ties too.
+      { id: 'bad-b@fm', url: '/cal/work/bad-b.ics', title: 'Untitled' },
+      { id: 'bad-a@fm', url: '/cal/personal/bad-a.ics', title: 'Untitled', start: 'not a date' },
+      // One record's two blocks, told apart only by their raw start.
+      { id: 'bad-c@fm', url: '/cal/work/bad-c.ics', title: 'Untitled', start: 'garbage 2' },
+      { id: 'bad-c@fm', url: '/cal/work/bad-c.ics', title: 'Untitled', start: 'garbage 1' },
+      // Equal on every named key, different elsewhere: one record's duplicated block.
+      { id: 'twin@fm', url: '/cal/work/twin.ics', title: 'Twin B', start: '2027-03-02T09:00:00Z' },
+      { id: 'twin@fm', url: '/cal/work/twin.ics', title: 'Twin A', start: '2027-03-02T09:00:00Z' },
+    ];
+    const keyOf = (e: any) => `${e.url}|${e.id}|${e.recurrenceId ?? ''}|${e.start ?? ''}|${e.title}`;
+    const orders: any[][] = [];
+    for (let shift = 0; shift < rows.length; shift++) {
+      const rotated = [...rows.slice(shift), ...rows.slice(0, shift)];
+      orders.push(rotated, [...rotated].reverse());
+    }
+    const seen = orders.map((order) => {
+      const events = order.map(e => ({ ...e })) as any[];
+      sortEventsByStart(events, 'Australia/Sydney');
+      return events.map(keyOf);
+    });
+    for (const order of seen) assert.deepEqual(order, seen[0]);
+    // Unreadable first.
+    assert.deepEqual(seen[0].slice(0, 4).map(k => k.split('|')[1]).sort(), ['bad-a@fm', 'bad-b@fm', 'bad-c@fm', 'bad-c@fm']);
+    // The occurrence the server sent without a recurrenceId comes before the override.
+    assert.ok(
+      seen[0].indexOf('/cal/work/s.ics|s@fm||2027-03-02T09:00:00Z|S') < seen[0].indexOf('/cal/work/s.ics|s@fm|2027-03-05T09:00:00Z|2027-03-02T09:00:00Z|S'),
+      seen[0].join('\n'),
+    );
+  });
+});
+
+// The page is a slice of the fully sorted, window-filtered set (#169).
+describe('CalDAVCalendarClient.getCalendarEvents paging', () => {
+  before(() => setDefaultTimezone('Australia/Sydney'));
+  after(() => setDefaultTimezone(undefined));
+
+  const vevent = (uid: string, start: string, extra: string[] = []) => [
+    'BEGIN:VEVENT', `UID:${uid}`, `SUMMARY:${uid}`, `DTSTART:${start}`, ...extra, 'END:VEVENT',
+  ];
+  const ics = (...blocks: string[][]) =>
+    ['BEGIN:VCALENDAR', ...blocks.flat(), 'END:VCALENDAR'].join('\r\n');
+
+  // Five rows at 09:00Z on the 2nd: one UID in both calendars, a series' first occurrence
+  // with an override moved onto the same instant, and a one-off. One row either side.
+  const WORK = [
+    { url: '/cal/work/early.ics', data: ics(vevent('early@fm', '20270301T080000Z')) },
+    { url: '/cal/work/dup.ics', data: ics(vevent('dup@fm', '20270302T090000Z')) },
+    {
+      url: '/cal/work/s.ics',
+      data: ics(
+        vevent('s@fm', '20270302T090000Z'),
+        vevent('s@fm', '20270302T090000Z', ['RECURRENCE-ID:20270305T090000Z']),
+      ),
+    },
+    { url: '/cal/work/solo.ics', data: ics(vevent('solo@fm', '20270302T090000Z')) },
+  ];
+  const PERSONAL = [
+    { url: '/cal/personal/dup.ics', data: ics(vevent('dup@fm', '20270302T090000Z')) },
+    { url: '/cal/personal/late.ics', data: ics(vevent('late@fm', '20270303T090000Z')) },
+  ];
+
+  function pagingClient(reversed = false) {
+    const calendars = [
+      { displayName: 'Work', url: '/cal/work/' },
+      { displayName: 'Personal', url: '/cal/personal/' },
+    ];
+    const byCalendar: Record<string, typeof WORK> = { '/cal/work/': WORK, '/cal/personal/': PERSONAL };
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const mockDAVClient = makeMockDAVClient(reversed ? [...calendars].reverse() : calendars, {
+      fetchCalendarObjects: mock.fn(async (p: FetchObjectsParams) => {
+        const objects = byCalendar[p.calendar.url];
+        return reversed ? [...objects].reverse() : objects;
+      }),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  const WINDOW = ['2027-03-01', '2027-03-10'] as const;
+  const keyOf = (e: CalendarEvent) => `${e.url}|${e.id}|${e.recurrenceId ?? ''}`;
+
+  it('covers the whole sorted set once, with no row on two pages, at every page size', async () => {
+    const { client } = pagingClient();
+    const whole = await client.getCalendarEvents(undefined, 100, ...WINDOW);
+    assert.equal(whole.total, 7);
+    const wholeKeys = whole.events.map(keyOf);
+    assert.equal(new Set(wholeKeys).size, 7, wholeKeys.join('\n'));
+
+    for (const limit of [1, 2, 3]) {
+      const paged: string[] = [];
+      for (let position = 0; position < whole.total; position += limit) {
+        // A fresh client per page, its server answering in the opposite order, so the page
+        // boundary cannot lean on one read's arrival order.
+        const { client: fresh } = pagingClient(position % 2 === 1);
+        const page = await fresh.getCalendarEvents(undefined, limit, ...WINDOW, position);
+        assert.equal(page.total, 7);
+        assert.equal(page.position, position);
+        paged.push(...page.events.map(keyOf));
+      }
+      assert.deepEqual(paged, wholeKeys, `limit ${limit}`);
+    }
+  });
+
+  it('returns the same order whatever order the server answers in', async () => {
+    const forward = await pagingClient(false).client.getCalendarEvents(undefined, 100, ...WINDOW);
+    const backward = await pagingClient(true).client.getCalendarEvents(undefined, 100, ...WINDOW);
+    assert.deepEqual(backward.events.map(keyOf), forward.events.map(keyOf));
+  });
+
+  it('answers a position past the end with an empty page and the real total', async () => {
+    const { client } = pagingClient();
+    const page = await client.getCalendarEvents(undefined, 50, ...WINDOW, 99);
+    assert.deepEqual(page.events, []);
+    assert.equal(page.total, 7);
+    assert.equal(page.position, 99);
+  });
+
+  it('offers nextPosition exactly while rows remain', async () => {
+    const { client } = pagingClient();
+    const summary = async (limit: number, position?: number) =>
+      formatCalendarEventList(await client.getCalendarEvents(undefined, limit, ...WINDOW, position)).split('\n')[0];
+    assert.equal(await summary(3), 'Showing 3 of 7 results. nextPosition: 3 (pass position:3 for the next page).');
+    assert.equal(await summary(3, 3), 'Showing 3 of 7 results from position 3. nextPosition: 6 (pass position:6 for the next page).');
+    // A short last page and an exact last page both end the listing.
+    assert.equal(await summary(3, 6), 'Showing 1 of 7 results from position 6.');
+    assert.equal(await summary(4, 3), 'Showing 4 of 7 results from position 3.');
   });
 });
 
