@@ -6,12 +6,23 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // load-env-file.ts loads the real home's file as a side effect of being imported, so the
-// home is pointed at an empty temp dir first and the module is imported dynamically after.
+// home is pointed at a temp dir first and the module is imported dynamically after. That
+// home holds a file setting IMPORT_SENTINEL, which pins the load done at import.
 const SANDBOX = mkdtempSync(join(tmpdir(), 'fastmail-mcp-env-file-'));
+const IMPORT_SENTINEL = 'FASTMAIL_MCP_ENV_FILE_IMPORT_SENTINEL';
+delete process.env[IMPORT_SENTINEL];
+mkdirSync(join(SANDBOX, '.fastmail-mcp'));
+writeFileSync(join(SANDBOX, '.fastmail-mcp', '.env'), `${IMPORT_SENTINEL}=loaded-at-import\n`);
 process.env.HOME = SANDBOX;
 process.env.USERPROFILE = SANDBOX;
 const { loadHomeEnvFile, envFilePath } = await import('./load-env-file.js');
+const sentinelAfterImport = process.env[IMPORT_SENTINEL];
+delete process.env[IMPORT_SENTINEL];
 after(() => rmSync(SANDBOX, { recursive: true, force: true }));
+
+it('loads the home .env when imported', () => {
+  assert.equal(sentinelAfterImport, 'loaded-at-import');
+});
 
 const VAR = 'FASTMAIL_MCP_ENV_FILE_TEST_VAR';
 
@@ -77,8 +88,10 @@ describe('loadHomeEnvFile', () => {
   it('throws saying plainly that the path is a directory', () => {
     const home = homeWith(null);
     mkdirSync(envFilePath(home), { recursive: true });
-    assert.throws(() => loadHomeEnvFile(home), {
-      message: `${envFilePath(home)} is a directory, not a file`,
+    assert.throws(() => loadHomeEnvFile(home), (err: Error) => {
+      assert.equal(err.message, `${envFilePath(home)} is a directory, not a file`);
+      assert.ok(err.cause instanceof Error, "Node's own error is kept as the cause");
+      return true;
     });
   });
 
@@ -98,7 +111,7 @@ describe('loadHomeEnvFile', () => {
       try {
         assert.throws(
           () => loadHomeEnvFile(home),
-          (err: Error) => err.message.includes(envFilePath(home)),
+          (err: Error) => err.message.includes(envFilePath(home)) && err.cause instanceof Error,
         );
       } finally {
         chmodSync(envFilePath(home), 0o600);
