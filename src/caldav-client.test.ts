@@ -1108,6 +1108,12 @@ describe('validateAndFormatICalDate', () => {
     assert.throws(() => validateAndFormatICalDate('2026-06-31T10:00:00', 'start'), /not a real calendar date/);
   });
 
+  it('refuses year 0000, which RFC 5545 DATE and DATE-TIME cannot name', () => {
+    assert.throws(() => validateAndFormatICalDate('0000-01-01', 'start'), /start has year 0000/);
+    assert.throws(() => validateAndFormatICalDate('0000-01-01T10:00:00Z', 'start'), /start has year 0000/);
+    assert.equal(validateAndFormatICalDate('0001-01-01', 'start'), '00010101');
+  });
+
   it('classes every rejection as caller-fixable input', () => {
     for (const bad of ['garbage', '2026-02-31', '2026-04-18T10:00:00Z\r\nX', 42 as any]) {
       assert.throws(
