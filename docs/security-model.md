@@ -1,4 +1,4 @@
-# Path-confinement security model
+# Security model
 
 Two tools touch the local filesystem: attachment download (writes a file, under
 `FASTMAIL_DOWNLOAD_DIR`) and send-with-attachment (reads a file, under
@@ -116,9 +116,8 @@ them a broad probe — acceptable as an explicit operator choice).
 These are the honest limits of a path guard; the opt-in gate and confinement are the
 primary defense, not a claim that exfiltration is impossible once enabled.
 
-Two more residuals of a different kind, recorded here so the whole accepted set reads in one
-place. Both belong to the embedded-image carry (#13), which moves message parts outward
-without reading a byte off disk, so no path guard is in play at all:
+Two more residuals belong to the embedded-image carry (#13), which moves message parts
+outward without reading a byte off disk, so no path guard is in play at all:
 
 - **No count or size cap on carried images.** A quote or forwarded block carries every
   image the body it reproduces displays. There is no ceiling on how many, and none on how
@@ -171,7 +170,7 @@ part's `disposition`, `cid` and `name`) for one purpose: the sentence that repor
 embedded images the transmitted message carried. It is a **receipt, computed after the
 submission** — never a send-time vet. Nothing in that listing can refuse a send.
 
-That is a deliberate split, not an oversight. `send_draft` submits the stored draft **by
+`send_draft` submits the stored draft **by
 reference**: it transmits exactly the bytes already saved, and it cannot rewrite them. A
 refusal there would therefore strand a finished message with no in-place repair, which is
 why every refusal over message *shape* lives on the edit path instead, where the draft can
@@ -216,14 +215,11 @@ threaded into the refusal builders is the combination, not the attach directory 
   verbatim, and the consumer of the name is the *receiving* client's save dialog — which is
   the layer that sanitizes save names. Same posture as `edit_draft`'s pre-existing
   attachment carry (which also relays stored names verbatim across the recreate).
-- **The tool-GENERATED `.eml` filename is sanitized** — the one name this server *creates*
-  (`asAttachment`, derived from the original's attacker-controlled subject) is held to a
-  higher bar than names it merely relays: control chars (`\p{Cc}`, C0+C1) and Unicode
-  format/bidi controls (`\p{Cf}`, e.g. U+202E extension spoofing) stripped, path
-  separators and the Windows drive/ADS colon replaced, leading dots stripped, length
-  capped; a blank result falls back to `forwarded-message.eml`. Windows reserved device
-  names (`CON`, `NUL`, …) deliberately survive as e.g. `CON.eml` — a save-time nuisance the
-  receiving client handles, consistent with the relay posture above.
+- **The tool-GENERATED `.eml` filename is sanitized**: the one name this server *creates*
+  (`asAttachment`, derived from the original's attacker-controlled subject) goes through
+  `sanitizeEmlFilename` (see "Filenames derived from message content" above for its
+  treatment and why device names such as `CON.eml` deliberately survive); a blank result
+  falls back to `forwarded-message.eml`.
 - **`asAttachment` raw-blob exposure (accepted, disclosed).** The attached `.eml` is the
   stored RFC 5322 message, byte-identical. Probed live 2026-07-05: a **Sent-copy blob
   retains the `Bcc` header** (forwarding your own sent mail as `.eml` discloses its Bcc
@@ -234,11 +230,9 @@ threaded into the refusal builders is the combination, not the attach directory 
   Subject/Date block. `draft_email`'s `asAttachment` description and the README disclose
   this; it is the caller's deliberate trade for losslessness.
 - **Outgoing size is unbounded by this server on the carry/.eml paths (accepted).**
-  `MAX_ATTACHMENT_BYTES` caps only *local uploads* (files this server reads off disk);
-  carried originals and the `.eml` are blobId **re-references** never read client-side, so
-  no client-side cap applies — Fastmail's own message-size limit governs, and an oversized
-  send fails loudly server-side. Parity with `edit_draft`'s carry, which re-references the
-  same way.
+  Carried originals and the `.eml` are blobId **re-references** never read client-side, so
+  `MAX_ATTACHMENT_BYTES` (local uploads only) does not apply; Fastmail's own message-size
+  limit governs, as for carried images above. Parity with `edit_draft`'s carry.
 
 ## Calendar attendees are an outbound-mail path that bypasses draft-first
 
@@ -303,7 +297,7 @@ the DEFAULT output of every list, search and get, with no `raw` needed. So with 
 a caller holding ordinary read output can attach a **complete raw RFC822 message** — the same
 bytes an `asAttachment` forward produces, with the full transport-header and
 Sent-copy-`Bcc` exposure documented above — to a fresh draft that carries none of a forward's
-provenance. It is not true that blobIds only come from attachment reads.
+provenance.
 
 **Decision: `blobId` is NOT restricted to ids surfaced by `get_email_attachments`.** The
 restriction was considered and declined, on the grounds that it would cost real capability
@@ -428,8 +422,7 @@ Accepted on the same footing as the read-and-embed primitive.
 The exact-instance header that `draft_email` stamps on a reply or forward draft is **not
 stripped at send** — EmailSubmission transmits stored headers verbatim (probed live
 2026-08-14; see `docs/conventions.md` "Draft provenance" for the probe facts), so the
-recipient's copy carries it. This was considered and consciously declined rather than
-overlooked:
+recipient's copy carries it.
 
 - **What it discloses:** an opaque, account-scoped JMAP id. It is meaningless outside
   the sending account's own session — it names no host, no folder, no address, and
@@ -457,8 +450,7 @@ default with a hidden-count note. The accepted residuals:
 - **The hidden-count note is TRANSPARENCY for a cooperative reader, not an injection control.**
   `get_mailbox_stats mailbox:"junk"` returns Trash/Spam totals directly with zero friction, and
   `list_emails mailbox:"trash"` reads them outright — so a determined/injected agent
-  trivially bypasses the note. Its purpose is honesty (disclose what default-scope hid), not a
-  boundary. The fail-closed degraded note exists so the published "no note ⇒ nothing was
+  trivially bypasses the note. The fail-closed degraded note exists so the published "no note ⇒ nothing was
   withheld" contract can be *trusted by a cooperative caller*, not to stop an attacker. Read
   that contract precisely: the exclusion is solely-in, so what the silence promises is that no
   message filed **only** in Trash/Spam matched — a message cross-filed in Trash and a normal
@@ -489,20 +481,15 @@ default with a hidden-count note. The accepted residuals:
   `bulk_remove_labels` resolve their `mailboxes` arrays by exact id/role/name/path too, so an
   injected agent can label a message into e.g. `"trash"` blind-one-shot-by-name, the same modest
   escalation as move. Accepted on the same footing; not a new capability class.
-- **The path form (#27), and the collision it made reachable on write paths.**
-  A root-anchored path is still exact matching over mailboxes a bare name could already reach, so
-  it mostly just disambiguates. But the tie rule (**an exact flat name wins over reading the same
-  text as a path**) would have a real consequence on write paths: if a top-level folder is
-  literally named `A/B` while a real `A > B` nesting also exists, it would file
-  `move_email targetMailbox:"A/B"` into the flat folder, silently, even though the same text
-  describes the nesting — and anyone who can create a folder can set that collision up, so treat
-  it as reachable by a caller who wants it. **So that case is refused**: a reference matching one flat name AND
-  a *different* mailbox by path is rejected as ambiguous, naming both with their ids, so the write
-  does not land anywhere until the caller picks one. The tie-break survives only where nothing
-  else answers to the same text, which is what keeps a folder whose own name contains the
-  separator reachable by that name. What remains accepted is the retry cost: a caller that meant
-  the flat folder now has to name it by id, which is the cheaper side of the trade against a
-  message filed where it was not meant to go.
+- **The path form (#27) on write paths.** A root-anchored path is still exact matching over
+  mailboxes a bare name could already reach, so it mostly just disambiguates. Its one risk is
+  a collision anyone who can create a folder can set up: a top-level folder literally named
+  `A/B` beside a real `A > B` nesting, where the flat-name tie-break would file
+  `move_email targetMailbox:"A/B"` into the flat folder silently. A reference matching one flat
+  name AND a *different* mailbox by path is therefore refused as ambiguous, naming both with
+  their ids (the resolver rule is in `docs/conventions.md`). What remains accepted is the retry
+  cost: a caller that meant the flat folder has to name it by id, the cheaper side of the trade
+  against a message filed where it was not meant to go.
 - **`create_mailbox` adds no concealment reach.** It lets a caller mint a destination rather than
   pick one, but concealment comes from the *move*, and `move_email` into an existing folder already
   conceals with zero disclosure (the bullet below). Creating the folder first only decides where
@@ -537,32 +524,26 @@ default with a hidden-count note. The accepted residuals:
     verb can touch, but claim nothing for it as a control: it is parity with the client, and every
     one of those messages remains reachable through `move_email`.
 - **`archive_email`'s destination is EXACT-ROLE ONLY, and that is a real (small) hardening.**
-  Its destination is not caller-supplied at all: no `targetMailbox`, no name fallback, role
-  lookup only. It shares that shape with `delete_email`/`bulk_delete`, whose Trash is found the
-  same way, and those three are the only destinations on the server that work like it (see the
-  resolver section of `docs/conventions.md`). The **Inbox it removes** is resolved the same way and
-  needs to be: a folder anyone can create and name "Inbox" must not become the membership this verb
-  strips. The reason is that a caller can
-  create a mailbox literally *named* `archive`; had the tool resolved names, "archive this" (a
-  phrase an untrusted message body can plant) would file mail into an attacker-chosen folder
+  Archive, and the Inbox it removes, are found by role with no name fallback (the rule and
+  the other tools that share it are in the resolver section of `docs/conventions.md`). Had
+  the tool resolved names, a caller-created folder named `archive` would let "archive this"
+  (a phrase an untrusted message body can plant) file mail into an attacker-chosen folder
   under the innocuous verb. Against a *deliberate* attacker holding `move_email` this changes
   nothing (they name the folder outright). It removes the case where a **cooperative** agent
   running an innocuous instruction is steered by a folder someone else created.
 - **Resolver error message is an information oracle, reachable account-wide.** A bad `mailbox`/
   `targetMailbox`/`mailboxes` to *any* swept tool (search, list, stats, move, compose, labels)
   reflects the caller's input and a capped list of mailbox **paths** reachable by the configured
-  token - these are full paths (#27), so the oracle also discloses the *shape* of the folder
-  tree (which folder nests under which), not just the set of names. That
-  is a slightly richer disclosure of the same material, accepted for the same reason: it is what
-  makes the error recoverable, and it is the caller's own reachable tree. The real boundary is the
-  token's reach, not "the user's own account" — a delegated/scoped token sees only its slice. Every value the message reflects - the caller's
-  input and each mailbox path and role - is rendered through `describeUntrusted`, so a mailbox
-  name carrying a line break cannot forge what reads as a further sentence of server output,
-  and a name long enough to swamp the message is truncated with a visible ellipsis (#131).
-  `InvalidInputError` messages are run through
-  `redactBearerTokens` as defense-in-depth (a token can't actually appear in them), but that is
-  **not** what makes the oracle acceptable — recoverability (naming valid mailboxes so a caller
-  can retry) is, and it's the caller's own reachable tree. Accepted, capped, framed honestly.
+  token. These are full paths (#27), so the oracle also discloses the *shape* of the folder
+  tree, not just the set of names. Accepted because it is what makes the error recoverable
+  (naming valid mailboxes so a caller can retry), and the tree is the caller's own reach. The
+  real boundary is the token's reach, not "the user's own account": a delegated/scoped token
+  sees only its slice. Every value the message reflects (the caller's input and each mailbox
+  path and role) is rendered through `describeUntrusted`, so a mailbox name carrying a line
+  break cannot forge what reads as a further sentence of server output, and a name long enough
+  to swamp the message is truncated with a visible ellipsis (#131). `InvalidInputError`
+  messages are also run through `redactBearerTokens` as defense-in-depth (a token can't
+  actually appear in them), but that is **not** what makes the oracle acceptable.
 - **`get_mailbox_stats` and the label tools reject a real id that is absent from the fetched
   list.** Reading stats off the shared `getMailboxes()` list (and resolving label `mailboxes`
   against it) means a hidden/role-less mailbox's id now throws `InvalidInputError` rather than
@@ -731,12 +712,8 @@ Four things about that line are load-bearing, each established by running it:
   `node_modules/tsdav/node_modules/debug`, and the suppression would silently stop
   applying with no other symptom.
 
-`src/built-server.test.ts` holds this down against the real library rather than a mock: a
-control case asserts the account identity *does* reach stderr from a bare tsdav call under
-`DEBUG=*` (so the suppression test cannot go vacuous the day tsdav stops logging), a paired
-case asserts that neither the identity nor the base64 credential appears once the built
-server has loaded, and two further cases assert that tsdav resolves the same `debug` copy
-and that the skip glob covers every namespace the installed build actually creates. The
-control keys on the identity rather than the passphrase deliberately — which of the two
-tsdav prints is tsdav's choice and has already changed once, so pinning the exact secret
-form would turn a routine dependency bump red for no security reason.
+`src/built-server.test.ts` holds this down against the real library rather than a mock: it
+asserts the suppression on the built server, that tsdav resolves the same `debug` copy, and
+that the skip glob covers every namespace the installed build creates, beside a control case
+that keeps the suppression test from going vacuous (its comment says why it keys on the
+account identity rather than the passphrase).
