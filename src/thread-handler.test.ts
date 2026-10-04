@@ -75,7 +75,7 @@ describe('readThread — flag wiring', () => {
   });
 });
 
-describe('readThread — sentAt (#84)', () => {
+describe('readThread sentAt (#84)', () => {
   for (const includeBodies of [false, true]) {
     it(`returns sentAt with includeBodies ${includeBodies}`, async () => {
       const { client } = makeClient([makeEmail('e1', 'hello', { sentAt: '2026-06-15T03:28:00Z' })]);

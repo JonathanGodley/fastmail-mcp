@@ -192,7 +192,6 @@ export function projectEmail(
 // response keeps its default size; each is still a valid `fields` name.
 export const LIST_OPT_IN_FIELDS: readonly (keyof SimplifiedEmail)[] = ['sentAt'];
 
-/** projectEmail for the list tools: with no `fields`, the opt-in fields are dropped. */
 export function projectListEmail(
   email: SimplifiedEmail,
   fields: ReadonlySet<string> | undefined,
