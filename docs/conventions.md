@@ -2498,8 +2498,9 @@ declines to re-encode) and from an unmatched embedded-image reference (which nam
 that was not there). It is a **map-mode-only** count, because `collect` drops none of these
 — it leaves them to the sanitiser, which passes a relative URL through. The count, like
 the `data:` image count, is reported whenever the message ships html and quotes the
-original, including as text because nothing in its html survived. With no quote at all
-nothing is counted, since the note says the rest of the quote was kept. An `<img>` with no `src` at all is not
+original, including as text because nothing in its html survived. A reply with no quote at
+all counts nothing, since the note says the rest of the quote was kept; a forward always
+counts, since its header block always ships. An `<img>` with no `src` at all is not
 counted; there was no image to lose.
 
 Quotability is read from pass one's html, so an image counts only if it would ship. An

@@ -418,15 +418,22 @@ describe('the image outcome the builders report', () => {
     }
   });
 
-  it('reports no dropped image when nothing of the original is quoted', () => {
+  it('reports no dropped image on a reply when nothing of the original is quoted', () => {
     for (const img of ['<img src="/logo.png">', '<img src="//cdn.example.com/a.png">', '<img src="data:image/png;base64,AA">']) {
-      const nothing = original(img);
-      const quoteImages = { sourceParts: [] };
-      for (const { images } of [
-        buildQuoteBlocks({ original: nothing, htmlShips: true, quoteImages }),
-        buildForwardBlocks({ original: nothing, htmlShips: true, quoteImages }),
-      ]) {
-        assert.deepEqual([images.droppedDataImages, images.droppedUnsupportedImages], [0, 0], img);
+      const { images } = buildQuoteBlocks({ original: original(img), htmlShips: true, quoteImages: { sourceParts: [] } });
+      assert.deepEqual([images.droppedDataImages, images.droppedUnsupportedImages], [0, 0], img);
+    }
+  });
+
+  it('reports a forward\'s dropped images when they were all the original had, since its header block still ships', () => {
+    for (const [img, counts] of [
+      ['<div><img src="data:image/png;base64,AAAA"></div>', [1, 0]],
+      ['<img src="/logo.png">', [0, 1]],
+      ['<img src="//cdn.example.com/a.png">', [0, 1]],
+    ] as const) {
+      for (const quoteImages of [{ sourceParts: [] }, undefined]) {
+        const { images } = buildForwardBlocks({ original: original(img), htmlShips: true, quoteImages });
+        assert.deepEqual([images.droppedDataImages, images.droppedUnsupportedImages], counts, img);
       }
     }
   });

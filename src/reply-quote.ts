@@ -414,9 +414,6 @@ export function buildForwardBlocks(input: {
   const collected = collectQuoteRefs(origHtml, quoteImages);
   const htmlQuotable = collected.quotable;
   const textQuotable = !isBlank(origText);
-  // The dropped-image notes say the rest of the quote was kept, so with no quote they
-  // count nothing.
-  const quoted = htmlQuotable || textQuotable;
 
   const lines = forwardHeaderLines(original);
   const headerText = lines.join('\n');
@@ -456,8 +453,10 @@ export function buildForwardBlocks(input: {
       mappings: resolved?.mappings ?? [],
       resolvedParts: collected.resolvedParts,
       unresolvedRefs: collected.unresolvedRefs,
-      droppedDataImages: quoted && htmlShips ? collected.droppedDataImages : 0,
-      droppedUnsupportedImages: quoted && htmlShips ? collected.droppedUnsupportedImages : 0,
+      // Counted even over nothing quotable, unlike a reply's: the header block always ships,
+      // so an image-only original's images would otherwise vanish unreported.
+      droppedDataImages: htmlShips ? collected.droppedDataImages : 0,
+      droppedUnsupportedImages: htmlShips ? collected.droppedUnsupportedImages : 0,
       htmlQuoteShips,
     },
   };
