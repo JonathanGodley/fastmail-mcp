@@ -2070,7 +2070,12 @@ describe('formatArchiveResult', () => {
 
   it('renders a failure that carries no reason at all', () => {
     const text = build([{ id: 'a', action: 'failed' }]);
-    assert.match(text, /^Archive: 1 email\(s\), 0 changed\.\n- 1 failed .*: a\.$/);
+    assert.equal(text, 'Archive: 1 email(s), 0 changed.\n- 1 failed: a.');
+  });
+
+  it('renders a failure whose reason slots are not strings as having no reason', () => {
+    const text = build([{ id: 'a', action: 'failed', reason: { setErrorType: { p: 1 }, description: 5 } }]);
+    assert.equal(text, 'Archive: 1 email(s), 0 changed.\n- 1 failed: a.');
   });
 
   it('lists exactly ten mailbox names with no overflow count', () => {

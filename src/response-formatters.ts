@@ -618,7 +618,7 @@ export function formatArchiveResult(result: ArchiveResult): string {
     }
     const groups = [...byReason.values()];
     for (const { rendered, ids } of groups.slice(0, ARCHIVE_REASON_CAP)) {
-      lines.push(`${ids.length} failed (${rendered}): ${listIds(ids)}.`);
+      lines.push(`${ids.length} failed${rendered ? ` (${rendered})` : ''}: ${listIds(ids)}.`);
     }
     if (groups.length > ARCHIVE_REASON_CAP) {
       const rest = groups.slice(ARCHIVE_REASON_CAP);
