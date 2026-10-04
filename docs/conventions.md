@@ -1761,7 +1761,10 @@ when `start` itself is absent) rather than against the configured zone directly 
 zones, the flight-lands-elsewhere case (#140 — permitted, and ordered on instants), so
 `endTimeZone` is how that legal shape is disclosed on read. A `DURATION`-computed `end` has no raw `DTEND` line to
 classify at all, so it reads back `absent` and `endTimeZone` omits — a computed end shares
-`start`'s zone by construction, so there is nothing to disagree about.
+`start`'s zone by construction, so there is nothing to disagree about. When the computed
+instant falls in the second pass through a repeated hour of `start`'s zone, no wall clock
+there names it (a repeated clock reads as its first occurrence), so it is returned as a UTC
+`Z` value, which describes itself.
 
 **One: the returned `start`/`end` is a bare wall clock, and a caller does not have to guess
 whether that means "floating" or "the configured zone".** Both read tools' descriptions state

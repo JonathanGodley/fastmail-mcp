@@ -2868,8 +2868,33 @@ describe('parseICalDuration from a zoned start', () => {
 
   it('resolves a nominal end in the repeated hour to the earlier instant', () => {
     // 02:30 on 5 April happens twice: 15:30Z (AEDT) and 16:30Z (AEST). An hour on from the
-    // earlier is 16:30Z, 02:30 AEST; from the later it would be 17:30Z, 03:30 AEST.
-    assert.equal(parseICalDuration('P1DT1H', '2026-04-04T02:30:00', SYDNEY), '2026-04-05T02:30:00');
+    // earlier is 16:30Z, the second 02:30, which a bare 02:30 would read back as 15:30Z; from
+    // the later it would be 17:30Z.
+    assert.equal(parseICalDuration('P1DT1H', '2026-04-04T02:30:00', SYDNEY), '2026-04-04T16:30:00Z');
+  });
+
+  it('gives an end in the second occurrence of a repeated hour in UTC, and one in the first as a wall clock', () => {
+    // New York falls back 02:00 EDT -> 01:00 EST on 1 November 2026. 00:30 EDT is 04:30Z.
+    // PT1H is 05:30Z, the first 01:30 (EDT); PT2H is 06:30Z, the second 01:30 (EST).
+    const NEW_YORK = 'America/New_York';
+    assert.equal(parseICalDuration('PT1H', '2026-11-01T00:30:00', NEW_YORK), '2026-11-01T01:30:00');
+    assert.equal(parseICalDuration('PT2H', '2026-11-01T00:30:00', NEW_YORK), '2026-11-01T06:30:00Z');
+  });
+
+  it('reads a DURATION event ending in the second occurrence of a repeated hour with a UTC end and no endTimeZone', () => {
+    const data = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      'UID:fall-back-duration@example.com',
+      'DTSTART;TZID=America/New_York:20261101T003000',
+      'DURATION:PT2H',
+      'SUMMARY:Late session',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const event = parseCalendarObject({ data, url: '' }, { configuredZone: 'UTC' });
+    assert.equal(event.end, '2026-11-01T06:30:00Z');
+    assert.equal(event.endTimeZone, undefined);
   });
 
   it('gives no end when the end falls outside years 0001-9999', () => {

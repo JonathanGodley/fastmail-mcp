@@ -969,9 +969,10 @@ function formatWallClockIso(ms: number): string {
  * outside years 0001-9999, which have no iCalendar form.
  *
  * `tzid` is the start's zone. A wall-clock start in a zone ICU can resolve gets the RFC 5545
- * §3.3.6 split (`resolveDurationEndMs`) and its end is that zone's wall clock. Every other
- * start is plain arithmetic: exact for a UTC or date-only start, and for a floating one or one
- * whose TZID cannot be resolved (a vendor name), on its wall clock with no transitions.
+ * §3.3.6 split (`resolveDurationEndMs`) and its end is that zone's wall clock, or a `Z` value
+ * where no wall clock names it. Every other start is plain arithmetic: exact for a UTC or
+ * date-only start, and for a floating one or one whose TZID cannot be resolved (a vendor
+ * name), on its wall clock with no transitions.
  */
 export function parseICalDuration(duration: string, start: string, tzid?: string): string | undefined {
   const inYearRange = (ms: number) => {
@@ -986,7 +987,12 @@ export function parseICalDuration(duration: string, start: string, tzid?: string
     // An exact part can push the end past Date's range, where `zoneOffsetMsAt` throws.
     if (Number.isNaN(new Date(endMs).getTime())) return undefined;
     const wallMs = endMs + zoneOffsetMsAt(endMs, tzid);
-    return inYearRange(wallMs) ? formatWallClockIso(wallMs) : undefined;
+    if (!inYearRange(wallMs)) return undefined;
+    const wallIso = formatWallClockIso(wallMs);
+    // A repeated wall clock reads back as its first occurrence, so the second has no wall
+    // clock in this zone and is given in UTC.
+    if (resolveCalendarInstantMs(wallIso, tzid) === endMs) return wallIso;
+    return inYearRange(endMs) ? new Date(endMs).toISOString().replace(/\.\d{3}Z$/, 'Z') : undefined;
   }
 
   const parsed = parseICalDurationComponents(duration);
@@ -1309,7 +1315,8 @@ function attachEndZone(event: CalendarEvent, startDesc: ZoneDescriptor, vevent: 
  *
  * The DURATION branch in `parseVEvent` calls `attachStartZone` alone, deliberately: an empty
  * `DTEND;TZID=Europe/Paris:` takes that branch but still reads as `zoned`, and would leak a zone
- * that never computed `end`. A DURATION-computed end shares start's frame by construction.
+ * that never computed `end`. A DURATION-computed end shares start's frame by construction, or
+ * is a self-describing `Z` value when it falls in the second pass through a repeated hour.
  */
 function attachZoneFields(event: CalendarEvent, vevent: string, configuredZone: string): void {
   const startDesc = attachStartZone(event, vevent, configuredZone);
