@@ -1425,10 +1425,12 @@ signals belong on it too; a `raw` caller additionally has the JMAP response's ow
   descriptions and README say so).
 - **`position: 0` and an omitted `position` are the same request.** 0 is the JMAP
   default, so the parameter is only put on the wire when it is non-zero.
-- **A position past the end is not an error.** JMAP clamps it and returns an empty page
-  with the real total, which is self-describing ("0 of 137 results from position 500")
-  and idempotent, so the caller sees it overshot and re-asks. Rejecting it would add a
-  failure mode for a case that already explains itself.
+- **A position past the end is not an error.** Every paged tool returns an empty page
+  with the real total, which is self-describing and idempotent, so the caller sees it
+  overshot and re-asks. Rejecting it would add a failure mode for a case that already
+  explains itself. The email and calendar summaries also name the position ("0 of 137
+  results from position 500"). The contacts summary does not: per the Cyrus source, not a
+  measurement, a past-the-end `ContactCard/query` reports position 0.
 - **The coercion is the loud-reject side of the lenient-value rule** (`coercePosition`
   in `src/coerce.ts`): a stringified `"40"` is accepted, but a negative value, a
   fraction, or garbage is refused. Negative is the load-bearing one — JMAP reads a
