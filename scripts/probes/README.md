@@ -3,7 +3,9 @@
 On-demand live verification scripts for externally-observable behavior that unit
 tests cannot prove (Fastmail's blob store, MIME assembly, keyword writes). They
 run the built server (`dist/index.js`) over real JMAP against the configured
-account, via `scripts/mcp-harness.mjs`.
+account, via `scripts/mcp-harness.mjs`. The harness gives the server an empty temp
+home, so the token comes from the environment, not `~/.fastmail-mcp/.env`; a probe
+that saves a download to the default directory passes `inheritHome: true`.
 
 These are **not** durable regression coverage - the unit suite is. A probe run
 proves the real external path once, on demand (typically before a release or

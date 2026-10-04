@@ -21,7 +21,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -40,6 +40,27 @@ const require = createRequire(join(REPO_ROOT, 'package.json'));
 // value-based redaction of the literal registered at startup, so if it comes back
 // clean, registration-based redaction is what did it.
 const FAKE_API_VALUE = 'probe-value-not-a-real-credential';
+
+// Each spawned server gets an empty home of its own, so the ~/.fastmail-mcp/.env of the
+// machine running the tests is never read.
+const HOMES_ROOT = mkdtempSync(join(tmpdir(), 'fastmail-mcp-test-homes-'));
+after(() => rmSync(HOMES_ROOT, { recursive: true, force: true, maxRetries: 3 }));
+
+function freshHome(): string {
+  return mkdtempSync(join(HOMES_ROOT, 'home-'));
+}
+
+// The ambient environment minus every FASTMAIL_* name, so a developer's real settings can
+// never be the thing under test, with HOME and USERPROFILE at `home`.
+function testEnv(home: string = freshHome()): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+  }
+  env.HOME = home;
+  env.USERPROFILE = home;
+  return env;
+}
 
 // `npm test`'s `pretest` builds first, but `tsx --test src/built-server.test.ts` run
 // directly skips it, and a stale dist/ would then pass these tests using the previous
@@ -81,13 +102,7 @@ describe('every error path reaching tool output is redacted', () => {
     const allowedDir = mkdtempSync(join(tmpdir(), 'fastmail-mcp-allowed-'));
     outsidePath = join(tmpdir(), `fastmail-mcp-outside-${FAKE_API_VALUE}.txt`);
 
-    // Build the child env explicitly: strip every FASTMAIL_* name the server
-    // consults so a developer's real credentials in the ambient environment can
-    // never be the thing under test, then inject the synthetic one.
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
     env.FASTMAIL_ATTACH_DIR = allowedDir;
     env.FASTMAIL_DOWNLOAD_DIR = allowedDir;
@@ -184,10 +199,7 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
   // given flag value. Every FASTMAIL_* name is stripped from the child environment first, so
   // an ambient setting cannot be what the assertion sees.
   async function attachmentsClause(value: string | undefined): Promise<string> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
     if (value !== undefined) env.FASTMAIL_ALLOW_BLOB_ATTACH = value;
 
@@ -272,10 +284,7 @@ describe('edit_draft advertises the clearFields enum on its array elements', () 
   // The advertised inputSchema of one tool, from a server started with no FASTMAIL_* setting
   // beyond the token, so an ambient value cannot be what the assertion sees.
   async function toolSchema(name: string): Promise<any> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
     const client = createClient({ env });
@@ -398,10 +407,7 @@ describe('array-side schema drift guard (#98)', () => {
   // assertion instead.
   before(async () => {
     assertDistIsCurrent();
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
     try {
@@ -575,10 +581,7 @@ describe('the calendar write tools advertise transparency with its closed value 
   // Both tools off ONE listing: the fact under test is that each declares the parameter, and
   // spawning the server twice to learn it would double the cost for nothing.
   async function listedTools(): Promise<any[]> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
     const client = createClient({ env });
@@ -636,10 +639,7 @@ describe('an unusable FASTMAIL_TIMEZONE refuses to start the built server', () =
   // credential is needed, so a startup failure here must not be mistaken for a missing-token
   // failure.
   function envWithTimezone(value: string | undefined): Record<string, string> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     if (value !== undefined) env.FASTMAIL_TIMEZONE = value;
     return env;
   }
@@ -771,7 +771,7 @@ describe('tsdav credential logging is suppressed', () => {
     return spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
-      env: { ...process.env, DEBUG: '*' },
+      env: { ...testEnv(), DEBUG: '*' },
     });
   }
 
@@ -881,10 +881,7 @@ describe('tsdav credential logging is suppressed', () => {
 describe('a tools/call with no arguments object', () => {
   it('is read as empty arguments, so a required parameter is named', async () => {
     assertDistIsCurrent();
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
     const child = spawn(process.execPath, [SERVER_ENTRY], { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -936,10 +933,7 @@ describe('update_calendar_event clearFields', () => {
   for (const clearFields of [{ location: true }, 42, false]) {
     it(`refuses a clearFields of ${JSON.stringify(clearFields)} rather than ignoring it`, async () => {
       assertDistIsCurrent();
-      const env: Record<string, string> = {};
-      for (const [k, v] of Object.entries(process.env)) {
-        if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-      }
+      const env = testEnv();
       env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
       const client = createClient({ env });
       try {
