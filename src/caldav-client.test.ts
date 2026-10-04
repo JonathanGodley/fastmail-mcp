@@ -2804,6 +2804,15 @@ describe('parseICalDuration', () => {
     assert.equal(parseICalDuration('PT1H', '9999-12-31T22:00:00'), '9999-12-31T23:00:00');
   });
 
+  it('gives no end for a start in no shape it reads, rather than one read in the host zone', () => {
+    // An expanded-year start parses, but as process-local time, and formatICalDate passes
+    // through a DTSTART value it does not recognise.
+    assert.equal(parseICalDuration('PT1H', '+002026-04-01T10:00:00'), undefined);
+    assert.equal(parseICalDuration('PT1H', '+002026-04-01T10:00:00', 'Australia/Sydney'), undefined);
+    assert.equal(parseICalDuration('PT1H', '2026-04-01T10:00:00+10:00'), '2026-04-01T01:00:00Z');
+    assert.equal(parseICalDuration('PT1H', '2026-04-01T10:00:00-0500'), '2026-04-01T16:00:00Z');
+  });
+
   it('gives no end for a floating start when the end falls outside years 0001-9999', () => {
     assert.equal(parseICalDuration('-P400D', '0001-01-01T10:00:00'), undefined);
     assert.equal(parseICalDuration('P2D', '9999-12-31T10:00:00'), undefined);
