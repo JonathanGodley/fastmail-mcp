@@ -21,7 +21,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
@@ -40,6 +40,27 @@ const require = createRequire(join(REPO_ROOT, 'package.json'));
 // value-based redaction of the literal registered at startup, so if it comes back
 // clean, registration-based redaction is what did it.
 const FAKE_API_VALUE = 'probe-value-not-a-real-credential';
+
+// Each spawned server gets an empty home of its own, so the ~/.fastmail-mcp/.env of the
+// machine running the tests is never read.
+const HOMES_ROOT = mkdtempSync(join(tmpdir(), 'fastmail-mcp-test-homes-'));
+after(() => rmSync(HOMES_ROOT, { recursive: true, force: true, maxRetries: 3 }));
+
+function freshHome(): string {
+  return mkdtempSync(join(HOMES_ROOT, 'home-'));
+}
+
+// The ambient environment minus every FASTMAIL_* name, so a developer's real settings can
+// never be the thing under test, with HOME and USERPROFILE at `home`.
+function testEnv(home: string = freshHome()): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
+  }
+  env.HOME = home;
+  env.USERPROFILE = home;
+  return env;
+}
 
 // `npm test`'s `pretest` builds first, but `tsx --test src/built-server.test.ts` run
 // directly skips it, and a stale dist/ would then pass these tests using the previous
@@ -81,13 +102,7 @@ describe('every error path reaching tool output is redacted', () => {
     const allowedDir = mkdtempSync(join(tmpdir(), 'fastmail-mcp-allowed-'));
     outsidePath = join(tmpdir(), `fastmail-mcp-outside-${FAKE_API_VALUE}.txt`);
 
-    // Build the child env explicitly: strip every FASTMAIL_* name the server
-    // consults so a developer's real credentials in the ambient environment can
-    // never be the thing under test, then inject the synthetic one.
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
     env.FASTMAIL_ATTACH_DIR = allowedDir;
     env.FASTMAIL_DOWNLOAD_DIR = allowedDir;
@@ -184,10 +199,7 @@ describe('FASTMAIL_ALLOW_BLOB_ATTACH is parsed strictly', () => {
   // given flag value. Every FASTMAIL_* name is stripped from the child environment first, so
   // an ambient setting cannot be what the assertion sees.
   async function attachmentsClause(value: string | undefined): Promise<string> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
     if (value !== undefined) env.FASTMAIL_ALLOW_BLOB_ATTACH = value;
 
@@ -272,10 +284,7 @@ describe('edit_draft advertises the clearFields enum on its array elements', () 
   // The advertised inputSchema of one tool, from a server started with no FASTMAIL_* setting
   // beyond the token, so an ambient value cannot be what the assertion sees.
   async function toolSchema(name: string): Promise<any> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
     const client = createClient({ env });
@@ -398,10 +407,7 @@ describe('array-side schema drift guard (#98)', () => {
   // assertion instead.
   before(async () => {
     assertDistIsCurrent();
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
     try {
@@ -575,10 +581,7 @@ describe('the calendar write tools advertise transparency with its closed value 
   // Both tools off ONE listing: the fact under test is that each declares the parameter, and
   // spawning the server twice to learn it would double the cost for nothing.
   async function listedTools(): Promise<any[]> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
     const client = createClient({ env });
@@ -636,10 +639,7 @@ describe('an unusable FASTMAIL_TIMEZONE refuses to start the built server', () =
   // credential is needed, so a startup failure here must not be mistaken for a missing-token
   // failure.
   function envWithTimezone(value: string | undefined): Record<string, string> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     if (value !== undefined) env.FASTMAIL_TIMEZONE = value;
     return env;
   }
@@ -771,7 +771,7 @@ describe('tsdav credential logging is suppressed', () => {
     return spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
-      env: { ...process.env, DEBUG: '*' },
+      env: { ...testEnv(), DEBUG: '*' },
     });
   }
 
@@ -881,10 +881,7 @@ describe('tsdav credential logging is suppressed', () => {
 describe('a tools/call with no arguments object', () => {
   it('is read as empty arguments, so a required parameter is named', async () => {
     assertDistIsCurrent();
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-    }
+    const env = testEnv();
     env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
 
     const child = spawn(process.execPath, [SERVER_ENTRY], { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -936,10 +933,7 @@ describe('update_calendar_event clearFields', () => {
   for (const clearFields of [{ location: true }, 42, false]) {
     it(`refuses a clearFields of ${JSON.stringify(clearFields)} rather than ignoring it`, async () => {
       assertDistIsCurrent();
-      const env: Record<string, string> = {};
-      for (const [k, v] of Object.entries(process.env)) {
-        if (v !== undefined && !/fastmail/i.test(k)) env[k] = v;
-      }
+      const env = testEnv();
       env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
       const client = createClient({ env });
       try {
@@ -953,4 +947,80 @@ describe('update_calendar_event clearFields', () => {
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 6. ~/.fastmail-mcp/.env, read by the real process
+// ---------------------------------------------------------------------------
+//
+// An unusable FASTMAIL_TIMEZONE in the file is the observable: the server refuses to start
+// and names the value only if it read the file, and needs no credential or network to do so.
+
+describe('the home .env file', () => {
+  before(() => assertDistIsCurrent());
+
+  const BAD_ZONE_FILE = 'FASTMAIL_TIMEZONE=Not/AZone\n';
+
+  function homeWithEnvFile(content: string): string {
+    const home = freshHome();
+    mkdirSync(join(home, '.fastmail-mcp'));
+    writeFileSync(join(home, '.fastmail-mcp', '.env'), content);
+    return home;
+  }
+
+  // Empty stdin: a server that starts reads EOF and exits 0 on its own, so this never hangs.
+  function runServer(env: Record<string, string>) {
+    return spawnSync(process.execPath, [SERVER_ENTRY], { encoding: 'utf8', env, input: '', timeout: 10_000 });
+  }
+
+  it('is read from the home the server runs with', () => {
+    const result = runServer(testEnv(homeWithEnvFile(BAD_ZONE_FILE)));
+    assert.equal(result.status, 1, `expected exit 1, got ${result.status}; stderr: ${result.stderr}`);
+    assert.match(result.stderr, /FASTMAIL_TIMEZONE is set to "Not\/AZone"/);
+  });
+
+  it('is not read from any other home', () => {
+    homeWithEnvFile(BAD_ZONE_FILE);
+    const result = runServer(testEnv());
+    assert.equal(result.status, 0, `expected exit 0, got ${result.status}; stderr: ${result.stderr}`);
+    assert.match(result.stderr, /running on stdio/);
+  });
+
+  it('never overrides a variable the environment sets, even to an empty string', () => {
+    for (const value of ['Australia/Sydney', '']) {
+      const env = testEnv(homeWithEnvFile(BAD_ZONE_FILE));
+      env.FASTMAIL_TIMEZONE = value;
+      const result = runServer(env);
+      assert.equal(result.status, 0, `FASTMAIL_TIMEZONE=${JSON.stringify(value)}: exit ${result.status}; stderr: ${result.stderr}`);
+    }
+  });
+
+  it('stops the server with one stderr line naming the path when it cannot be loaded', () => {
+    const home = freshHome();
+    const path = join(home, '.fastmail-mcp', '.env');
+    mkdirSync(path, { recursive: true });
+    const result = runServer(testEnv(home));
+    assert.equal(result.status, 1, `expected exit 1, got ${result.status}; stderr: ${result.stderr}`);
+    const lines = result.stderr.trim().split(/\r?\n/);
+    assert.equal(lines.length, 1, `expected one line, got: ${result.stderr}`);
+    assert.equal(lines[0], `Fastmail MCP server failed to start: ${path} is a directory, not a file`);
+  });
+
+  it('is kept from a harness client unless it asks for the home its env names', async () => {
+    const env = testEnv(homeWithEnvFile(BAD_ZONE_FILE));
+
+    const isolated = createClient({ env });
+    try {
+      await isolated.init();
+    } finally {
+      isolated.close();
+    }
+
+    const inheriting = createClient({ env, inheritHome: true });
+    try {
+      await assert.rejects(inheriting.init(), /server exited/);
+    } finally {
+      inheriting.close();
+    }
+  });
 });

@@ -61,7 +61,7 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
 ## Setup
 
 ### Prerequisites
-- Node.js 20+ 
+- Node.js 20.12+ 
 - A Fastmail account with API access
 - Fastmail API token
 
@@ -125,6 +125,32 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
    # than being replaced.
    export FASTMAIL_TIMEZONE="America/New_York"
    ```
+
+3. Or put the same variables in a file. See [The settings file](#the-settings-file).
+
+#### The settings file
+
+At startup the server reads `~/.fastmail-mcp/.env` (on Windows,
+`%USERPROFILE%\.fastmail-mcp\.env`), if it exists:
+
+```
+FASTMAIL_API_TOKEN=your_api_token_here
+FASTMAIL_TIMEZONE=America/New_York
+```
+
+- One `KEY=value` per line. Lines that are not `KEY=value` are ignored, and on some
+  Node 20 releases they also stop the lines after them loading.
+- Save it as UTF-8 without a byte-order mark. With a BOM the first line is lost,
+  and a UTF-16 file (what `>` writes in Windows PowerShell 5.1) loads nothing,
+  with no error. PowerShell 7 writes BOM-less UTF-8 by default.
+- A variable already in the environment wins, even when it is blank. A client
+  config that sets `FASTMAIL_API_TOKEN` to an empty string, or leaves a DXT
+  `${user_config...}` placeholder in it, blocks the file's token.
+- The file is read once, at startup. Restart the server after changing it.
+- A missing file is fine. A file that exists but cannot be read stops the server
+  with an error naming the path.
+- It holds your API token, so make it readable only by you
+  (`chmod 600 ~/.fastmail-mcp/.env`).
 
 ### Running the Server
 

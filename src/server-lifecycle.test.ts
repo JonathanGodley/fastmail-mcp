@@ -24,15 +24,18 @@
 // The tests need no credentials and make no network calls: authentication is
 // resolved lazily on the first tool call, and no tool is called here.
 
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const SERVER_ENTRY = join(SRC_DIR, '..', 'dist', 'index.js');
+const EMPTY_HOME = mkdtempSync(join(tmpdir(), 'fastmail-mcp-lifecycle-home-'));
+after(() => rmSync(EMPTY_HOME, { recursive: true, force: true, maxRetries: 3 }));
 
 /**
  * Newest mtime across the compiled sources, or null if src/ cannot be read.
@@ -67,12 +70,17 @@ const EXIT_BUDGET_MS = 10_000;
 // `npm test`.
 const DIST_MISSING = !existsSync(SERVER_ENTRY);
 
-/** Child env with every Fastmail credential stripped, so the test cannot touch a real account. */
+/**
+ * Child env with every Fastmail credential stripped, so the test cannot touch a real account,
+ * and an empty home, so ~/.fastmail-mcp/.env cannot supply one.
+ */
 function credentialFreeEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of Object.keys(env)) {
     if (/fastmail/i.test(key)) delete env[key];
   }
+  env.HOME = EMPTY_HOME;
+  env.USERPROFILE = EMPTY_HOME;
   return env;
 }
 

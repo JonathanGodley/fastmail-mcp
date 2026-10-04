@@ -11,6 +11,9 @@
 //      Never write a token to a file to get it there; scripts/probes/run-probe.py
 //      shows one way to inject it from an MCP client's config in memory.
 //
+// The server runs with an empty temp home unless the caller passes `inheritHome`
+// (see mcp-harness.d.mts).
+//
 // Importing from outside the repo on Windows: an absolute path in an ESM `import`
 // fails with ERR_UNSUPPORTED_ESM_URL_SCHEME, so import via a file:/// URL instead.
 //
@@ -26,6 +29,8 @@
 //   (the token is a placeholder above; never paste a real value into a shared shell.)
 
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -36,13 +41,15 @@ const PROTOCOL_VERSION = '2024-11-05';
 
 /**
  * Spawn the built server and return a small JSON-RPC client.
- * @param {{ env?: NodeJS.ProcessEnv }} opts
+ * @param {{ env?: NodeJS.ProcessEnv, inheritHome?: boolean }} opts
  * @returns {{ init: () => Promise<object>, call: (name: string, args?: object) => Promise<object>, close: () => void }}
  */
-export function createClient({ env } = {}) {
+export function createClient({ env, inheritHome = false } = {}) {
   // Never read individual secrets here, and never print env on any path.
+  const baseEnv = env ?? process.env;
+  const tempHome = inheritHome ? undefined : mkdtempSync(join(tmpdir(), 'fastmail-mcp-harness-home-'));
   const child = spawn('node', [SERVER_ENTRY], {
-    env: env ?? process.env,
+    env: tempHome ? { ...baseEnv, HOME: tempHome, USERPROFILE: tempHome } : baseEnv,
     stdio: ['pipe', 'pipe', 'inherit'], // stderr inherited: server logs pass through, untouched
   });
 
@@ -85,13 +92,24 @@ export function createClient({ env } = {}) {
     pending.clear();
   };
 
+  // Never throws: it runs inside the child's event handlers.
+  const removeTempHome = () => {
+    try {
+      if (tempHome) rmSync(tempHome, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      /* a leftover temp dir is harmless */
+    }
+  };
+
   child.on('error', (err) => {
+    removeTempHome();
     // Without a listener, Node throws on the unhandled 'error' event (e.g. `node`
     // not on PATH) and init()/call() hang forever.
     failAll(err);
   });
 
   child.on('exit', (code, signal) => {
+    removeTempHome();
     const how = signal ? `signal ${signal}` : `code ${code}`;
     failAll(new Error(`server exited (${how}) with ${pending.size} request(s) pending`));
   });
@@ -183,7 +201,7 @@ if (INVOKED_DIRECTLY) {
     console.error('harness error: invalid JSON args');
     process.exit(1);
   }
-  const client = createClient({ env: process.env });
+  const client = createClient({ env: process.env, inheritHome: true });
   try {
     await client.init();
     const result = toolName === '--list' ? await client.list() : await client.call(toolName, args);

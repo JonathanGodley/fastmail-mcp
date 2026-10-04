@@ -31,7 +31,7 @@ const created = await jmap(session, [['Email/set', {
 const FIX = created.methodResponses.find(x => x[2] === 'c')[1].created?.f?.id;
 if (!FIX) { console.error('FIXTURE CREATE FAILED'); process.exit(1); }
 
-const c = createClient({ env: { ...process.env } });
+const c = createClient({ env: { ...process.env }, inheritHome: true }); // step 5 saves under the default download directory
 await c.init();
 const { check, failures } = makeChecker();
 
