@@ -90,6 +90,7 @@ const HANDLER_FILES = [
   'mailbox-handler.ts',
   'contacts-handler.ts',
   'calendar-list-handler.ts',
+  'email-list-handler.ts',
 ];
 
 function readLines(file: string): string[] {
@@ -839,10 +840,8 @@ describe('the calendar event handlers require eventId by presence, not truthines
 // (`includeTrash: coerceBool((args as any).includeTrash)`), where swapping two names is a
 // one-character edit that type-checks, runs, and silently inverts which folder is hidden.
 //
-// This covers the wiring only. The DEFAULT each flag falls back to, and the append of the
-// exclusion note, sit in the CallTool switch, which has no test harness. That residual is
-// accepted rather than tracked: these handlers only destructure and delegate, and the
-// injected-client extraction CONTRIBUTING.md prescribes is for handlers that orchestrate.
+// This covers the wiring only. The DEFAULT each list_emails/search_emails flag falls back
+// to, and the append of the exclusion note, are pinned in email-list-handler.test.ts.
 describe('scope flags are wired to their own argument', () => {
   it('reads every coerceBool flag from the argument of the same name', () => {
     // `const raw = coerceBool((args as any).raw, 'raw')`, `raw: coerceBool(args?.raw, 'raw')`
