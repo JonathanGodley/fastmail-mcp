@@ -170,6 +170,10 @@ part's `disposition`, `cid` and `name`) for one purpose: the sentence that repor
 embedded images the transmitted message carried. It is a **receipt, computed after the
 submission** — never a send-time vet. Nothing in that listing can refuse a send.
 
+The same holds for warnings: every note about what a message will contain is given when the
+draft is written or edited, while it can still be fixed. `send_draft` reports only what
+happened, since by then the message has gone.
+
 `send_draft` submits the stored draft **by
 reference**: it transmits exactly the bytes already saved, and it cannot rewrite them. A
 refusal there would therefore strand a finished message with no in-place repair, which is
