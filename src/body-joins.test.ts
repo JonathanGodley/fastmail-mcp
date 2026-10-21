@@ -245,6 +245,20 @@ describe('body joins — html parts', () => {
     assert.deepEqual(runs, cases);
   });
 
+  it('knows the token is inside a tag when a quoted attribute value holds a >, on either side', () => {
+    const cases = [
+      ['<p>Hi</p><p title="a>b {{signature}}">x</p>', "</p><p title='a>b ", "'>", ['Hi'], ['x']],
+      ['<p>Hi</p><p title="{{signature}} a>b">x</p>', "</p><p title='", " a>b'>", ['Hi'], ['x']],
+      ["<!-- don't --><p>Hi {{signature}}</p>", ' ', '</p>', ['Hi'], []],
+    ] as const;
+    const runs = cases.map(([authored]) => {
+      const { text, blocks } = expand(authored);
+      const [join] = buildJoins('htmlBody', text, blocks);
+      return [authored, join.markupAbove, join.markupBelow, join.above, join.below];
+    });
+    assert.deepEqual(runs, cases);
+  });
+
   it('shows no part of the tag or comment the token sits in as a display line', () => {
     const { text, blocks } = expand('<p>Hi</p><p title="{{signature}}">There</p>');
     const [join] = buildJoins('htmlBody', text, blocks);

@@ -236,18 +236,19 @@ function htmlJoin(pieces: Piece[], at: number): TokenJoin {
   const before = pieces[at - 1].text;
   const after = pieces[at + 1].text;
   const inComment = before.lastIndexOf('<!--') > before.lastIndexOf('-->');
-  const lt = before.lastIndexOf('<');
-  const inTag = !inComment && lt > before.lastIndexOf('>') && TAG_START.test(before.charAt(lt + 1));
+  const tag = inComment ? undefined : tagOpenAtEnd(before);
   // Where the tag or comment the token sits in opens and closes: the markup runs extend to
   // them, and the lines either side are rendered without them, whose halves would otherwise
   // render as text ("'>There").
   let opensAt = before.length;
   let closesAt = 0;
-  if (inComment || inTag) {
-    const close = inComment ? '-->' : '>';
-    const q = after.indexOf(close);
-    opensAt = inComment ? before.lastIndexOf('<!--') : lt;
-    closesAt = q === -1 ? after.length : q + close.length;
+  if (inComment) {
+    const q = after.indexOf('-->');
+    opensAt = before.lastIndexOf('<!--');
+    closesAt = q === -1 ? after.length : q + 3;
+  } else if (tag) {
+    opensAt = tag.start;
+    closesAt = tagCloseAfter(after, tag.quote);
   }
   const lines = [...pieces];
   lines[at - 1] = { text: before.slice(0, opensAt) };
@@ -306,6 +307,52 @@ function tagOpenedBefore(seg: string, gt: number): number {
     }
   }
   return -1;
+}
+
+/**
+ * The tag `before` ends inside, if any: where it opens, and the quote open at the token. Read
+ * forward, since a backward read cannot tell it starts inside a quoted value. Comments are
+ * skipped whole, so an apostrophe in one opens no quote.
+ */
+function tagOpenAtEnd(before: string): { start: number; quote: string } | undefined {
+  let start = -1;
+  let quote = '';
+  for (let i = 0; i < before.length; i++) {
+    const c = before.charAt(i);
+    if (start === -1) {
+      if (before.startsWith('<!--', i)) {
+        const end = before.indexOf('-->', i + 4);
+        if (end === -1) return undefined;
+        i = end + 2;
+      } else if (c === '<' && TAG_START.test(before.charAt(i + 1))) {
+        start = i;
+      }
+    } else if (quote) {
+      if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '>') {
+      start = -1;
+    } else if (c === '<') {
+      start = TAG_START.test(before.charAt(i + 1)) ? i : -1;
+    }
+  }
+  return start === -1 ? undefined : { start, quote };
+}
+
+/** Just past the `>` closing a tag the token sits in, with `quote` open at the token; else the end. */
+function tagCloseAfter(after: string, quote: string): number {
+  for (let i = 0; i < after.length; i++) {
+    const c = after.charAt(i);
+    if (quote) {
+      if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '>') {
+      return i + 1;
+    }
+  }
+  return after.length;
 }
 
 /** Just past the `>` of the tag opened by the `<` at `lt`, or -1 when that `<` is prose. */
