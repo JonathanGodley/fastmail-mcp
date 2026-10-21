@@ -203,6 +203,8 @@ describe('body joins — html parts', () => {
       ['a><div>{{signature}}<p', '<div>', ''],
       ['Hello{{signature}}', '', ''],
       ['<b>x</b> y{{signature}}', '', ''],
+      ['a < b><div>{{signature}}< b>x', '<div>', ''],
+      ['<!-- a --><!-- b -->{{signature}}<!--c--><!--d--><p>', '<!-- a --><!-- b -->', '<!--c--><!--d--><p>'],
     ]) {
       const { text, blocks } = expand(authored);
       const [join] = buildJoins('htmlBody', text, blocks);
