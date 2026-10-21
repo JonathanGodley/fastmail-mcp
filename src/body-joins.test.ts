@@ -250,6 +250,13 @@ describe('body joins — html parts', () => {
       ['<p>Hi</p><p title="a>b {{signature}}">x</p>', "</p><p title='a>b ", "'>", ['Hi'], ['x']],
       ['<p>Hi</p><p title="{{signature}} a>b">x</p>', "</p><p title='", " a>b'>", ['Hi'], ['x']],
       ["<!-- don't --><p>Hi {{signature}}</p>", ' ', '</p>', ['Hi'], []],
+      ['<!-- <b title="x --><p>Hi {{signature}}</p>', ' ', '</p>', ['Hi'], []],
+      ["<p>Hi</p><p title='a>b {{signature}}'>x</p>", "</p><p title='a>b ", "'>", ['Hi'], ['x']],
+      ['<p>Hi</p><p {{signature}} title="a>b">x</p>', '</p><p ', " title='a>b'>", ['Hi'], ['x']],
+      ["<p>Hi</p><p {{signature}} title='a>b'>x</p>", '</p><p ', " title='a>b'>", ['Hi'], ['x']],
+      ['<p>Hi</p><a then <b title="{{signature}}">x</b>', " <b title='", "'>", ['Hi'], ['x']],
+      ['<p>Hi</p><a then < b {{signature}} c', ' ', ' ', ['Hi'], ['c']],
+      ['<p>x</p><!-- {{signature}} never closed', '</p><!-- ', ' never closed', ['x'], []],
     ] as const;
     const runs = cases.map(([authored]) => {
       const { text, blocks } = expand(authored);
