@@ -73,7 +73,7 @@ export function insertedBlocks(sites: readonly ExpandedTokenSite[], shift = 0): 
 
 /** One line for display: neutralised, bounded, trimmed. Redact before calling. */
 export function echoJoinLine(line: string): string {
-  return describePart(line.trim(), JOIN_LINE_ECHO_LIMIT).trim();
+  return describePart(line, JOIN_LINE_ECHO_LIMIT).trim();
 }
 
 /** The joins of every block inserted into one stored part, in body order. */
@@ -126,7 +126,7 @@ function textJoin(pieces: Piece[], at: number): TokenJoin {
   let text = '';
   let group = '';
   const history: (Range & { label: HistoryLabel['label'] })[] = [];
-  let block: Range = { start: 0, end: 0 };
+  let block!: Range;
   pieces.forEach((p, i) => {
     const label = historyOf(p);
     if (i !== at && !label) {
@@ -164,11 +164,12 @@ function textJoin(pieces: Piece[], at: number): TokenJoin {
   }
 
   const inBlock = items.map((it) => touches(it, block));
-  let first = items.findIndex((it, i) => inBlock[i] && !it.blank);
-  let last = items.length - 1 - [...items].reverse().findIndex((it, i) => inBlock[items.length - 1 - i] && !it.blank);
+  const shown = items.map((it, i) => inBlock[i] && !it.blank);
+  let first = shown.indexOf(true);
+  let last = shown.lastIndexOf(true);
   if (first === -1) {
-    first = items.findIndex((it) => it.end >= block.start);
-    if (first === -1) first = items.length;
+    // The block renders nothing; the join sits where its lines would be.
+    first = items.findIndex((it, i) => inBlock[i] || it.start >= block.end);
     last = first - 1;
   }
 
@@ -214,7 +215,7 @@ function htmlLines(pieces: Piece[]): JoinLine[] {
   const out: JoinLine[] = [];
   let group: string[] = [];
   const flush = () => {
-    if (group.length) out.push(...shownLines(redactBearerTokens(group.join('\n'))));
+    out.push(...shownLines(redactBearerTokens(group.join('\n'))));
     group = [];
   };
   for (const p of pieces) {
@@ -235,14 +236,14 @@ function htmlJoin(pieces: Piece[], at: number): TokenJoin {
   const after = pieces[at + 1].text;
   const inComment = before.lastIndexOf('<!--') > before.lastIndexOf('-->');
   const lt = before.lastIndexOf('<');
-  const inTag = !inComment && lt > before.lastIndexOf('>') && TAG_START.test(before[lt + 1] ?? '');
+  const inTag = !inComment && lt > before.lastIndexOf('>') && TAG_START.test(before.charAt(lt + 1));
   return {
     token: pieces[at].token!,
     part: 'htmlBody',
     above: htmlLines(pieces.slice(0, at)).slice(-WINDOW),
-    markupAbove: echoMarkup(markupBefore(before, inComment, inTag), 'above'),
+    markupAbove: echoMarkup(markupBefore(before, inComment, inTag), true),
     ...windowBlock(htmlLines([pieces[at]])),
-    markupBelow: echoMarkup(markupAfter(after, inComment, inTag), 'below'),
+    markupBelow: echoMarkup(markupAfter(after, inComment, inTag), false),
     below: htmlLines(pieces.slice(at + 1)).slice(0, WINDOW),
   };
 }
@@ -255,16 +256,16 @@ function markupBefore(seg: string, inComment: boolean, inTag: boolean): string {
   if (inComment) p = seg.lastIndexOf('<!--');
   else if (inTag) p = seg.lastIndexOf('<');
   for (;;) {
-    if (p > 0 && /\s/.test(seg[p - 1])) { p--; continue; }
+    if (/\s/.test(seg.charAt(p - 1))) { p--; continue; }
     if (seg.endsWith('-->', p)) {
       const q = seg.lastIndexOf('<!--', p - 3);
       if (q === -1) break;
       p = q;
       continue;
     }
-    if (p > 0 && seg[p - 1] === '>') {
+    if (seg.charAt(p - 1) === '>') {
       const q = seg.lastIndexOf('<', p - 2);
-      if (q === -1 || !TAG_START.test(seg[q + 1] ?? '')) break;
+      if (q === -1 || !TAG_START.test(seg.charAt(q + 1))) break;
       p = q;
       continue;
     }
@@ -282,14 +283,14 @@ function markupAfter(seg: string, inComment: boolean, inTag: boolean): string {
     p = q === -1 ? seg.length : q + close.length;
   }
   for (;;) {
-    if (p < seg.length && /\s/.test(seg[p])) { p++; continue; }
+    if (/\s/.test(seg.charAt(p))) { p++; continue; }
     if (seg.startsWith('<!--', p)) {
       const q = seg.indexOf('-->', p + 4);
       if (q === -1) break;
       p = q + 3;
       continue;
     }
-    if (seg[p] === '<' && TAG_START.test(seg[p + 1] ?? '')) {
+    if (seg.charAt(p) === '<' && TAG_START.test(seg.charAt(p + 1))) {
       const q = seg.indexOf('>', p + 1);
       if (q === -1) break;
       p = q + 1;
@@ -300,13 +301,13 @@ function markupAfter(seg: string, inComment: boolean, inTag: boolean): string {
   return seg.slice(0, p);
 }
 
-/** Redacted whole, cut on the side away from the token, then neutralised. */
-function echoMarkup(run: string, side: 'above' | 'below'): string {
+/** Redacted whole, cut on the side away from the token (`keepEnd` above it), then neutralised. */
+function echoMarkup(run: string, keepEnd: boolean): string {
   const points = [...redactBearerTokens(run)];
   if (points.length <= JOIN_MARKUP_ECHO_LIMIT) return describePart(points.join(''), JOIN_MARKUP_ECHO_LIMIT);
   const kept = describePart(
-    (side === 'above' ? points.slice(-JOIN_MARKUP_ECHO_LIMIT) : points.slice(0, JOIN_MARKUP_ECHO_LIMIT)).join(''),
+    (keepEnd ? points.slice(-JOIN_MARKUP_ECHO_LIMIT) : points.slice(0, JOIN_MARKUP_ECHO_LIMIT)).join(''),
     JOIN_MARKUP_ECHO_LIMIT,
   );
-  return side === 'above' ? `…${kept}` : `${kept}…`;
+  return keepEnd ? `…${kept}` : `${kept}…`;
 }

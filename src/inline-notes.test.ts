@@ -14,6 +14,7 @@ import {
   noteEmbeddedFromQuote,
   noteEmbeddedPartially,
   noteForwardPooled,
+  rejectExpandSignatureWithoutToken,
   noteForwardUnresolvedReferences,
   noteRemovedEmbedded,
   noteSentWithEmbedded,
@@ -684,5 +685,14 @@ describe('emitInlineNotes', () => {
 
   it('says nothing about parts that simply rode along as attachments', () => {
     assert.deepEqual(emitInlineNotes(tally({ attached: 4 }), { surface: 'draft' }), []);
+  });
+});
+
+describe('rejectExpandSignatureWithoutToken', () => {
+  it('says the token is the whole sign-off when the body carries none', () => {
+    assert.ok(rejectExpandSignatureWithoutToken(true).endsWith(
+      'Place {{signature}} where your message ends, above any quoted or forwarded history (it is the ' +
+      'whole sign-off, closing line included), or drop the flag and the body is stored as written.',
+    ));
   });
 });

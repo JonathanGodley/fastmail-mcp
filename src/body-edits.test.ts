@@ -192,6 +192,16 @@ describe('spliceBodyEdits', () => {
     const out = spliceBodyEditsAt(stored, locateBodyEdits(stored, ops, 'textBody'), ops.map((o) => o.replace));
     assert.equal(out.text, 'Hi Bob and Al, from Alice');
     assert.deepEqual(out.starts, [out.text.indexOf('Alice'), 3]);
+    assert.deepEqual(spliceBodyEditsAt('abc', [], []), { text: 'abc', starts: [] });
+  });
+});
+
+describe('REJECT_BODY_EDITS_WITHOUT_SIGNATURE', () => {
+  it('says the token is the whole sign-off', () => {
+    assert.ok(REJECT_BODY_EDITS_WITHOUT_SIGNATURE.endsWith(
+      'Put {{signature}} in the replace where your message ends (it is the whole sign-off, closing line ' +
+      'included), or drop the flag and the replacements are stored as written.',
+    ));
   });
 });
 
