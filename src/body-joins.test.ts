@@ -222,11 +222,26 @@ describe('body joins — html parts', () => {
       ['<p>a -> {{signature}}</p>', ' ', '</p>'],
       ['<p>Thanks => </p>{{signature}}', ' </p>', ''],
       ['{{signature}}<a then <b>x', '', ''],
+      ['<p>don\'t => {{signature}}', ' ', ''],
     ]) {
       const { text, blocks } = expand(authored);
       const [join] = buildJoins('htmlBody', text, blocks);
       assert.deepEqual([join.markupAbove, join.markupBelow], [above, below], authored);
     }
+  });
+
+  it('keeps a tag whole when a quoted attribute value holds a > or <', () => {
+    const cases = [
+      ['<p>Regards</p><div title="a>b">{{signature}}</div>', "</p><div title='a>b'>", '</div>'],
+      ['<p>x</p>{{signature}}<span title="x<y">z</span>', '</p>', "<span title='x<y'>"],
+      ["<b data-x='1>2' title=\"it's\">{{signature}}<i data-y='3<4'>q", "<b data-x='1>2' title='it's'>", "<i data-y='3<4'>"],
+    ];
+    const runs = cases.map(([authored]) => {
+      const { text, blocks } = expand(authored);
+      const [join] = buildJoins('htmlBody', text, blocks);
+      return [authored, join.markupAbove, join.markupBelow];
+    });
+    assert.deepEqual(runs, cases);
   });
 
   it('shows no part of the tag or comment the token sits in as a display line', () => {

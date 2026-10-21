@@ -276,15 +276,55 @@ function markupBefore(seg: string, p: number): string {
       continue;
     }
     if (seg.charAt(p - 1) === '>') {
-      // A `>` with another `>` before its `<` is prose (`=>`), and ends the run.
-      const q = seg.lastIndexOf('<', p - 2);
-      if (q === -1 || !TAG_START.test(seg.charAt(q + 1)) || seg.lastIndexOf('>', p - 2) > q) break;
+      const q = tagOpenedBefore(seg, p - 1);
+      if (q === -1) break;
       p = q;
       continue;
     }
     break;
   }
   return seg.slice(p);
+}
+
+// A tag is `<`, a tag-start character, then up to its `>` with no other `<` or `>` outside a
+// quoted attribute value; anything else (`a -> b`, `=>`, `<a then <b>`) is prose and ends the
+// run. Quotes are tracked from the `>` end too, which holds for any tag whose quotes balance.
+
+/** Where the tag closed by the `>` at `gt` opens, or -1 when that `>` is prose. */
+function tagOpenedBefore(seg: string, gt: number): number {
+  let quote = '';
+  for (let i = gt - 1; i >= 0; i--) {
+    const c = seg.charAt(i);
+    if (quote) {
+      if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '<') {
+      return TAG_START.test(seg.charAt(i + 1)) ? i : -1;
+    } else if (c === '>') {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+/** Just past the `>` of the tag opened by the `<` at `lt`, or -1 when that `<` is prose. */
+function tagClosedAfter(seg: string, lt: number): number {
+  if (!TAG_START.test(seg.charAt(lt + 1))) return -1;
+  let quote = '';
+  for (let i = lt + 1; i < seg.length; i++) {
+    const c = seg.charAt(i);
+    if (quote) {
+      if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '>') {
+      return i + 1;
+    } else if (c === '<') {
+      return -1;
+    }
+  }
+  return -1;
 }
 
 /** The run of tags, comments and whitespace after the token, extended forward from `p`. */
@@ -297,11 +337,10 @@ function markupAfter(seg: string, p: number): string {
       p = q + 3;
       continue;
     }
-    if (seg.charAt(p) === '<' && TAG_START.test(seg.charAt(p + 1))) {
-      const q = seg.indexOf('>', p + 1);
-      const reopened = seg.indexOf('<', p + 1);
-      if (q === -1 || (reopened !== -1 && reopened < q)) break;
-      p = q + 1;
+    if (seg.charAt(p) === '<') {
+      const q = tagClosedAfter(seg, p);
+      if (q === -1) break;
+      p = q;
       continue;
     }
     break;
