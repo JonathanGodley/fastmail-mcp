@@ -525,8 +525,9 @@ export function rejectStaleBodyHash(): string {
 export function rejectExpandSignatureWithoutToken(wroteAnyBody: boolean): string {
   return wroteAnyBody
     ? 'expandSignature: true was passed but the body you supplied carries no {{signature}}, so ' +
-      'there is nothing to expand. Place {{signature}} where the sign-off goes — above any ' +
-      'quoted or forwarded history — or drop the flag and the body is stored as written.'
+      'there is nothing to expand. Place {{signature}} where your message ends, above any ' +
+      'quoted or forwarded history (it is the whole sign-off, closing line included), or drop ' +
+      'the flag and the body is stored as written.'
     : 'expandSignature: true was passed but this edit writes no body, so there is nothing to ' +
       'expand it in. Supply textBody or htmlBody carrying {{signature}}, or drop the flag.';
 }
@@ -542,7 +543,7 @@ export function rejectExpandSignatureWithoutToken(wroteAnyBody: boolean): string
 export function rejectRepeatedSignatureToken(part: string, count: number): string {
   return (
     `${part} carries ${count} {{signature}} tokens, and expandSignature would expand every one ` +
-    'of them. Keep the one where the sign-off goes and write the others as \\{{signature}} to ' +
+    'of them. Keep the one where your message ends and write the others as \\{{signature}} to ' +
     'store them as text. A body you read back from a reply can carry one inside the quoted ' +
     'original; that is the one to escape, and the escape is needed in each expandSignature call.'
   );

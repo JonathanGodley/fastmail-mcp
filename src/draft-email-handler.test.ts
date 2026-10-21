@@ -9,6 +9,7 @@ import {
 import { EMAIL_BODY_PROPERTIES } from './jmap-client.js';
 import { normalizeBodies } from './body-format.js';
 import { noteComposeSubjectPrefix } from './subject-prefix.js';
+import { formatDraftEmailResult } from './response-formatters.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -3780,6 +3781,195 @@ describe('draft_email — the result and notes, at their edges', () => {
       noteTokenEmpty('signature', 'textBody', 'no-signature'),
       noteTokenEmpty('quote', 'textBody', 'nothing-quotable'),
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The join around each inserted block (#214)
+// ---------------------------------------------------------------------------
+
+describe('draft_email — the join around each inserted block', () => {
+  const SIGN_OFF = {
+    id: 'id-1', name: 'A. Sender', email: 'me@example.com', mayDelete: false,
+    textSignature: 'Kind regards,\nA. Sender\n555 0100',
+    htmlSignature: '<div>Kind regards,</div><div>A. Sender</div><div>555 0100</div>',
+  };
+  const withIdentity = (identity: any, original: any = makeOriginal()) =>
+    spyClient(original, { getIdentities: async () => [identity] }).client;
+  const SIGN_OFF_LINES = ['Kind regards,', 'A. Sender', '555 0100'];
+
+  it('shows the caller\'s own closing line above a signature that opens with one (the #214 case)', async () => {
+    const r = await compose({
+      mode: 'new', to: ['sam@example.com'],
+      htmlBody: '<p>Hi Sam,</p><p>Attached is the drawing set, could you file it please?</p><p>Regards</p><div>{{signature}}</div>',
+    }, withIdentity(SIGN_OFF));
+    assert.deepEqual(r.joins, [{
+      token: 'signature', part: 'htmlBody',
+      above: ['Attached is the drawing set, could you file it please?', 'Regards'],
+      markupAbove: '</p><div>',
+      block: SIGN_OFF_LINES,
+      markupBelow: '</div>',
+      below: [],
+    }]);
+    const rendered = formatDraftEmailResult(r).split('\n');
+    assert.ok(rendered.includes(
+      '{{signature}} joined in htmlBody: above "Attached is the drawing set, could you file it please?" / "Regards"; ' +
+      'markup "</p><div>"; block "Kind regards," / "A. Sender" / "555 0100"; markup "</div>"; below: end of body',
+    ), rendered.join('\n'));
+  });
+
+  it('reports a canonical reply in both parts: the spacer as markup in html, one blank line in text', async () => {
+    const r = await compose({
+      mode: 'reply', originalEmailId: 'o1',
+      htmlBody: '<p>Agreed, Friday works.</p><div>{{signature}}</div><div><br></div>{{quote}}',
+      textBody: 'Agreed, Friday works.\n\n{{signature}}\n\n{{quote}}',
+    }, withIdentity(SIGN_OFF));
+    const [htmlSig, htmlQuote, textSig, textQuote] = r.joins!;
+    assert.deepEqual(r.joins!.map((j) => `${j.part}:${j.token}`), [
+      'htmlBody:signature', 'htmlBody:quote', 'textBody:signature', 'textBody:quote',
+    ]);
+
+    assert.deepEqual(htmlSig.above, ['Agreed, Friday works.']);
+    assert.equal(htmlSig.markupBelow, '</div><div><br></div>');
+    assert.deepEqual(htmlSig.below.map((l) => typeof l === 'object' && l.label), ['quoted original']);
+    assert.equal(htmlSig.blankBelow, undefined, 'html reports markup, never blank counts');
+    assert.deepEqual(htmlQuote.above, ['A. Sender', '555 0100']);
+    assert.equal(htmlQuote.markupAbove, '</div><div><br></div>');
+
+    assert.deepEqual(textSig, {
+      token: 'signature', part: 'textBody',
+      above: ['Agreed, Friday works.'], blankAbove: 1,
+      block: SIGN_OFF_LINES,
+      blankBelow: 1, below: [{ label: 'quoted original', lines: 2 }],
+    });
+    assert.deepEqual(textQuote, {
+      token: 'quote', part: 'textBody',
+      above: ['A. Sender', '555 0100'], blankAbove: 1,
+      block: [{ label: 'quoted original', lines: 2 }],
+      blankBelow: 0, below: [],
+    });
+  });
+
+  it('labels a line the signature shares with the quote, rather than echoing it', async () => {
+    const r = await compose(
+      { mode: 'reply', originalEmailId: 'o1', textBody: 'Thanks.\n\n{{signature}}{{quote}}' },
+      withIdentity(SIGN_OFF),
+    );
+    const [sig, quote] = r.joins!;
+    assert.deepEqual(sig.block, ['Kind regards,', 'A. Sender', { label: 'quoted original', lines: 2 }]);
+    assert.deepEqual(quote.above, ['Kind regards,', 'A. Sender']);
+    assert.deepEqual(quote.block, [{ label: 'quoted original', lines: 2 }]);
+    assert.ok(!JSON.stringify(r.joins).includes('wrote'), JSON.stringify(r.joins));
+  });
+
+  it('counts the whole blank run at a text boundary, and still shows the line above it', async () => {
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'Hi Sam,\n\nRegards\n\n\n{{signature}}' },
+      withIdentity(SIGN_OFF),
+    );
+    assert.deepEqual(r.joins![0].above, ['Hi Sam,', 'Regards']);
+    assert.equal(r.joins![0].blankAbove, 2);
+    assert.equal(r.joins![0].blankBelow, 0);
+
+    const leadingBlank = { ...SIGN_OFF, textSignature: '\nKind regards,\nA. Sender', htmlSignature: undefined };
+    const r2 = await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'Hi Sam,\n\nRegards\n\n\n{{signature}}' },
+      withIdentity(leadingBlank),
+    );
+    assert.equal(r2.joins![0].blankAbove, 3, 'the signature\'s own leading blank line adds to the run');
+    assert.deepEqual(r2.joins![0].block, ['Kind regards,', 'A. Sender']);
+  });
+
+  it('shows a line the token shares with the caller\'s text whole, as the block\'s first line', async () => {
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'Hi Sam,\n\nThanks, {{signature}}' },
+      withIdentity(SIGN_OFF),
+    );
+    assert.deepEqual(r.joins![0].above, ['Hi Sam,']);
+    assert.equal(r.joins![0].blankAbove, 1);
+    assert.deepEqual(r.joins![0].block, ['Thanks, Kind regards,', 'A. Sender', '555 0100']);
+  });
+
+  it('shows the enclosing tag as the markup when the token sits inside an attribute', async () => {
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], htmlBody: '<p>Hi</p><p title="{{signature}}">Hello</p>' },
+      withIdentity(SIGN_OFF),
+    );
+    // Neutralised like every echoed value: a `"` would close the quoted rendering early.
+    assert.equal(r.joins![0].markupAbove, "</p><p title='");
+    assert.equal(r.joins![0].markupBelow, "'>");
+  });
+
+  it('shows the first 2 and last 2 lines of a long block, a one-line block whole, and a join per part', async () => {
+    const long = { ...SIGN_OFF, textSignature: 'L1\nL2\nL3\nL4\nL5\nL6', htmlSignature: undefined };
+    const r = await compose({ mode: 'new', to: ['sam@example.com'], textBody: 'Hi\n{{signature}}' }, withIdentity(long));
+    assert.deepEqual(r.joins![0].block, ['L1', 'L2', 'L5', 'L6']);
+    assert.equal(r.joins![0].blockOmitted, 2);
+    assert.deepEqual(r.joins![0].below, []);
+
+    const one = { ...SIGN_OFF, textSignature: 'Sam', htmlSignature: '<div>Sam</div>' };
+    const r2 = await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'Hi\n{{signature}}', htmlBody: '<p>Hi</p>{{signature}}' },
+      withIdentity(one),
+    );
+    assert.deepEqual(r2.joins!.map((j) => [j.part, j.block, j.blockOmitted]), [
+      ['htmlBody', ['Sam'], undefined], ['textBody', ['Sam'], undefined],
+    ]);
+  });
+
+  for (const mode of ['reply', 'forward'] as const) {
+    it(`echoes no text of the ${mode}'s history block in any join, in either part`, async () => {
+      const marker = 'MARKERX';
+      const original = makeOriginal({
+        bodyValues: {
+          t: { value: `${marker} one\n${marker} two\n${marker} three` },
+          h: { value: `<p>${marker} one</p><p>${marker} two</p>` },
+        },
+      });
+      const token = mode === 'reply' ? '{{quote}}' : '{{forward}}';
+      const r = await compose({
+        mode, originalEmailId: 'o1', to: ['sam@example.com'],
+        htmlBody: `<p>Hi</p><div>{{signature}}</div>${token}<p>after</p>`,
+        textBody: `Hi\n{{signature}}${token}\nafter`,
+      }, withIdentity(SIGN_OFF, original));
+      assert.equal(r.joins!.length, 4);
+      const label = mode === 'reply' ? 'quoted original' : 'forwarded message';
+      assert.ok(r.joins!.some((j) => j.block.some((l) => typeof l === 'object' && l.label === label)));
+      assert.ok(!JSON.stringify(r.joins).includes(marker), JSON.stringify(r.joins));
+      const rendered = formatDraftEmailResult(r);
+      assert.ok(!rendered.includes(marker), rendered);
+    });
+  }
+
+  it('neutralises and bounds a caller line, and redacts a credential split across two lines', async () => {
+    const hostile = 'A' + String.fromCharCode(0x2028) + 'B' + String.fromCharCode(0x0085) + 'C\rD'
+      + String.fromCharCode(0x202e) + 'E"F' + 'x'.repeat(200);
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: `${hostile}\n{{signature}}` },
+      withIdentity(SIGN_OFF),
+    );
+    const FORGING = new RegExp(`[${String.fromCharCode(0x2028, 0x0085, 0x0d, 0x0a, 0x202e)}"]`);
+    const lines = r.joins![0].above as string[];
+    assert.equal(lines.length, 2);
+    for (const line of lines) {
+      assert.ok(!FORGING.test(line), JSON.stringify(line));
+      assert.ok([...line].length <= 121, `${[...line].length} code points`);
+    }
+    assert.ok(lines[1].startsWith("DE'Fxxx") && lines[1].endsWith('…'), lines[1]);
+
+    const split = await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'Token: Bearer\nabcdefghijklmnopqrstuvwxyz0123\n{{signature}}' },
+      withIdentity(SIGN_OFF),
+    );
+    assert.deepEqual(split.joins![0].above, ['Token: Bearer [REDACTED]']);
+  });
+
+  it('reports no join for a token removed for having nothing to expand to', async () => {
+    const r = await compose(
+      { mode: 'new', to: ['sam@example.com'], textBody: 'Hi\n{{signature}}' },
+      withIdentity(UNSIGNED_IDENTITY),
+    );
+    assert.equal(r.joins, undefined);
   });
 });
 

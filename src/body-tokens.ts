@@ -136,6 +136,11 @@ export interface ExpandedTokenSite extends BodyTokenSite {
    * NO entry for that token: the handler's own bug, not a fact about the message.
    */
   cause?: BlockUnavailableCause;
+  /**
+   * Where the block landed in the OUTPUT text, on an expanded site only. Read the join off
+   * this, never by searching the output for the block: its text can recur in the body.
+   */
+  output?: { start: number; end: number };
 }
 
 /** What one expansion did, in enough detail to build a receipt naming tokens, counts and order. */
@@ -235,6 +240,9 @@ export function expandBodyTokens(authored: string, blocks: BodyBlocks): BodyToke
   const counts = zeroCounts();
   const nearMisses: BodyTokenSite[] = [];
   const otherSpellings: BodySpellingSite[] = [];
+  // How far the output has drifted from `authored` so far, so a site's output offset is its
+  // authored `index` plus this.
+  let drift = 0;
 
   const text = authored.replace(
     BODY_TOKEN_RE,
@@ -252,7 +260,9 @@ export function expandBodyTokens(authored: string, blocks: BodyBlocks): BodyToke
         case 'escape': {
           // An as-written token's escape is as-written too; it may be someone else's text.
           const escaped = whole.replace(/[\\{}\s]/g, '').toLowerCase() as BodyTokenName;
-          return blocks[escaped]?.available === 'as-written' ? whole : c.literal;
+          const out = blocks[escaped]?.available === 'as-written' ? whole : c.literal;
+          drift += out.length - whole.length;
+          return out;
         }
         case 'near-miss':
           nearMisses.push({ name: c.name, index, text: whole });
@@ -277,7 +287,10 @@ export function expandBodyTokens(authored: string, blocks: BodyBlocks): BodyToke
           };
           if (block?.available === false) site.cause = block.cause;
           tokens.push(site);
-          return block?.available === true ? block.content : '';
+          const out = block?.available === true ? block.content : '';
+          if (site.expanded) site.output = { start: index + drift, end: index + drift + out.length };
+          drift += out.length - whole.length;
+          return out;
         }
       }
     },

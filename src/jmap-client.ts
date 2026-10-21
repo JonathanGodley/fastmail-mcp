@@ -8,10 +8,12 @@ import { rejectSignatureEmbeddedImage, signatureBlock, signatureCidRefs } from '
 import { defaultIdentity, identityFor, signatureOf } from './identity.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
 import type { BodyBlocks, BodyTokenExpansion, BodyTokenScan } from './body-tokens.js';
+import { buildJoins, insertedBlocks } from './body-joins.js';
+import type { InsertedBlock, TokenJoin } from './body-joins.js';
 import {
   NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_NO_BODY, REJECT_BODY_EDITS_WITH_BODY,
   REJECT_BODY_EDITS_WITHOUT_SIGNATURE,
-  locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits, unmatchedSegments,
+  locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits, spliceBodyEditsAt, unmatchedSegments,
 } from './body-edits.js';
 import type { BodyEdit, BodyEditPart, BodyEditsReceipt, LocatedBodyEdit } from './body-edits.js';
 import {
@@ -730,6 +732,8 @@ export interface UpdateDraftResult {
   bodyHashWithheld?: string;
   // Present only when the edit was made with bodyEdits.
   bodyEdits?: BodyEditsReceipt;
+  // The text either side of each sign-off expandSignature inserted.
+  joins?: TokenJoin[];
   notes?: string[];
 }
 
@@ -2385,6 +2389,8 @@ export class JmapClient {
       writtenParts.map((p) => [p.part, scanBodyTokens(p.authored)] as const),
     );
     const tokenNotes: string[] = [];
+    // The expansion output is the stored part; nothing after it rewrites a written part.
+    const joinsByPart = new Map<'textBody' | 'htmlBody', TokenJoin[]>();
 
     // The `{{signature}}` tokens the flag claims as the caller's own: in a part bodyEdits
     // spliced, only those its replace strings carry, never the untouched stored text.
@@ -2425,16 +2431,18 @@ export class JmapClient {
         // of a spliced one. Runs on every written part, because a `\{{signature}}` escape in a
         // flagged call must still be resolved.
         let expansion: Pick<BodyTokenExpansion, 'text' | 'tokens'>;
+        let inserted: InsertedBlock[];
         if (p.part === editedPart) {
           const replaced = updates.bodyEdits!.map((op) => expandBodyTokens(op.replace, blocks));
           storedReplacements = replaced.map((r) => r.text);
-          expansion = {
-            text: spliceBodyEdits(edited!.stored, edited!.located, storedReplacements),
-            tokens: replaced.flatMap((r) => r.tokens),
-          };
+          const spliced = spliceBodyEditsAt(edited!.stored, edited!.located, storedReplacements);
+          expansion = { text: spliced.text, tokens: replaced.flatMap((r) => r.tokens) };
+          inserted = replaced.flatMap((r, i) => insertedBlocks(r.tokens, spliced.starts[i]));
         } else {
           expansion = expandBodyTokens(p.authored, blocks);
+          inserted = insertedBlocks(expansion.tokens);
         }
+        joinsByPart.set(p.part, buildJoins(p.part, expansion.text, inserted));
         if (p.part === 'htmlBody') workingHtml = expansion.text;
         else workingText = expansion.text;
         signatureLanded.set(
@@ -2949,6 +2957,7 @@ export class JmapClient {
       ...(prefixTyped ? [noteEditSubjectPrefix(prefixTyped)] : []),
     ];
     const touchedInlineImages = tally.embedded > 0 || tally.degraded > 0 || tally.removed > 0;
+    const joins = [...(joinsByPart.get('htmlBody') ?? []), ...(joinsByPart.get('textBody') ?? [])];
 
     return {
       id: newEmailId,
@@ -2966,6 +2975,7 @@ export class JmapClient {
           ops: edited!.located.map((op, i) => ({ ...op, replacementSize: storedReplacements![i].length })),
         },
       }),
+      ...(joins.length > 0 && { joins }),
       ...(notes.length > 0 && { notes }),
     };
   }

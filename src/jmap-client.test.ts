@@ -1728,6 +1728,45 @@ describe('updateDraft', () => {
     assert.match(result.bodyHashWithheld!, /expanded \{\{signature\}\}/);
   });
 
+  it('shows the join at the site that expanded, though the same sign-off text is already in the body', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<div><div>Test User</div></div><p>Thanks.</p>{{signature}}<p>After</p>',
+      expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.deepEqual(result.joins, [{
+      token: 'signature', part: 'htmlBody',
+      above: ['Test User', 'Thanks.'], markupAbove: '</p>',
+      block: ['Test User'],
+      markupBelow: '<p>', below: ['After'],
+    }]);
+  });
+
+  it('echoes a handed-back line beside the join neutralised and bounded', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    mockBodyEdit(client, TEXT_ONLY_REPLY);
+    const hostile = '> A' + String.fromCharCode(0x2028) + 'B' + String.fromCharCode(0x0085) + 'C\rD'
+      + String.fromCharCode(0x202e) + 'E"F' + 'x'.repeat(200);
+    const result = await client.updateDraft('draft-1', {
+      textBody: `Thanks.\n{{signature}}\n${hostile}`,
+      expandSignature: true, bodyHash: hashOf(TEXT_ONLY_REPLY),
+    });
+    const [join] = result.joins!;
+    assert.deepEqual(join.block, ['--', 'Test User']);
+    const below = join.below as string[];
+    assert.equal(below[0], '> ABC');
+    assert.ok(below[1].startsWith("DE'Fxxx") && below[1].endsWith('…') && [...below[1]].length === 121, below[1]);
+  });
+
+  it('reports no join on an unflagged edit, which inserts nothing', async () => {
+    mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      htmlBody: '<p>Thanks.</p>{{signature}}', bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.equal(result.joins, undefined);
+  });
+
   // A flagged call whose identity has no sign-off REMOVES the token and says why. It is not
   // a refusal: the flag was honoured, there was simply nothing to put there, and leaving the
   // braces in a body the caller declared its own would ship them to the recipient.
@@ -6102,6 +6141,26 @@ describe('updateDraft bodyEdits (#177)', () => {
     assert.ok(result.bodyHashWithheld);
     // A stored token outside the matches plus one in a replace, and no split token: no note.
     assert.equal(result.notes, undefined);
+  });
+
+  it('shows the join at its final place in the spliced body, after an earlier op listed later grew the text', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING]);
+    const draft = { ...PLANTED, bodyValues: { h: { value: '<p>EARLY</p><div><div>Test User</div></div><p>Thanks.</p><p>SIGN</p><p>After</p>' } } };
+    serve(draft);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [
+        { find: '<p>SIGN</p>', replace: '{{signature}}' },
+        { find: '<p>EARLY</p>', replace: '<p>Early, and now a good deal longer</p>' },
+      ],
+      expandSignature: true,
+      bodyHash: hashOf(draft),
+    });
+    assert.deepEqual(result.joins, [{
+      token: 'signature', part: 'htmlBody',
+      above: ['Test User', 'Thanks.'], markupAbove: '</p>',
+      block: ['Test User'],
+      markupBelow: '<p>', below: ['After'],
+    }]);
   });
 
   it('notes only the split token beside a stored one outside the matches', async () => {

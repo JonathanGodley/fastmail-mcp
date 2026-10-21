@@ -269,6 +269,28 @@ describe('body tokens — substitution places the block and nothing else', () =>
     assert.deepEqual(out.tokens.map((t) => t.index), [part.indexOf('{{quote}}'), part.indexOf('{{signature}}')]);
     assert.deepEqual(out.tokens.map((t) => t.text), ['{{quote}}', '{{signature}}']);
   });
+
+  it('records where each expanded block landed in the OUTPUT, even when the block text recurs', () => {
+    // The first signature's text is already in the body above the token, so a search of the
+    // output for the block would find the wrong site.
+    const part = 'x [SIG] y {{quote}} z {{signature}} w';
+    const out = expandBodyTokens(part, BLOCKS);
+    const [quote, signature] = out.tokens;
+    assert.deepEqual(quote.output, { start: out.text.indexOf('[QUOTE]'), end: out.text.indexOf('[QUOTE]') + 7 });
+    assert.deepEqual(signature.output, { start: out.text.lastIndexOf('[SIG]'), end: out.text.lastIndexOf('[SIG]') + 5 });
+    assert.equal(out.text.slice(signature.output!.start, signature.output!.end), '[SIG]');
+  });
+
+  it('counts the backslash an escape consumes and a removed token when placing a later block', () => {
+    const out = expandBodyTokens(String.raw`\{{signature}} {{forward}} {{signature}}`, { ...BLOCKS, forward: undefined });
+    assert.equal(out.text, '{{signature}}  [SIG]');
+    assert.deepEqual(out.tokens[1].output, { start: 15, end: 20 });
+  });
+
+  it('records no output range for a removed or as-written token', () => {
+    const out = expandBodyTokens('a {{signature}} b {{quote}}', { ...NO_BLOCKS, quote: { available: 'as-written' } });
+    assert.deepEqual(out.tokens.map((t) => t.output), [undefined, undefined]);
+  });
 });
 
 describe('body tokens — the security rule: a block is never rescanned', () => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { InvalidInputError } from './coerce.js';
 import {
   NOTE_BODY_EDITS_DISCARDED_TEXT_PART, REJECT_BODY_EDITS_NO_BODY, REJECT_BODY_EDITS_WITH_BODY,
-  REJECT_BODY_EDITS_WITHOUT_SIGNATURE, locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits,
+  REJECT_BODY_EDITS_WITHOUT_SIGNATURE, locateBodyEdits, noteBodyEditsSplitSignature, spliceBodyEdits, spliceBodyEditsAt,
   unmatchedSegments,
 } from './body-edits.js';
 
@@ -184,6 +184,14 @@ describe('spliceBodyEdits', () => {
   it('keeps the untouched text byte for byte', () => {
     const stored = 'x &amp;  \r\n y';
     assert.equal(spliceBodyEdits(stored, [{ offset: 0, matchedSize: 1 }], ['z']), 'z &amp;  \r\n y');
+  });
+
+  it('says where each replacement starts in the spliced text, indexed in caller order', () => {
+    const stored = 'Hi Bob, from Al';
+    const ops = [{ find: 'Al', replace: 'Alice' }, { find: 'Bob', replace: 'Bob and Al' }];
+    const out = spliceBodyEditsAt(stored, locateBodyEdits(stored, ops, 'textBody'), ops.map((o) => o.replace));
+    assert.equal(out.text, 'Hi Bob and Al, from Alice');
+    assert.deepEqual(out.starts, [out.text.indexOf('Alice'), 3]);
   });
 });
 

@@ -1263,6 +1263,16 @@ same prefix at 64 would leave a refusal saying a path is outside a directory it 
 apart from. `echoPath` is a name rather than the expression repeated at each refusal because a dozen
 inline copies is a set that can disagree with itself (#190).
 
+**The join lines: `echoJoinLine`, after a whole-region redaction.** The join a write result
+shows around each inserted block (`src/body-joins.ts`, #214) echoes body text, so it redacts
+before it windows rather than per line: the whole text before the block, the block, and the
+whole text after it are each redacted in one piece, because `Bearer\nabc…` puts a credential
+across two lines and a per-line pass would print its second half. In an HTML part the rendering
+is redacted, not the markup, since a redaction run over raw HTML can cross tags and swallow the
+lines the join exists to show. Each line then goes through `describePart` at
+`JOIN_LINE_ECHO_LIMIT` (120). The markup run at an HTML join is redacted whole, cut to
+`JOIN_MARKUP_ECHO_LIMIT` (80) on the side away from the token, then neutralised.
+
 **A caller that quotes NOTHING is judged on the whole sentence, not on its own call site.**
 `describeUntrusted` and `echoCallerText` both have a set of callers that render the value bare, and "bare" is not a synonym for
 "safe": a value dropped unquoted into a sentence that single-quotes something *else* breaks

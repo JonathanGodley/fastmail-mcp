@@ -237,6 +237,14 @@ auto-appended sign-off after a concatenated quote landed *underneath* the quoted
 read as part of it. A caller who wants the sign-off above the history writes `{{signature}}`
 above `{{quote}}`.
 
+**The token is the whole sign-off, and the result shows where it joined** (#214). The
+signature carries its own closing line, so a caller's "Regards" above the token doubles it.
+The server does not judge the prose: for each block it inserts, the write result shows the
+lines either side, the block's first and last lines, and the spacing (blank lines in text,
+the markup at the token in HTML), and the caller repairs with `bodyEdits`. HTML spacing is
+shown as markup because `htmlToText` blank-line counts do not map to the markup the
+canonical shape is written in.
+
 **The block carries no marker class**: placement is by token, so nothing later needs to
 recognise a sign-off.
 

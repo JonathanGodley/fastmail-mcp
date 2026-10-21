@@ -33,7 +33,8 @@ export const NOTE_BODY_EDITS_DISCARDED_TEXT_PART =
 export const REJECT_BODY_EDITS_WITHOUT_SIGNATURE =
   'expandSignature: true was passed but no bodyEdits replace carries {{signature}}, so there is nothing ' +
   'to expand; a {{signature}} already in the stored body is not expanded. Put {{signature}} in the replace ' +
-  'where the sign-off goes, or drop the flag and the replacements are stored as written.';
+  'where your message ends (it is the whole sign-off, closing line included), or drop the flag and the ' +
+  'replacements are stored as written.';
 
 /** Under expandSignature: tokens formed across a replace's edge, which no expansion pass sees. */
 export function noteBodyEditsSplitSignature(part: BodyEditPart, count: number): string {
@@ -97,14 +98,24 @@ export function locateBodyEdits(stored: string, ops: readonly BodyEdit[], part: 
  * `stored`, so no op sees another's replacement. `replacements[i]` replaces `located[i]`.
  */
 export function spliceBodyEdits(stored: string, located: readonly LocatedBodyEdit[], replacements: readonly string[]): string {
+  return spliceBodyEditsAt(stored, located, replacements).text;
+}
+
+/** `spliceBodyEdits`, also saying where `replacements[i]` starts in the spliced text. */
+export function spliceBodyEditsAt(
+  stored: string, located: readonly LocatedBodyEdit[], replacements: readonly string[],
+): { text: string; starts: number[] } {
   const order = located.map((_, i) => i).sort((x, y) => located[x].offset - located[y].offset);
+  const starts: number[] = [];
   let out = '';
   let cursor = 0;
   for (const i of order) {
-    out += stored.slice(cursor, located[i].offset) + replacements[i];
+    out += stored.slice(cursor, located[i].offset);
+    starts[i] = out.length;
+    out += replacements[i];
     cursor = located[i].offset + located[i].matchedSize;
   }
-  return out + stored.slice(cursor);
+  return { text: out + stored.slice(cursor), starts };
 }
 
 /** The stretches of `stored` that no located op matched, in order. */

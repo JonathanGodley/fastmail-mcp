@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQuerySummary, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatBodyEditsReceipt, formatEditDraftResult,formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQuerySummary, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatJoins, formatBodyEditsReceipt, formatEditDraftResult,formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 
@@ -142,6 +142,39 @@ describe('formatBodyEditsReceipt', () => {
 });
 
 // ---------- formatEditDraftResult ----------
+
+describe('formatJoins', () => {
+  const TEXT_JOIN = {
+    token: 'signature' as const, part: 'textBody' as const,
+    above: [], blankAbove: 0,
+    block: ['L1', 'L2', 'L5', 'L6'], blockOmitted: 2,
+    blankBelow: 1, below: [{ label: 'quoted original' as const, lines: 1 }],
+  };
+
+  it('renders one line per join in field order, after a heading that says it is display text', () => {
+    assert.equal(
+      formatJoins([TEXT_JOIN, { ...TEXT_JOIN, token: 'quote', block: [], blockOmitted: undefined, blankAbove: 1, below: ['PS'] }]),
+      '\n\nWhere each inserted block joins your text (display text, not bodyEdits.find input):\n' +
+      '{{signature}} joined in textBody: above: start of body; 0 blank lines; block "L1" / "L2" / … 2 more lines … / "L5" / "L6"; ' +
+      '1 blank line; below [quoted original, 1 line]\n' +
+      '{{quote}} joined in textBody: above: start of body; 1 blank line; block: renders no text; 1 blank line; below "PS"',
+    );
+  });
+
+  it('says one omitted line in the singular, and nothing at all when there are no joins', () => {
+    assert.match(formatJoins([{ ...TEXT_JOIN, blockOmitted: 1 }]), /… 1 more line …/);
+    assert.equal(formatJoins(undefined), '');
+    assert.equal(formatJoins([]), '');
+  });
+
+  it('is appended to both write results', () => {
+    const join = formatJoins([TEXT_JOIN]);
+    assert.ok(formatDraftEmailResult({ emailId: 'd', mode: 'new', joins: [TEXT_JOIN] }).endsWith(join));
+    assert.ok(formatEditDraftResult({
+      id: 'draft-2', replacedDraft: { id: 'draft-1' }, trashedOldDraftId: 'draft-1', joins: [TEXT_JOIN],
+    }).endsWith(join));
+  });
+});
 
 describe('formatEditDraftResult', () => {
   const REPLACED = {

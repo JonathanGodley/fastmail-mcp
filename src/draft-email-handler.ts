@@ -9,6 +9,8 @@ import {
 } from './reply-quote.js';
 import type { QuoteImageOutcome } from './reply-quote.js';
 import { expandBodyTokens, scanBodyTokens } from './body-tokens.js';
+import { buildJoins, insertedBlocks } from './body-joins.js';
+import type { TokenJoin } from './body-joins.js';
 import type {
   BlockUnavailableCause, BodyBlock, BodyBlocks, BodyTokenExpansion, BodyTokenName, BodyTokenScan,
 } from './body-tokens.js';
@@ -122,6 +124,8 @@ export interface ComposeDraftEmailResult {
   bcc?: string[];
   /** What the tokens did. Absent when the call wrote no token at all. */
   tokens?: DraftEmailReceipt;
+  /** The text either side of each inserted block. Absent when no block was inserted. */
+  joins?: TokenJoin[];
   /** What the draft embedded, could not, or was told about. Absent when there is nothing to say. */
   notes?: string[];
 }
@@ -975,6 +979,10 @@ export async function composeDraftEmail(
   });
 
   const receipt = buildReceipt(expansions, fillerBody);
+  // The expansion output is the stored part: nothing after step 8 rewrites a part that
+  // carries a token.
+  const joins = [...expansions].flatMap(([part, expansion]) =>
+    buildJoins(part, expansion.text, insertedBlocks(expansion.tokens)));
   const signaturePlaced = supplied.some((p) => p.scan.counts.signature > 0);
 
   // A "Re:" or "Fwd:" typed into a mode:'new' subject does not thread the message (#188), so
@@ -1035,6 +1043,7 @@ export async function composeDraftEmail(
     ...(params.cc && { cc: params.cc }),
     ...(params.bcc && { bcc: params.bcc }),
     ...(receipt && { tokens: receipt }),
+    ...(joins.length > 0 && { joins }),
     ...(notes.length > 0 && { notes }),
   };
 }

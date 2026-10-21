@@ -8,6 +8,7 @@ import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, Calend
 import type { SendDraftResult } from './send-draft-handler.js';
 import type { BodyEditsReceipt } from './body-edits.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
+import type { JoinLine, TokenJoin } from './body-joins.js';
 import { buildIdCollapseNote } from './id-collapse-note.js';
 
 // The summary heading every list/search response, written once for the raw and simplified
@@ -121,9 +122,37 @@ export function formatDraftEmailResult(result: ComposeDraftEmailResult): string 
     result.bcc?.length ? `BCC: ${echoRecipients(result.bcc)}` : null,
   ].filter(Boolean).join(' ') + formatInlineNotes(result.notes);
 
-  return result.tokens === undefined
+  return (result.tokens === undefined
     ? summary
-    : `${summary}\n\nTokens: ${toolJson(result.tokens)}`;
+    : `${summary}\n\nTokens: ${toolJson(result.tokens)}`) + formatJoins(result.joins);
+}
+
+const echoJoinItem = (line: JoinLine): string =>
+  typeof line === 'string' ? `"${line}"` : `[${line.label}, ${line.lines} line${line.lines === 1 ? '' : 's'}]`;
+
+const blankLines = (n: number): string => `${n} blank line${n === 1 ? '' : 's'}`;
+
+/**
+ * One line per inserted block: above, spacing, block, spacing, below. Every string in a
+ * join is already redacted, neutralised and bounded (body-joins.ts).
+ */
+export function formatJoins(joins: TokenJoin[] | undefined): string {
+  if (!joins?.length) return '';
+  const lines = joins.map((j) => {
+    const shown = j.block.map(echoJoinItem);
+    if (j.blockOmitted) shown.splice(2, 0, `… ${j.blockOmitted} more line${j.blockOmitted === 1 ? '' : 's'} …`);
+    const spacing = (markup: string | undefined, blanks: number | undefined) =>
+      markup !== undefined ? `markup "${markup}"` : blankLines(blanks ?? 0);
+    return [
+      `{{${j.token}}} joined in ${j.part}: ` +
+        (j.above.length ? `above ${j.above.map(echoJoinItem).join(' / ')}` : 'above: start of body'),
+      spacing(j.markupAbove, j.blankAbove),
+      shown.length ? `block ${shown.join(' / ')}` : 'block: renders no text',
+      spacing(j.markupBelow, j.blankBelow),
+      j.below.length ? `below ${j.below.map(echoJoinItem).join(' / ')}` : 'below: end of body',
+    ].join('; ');
+  });
+  return `\n\nWhere each inserted block joins your text (display text, not bodyEdits.find input):\n${lines.join('\n')}`;
 }
 
 // The replaced copy's contents are echoed so a caller that edited from a stale read sees
@@ -147,7 +176,7 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
       ? ` No body hash was issued: ${describeUntrusted(result.bodyHashWithheld)}`
       : '';
   return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}` +
-    `${formatBodyEditsReceipt(result.bodyEdits)}${formatInlineNotes(result.notes)}`;
+    `${formatBodyEditsReceipt(result.bodyEdits)}${formatInlineNotes(result.notes)}${formatJoins(result.joins)}`;
 }
 
 /** The bodyEdits receipt as one result line, sizes in the `chars` the replaced-draft sizes use. */
