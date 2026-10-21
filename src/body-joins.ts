@@ -45,7 +45,6 @@ export interface TokenJoin {
   below: JoinLine[];
 }
 
-/** Where one inserted block sits in the stored part. */
 export interface InsertedBlock {
   token: BodyTokenName;
   start: number;

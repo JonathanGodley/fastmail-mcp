@@ -650,11 +650,9 @@ const MINTED_CID_NONDURABILITY =
 const CARRIED_IMAGE_BOUND_DESC =
   'What is carried is bounded only by this: a part is carried when the body references it AND the sender declared it an image (image/*). The content type is sender-declared metadata — nothing is sniffed and nothing verifies the claim — and there is no size limit and no count limit, because the parts are re-referenced by blob rather than uploaded.';
 
-// draft_email, edit_draft's expandSignature and list_identities (#214).
 const SIGNATURE_IS_SIGN_OFF_DESC =
   '{{signature}} IS the sign-off: it expands to the sending identity\'s signature as configured, closing line included (a "Kind regards," and the name under it), so write no closing line of your own above it. Only when list_identities shows a signature with no closing line does one go above the token.';
 
-// Both tools that insert a block at a token (#214).
 const JOIN_RESULT_DESC =
   'THE RESULT SHOWS EACH JOIN: for every block inserted at a token, one line with the two lines above it, its first and last two lines, and the two lines below it (or end of body), plus the spacing at the join, as a blank-line count in a text part and as the markup either side of the token in an html part. Check it for a closing line of yours above the signature\'s own, spacing other than the canonical shape (1 blank line in text; in html, the markup shown), the signature below the history instead of above it, and prose left below {{forward}}. Join lines are display text, neutralised and shortened, never input for bodyEdits.find. To repair a join, read the draft with get_email for its bodyHash, then change it with edit_draft bodyEdits.';
 
