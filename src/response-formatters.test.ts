@@ -171,6 +171,13 @@ describe('formatJoins', () => {
     assert.equal(formatJoins([]), '');
   });
 
+  it('says a history block that renders no text does so, rather than "0 lines"', () => {
+    assert.match(
+      formatJoins([{ ...TEXT_JOIN, below: [{ label: 'quoted original', lines: 0 }] }]),
+      /; below \[quoted original, renders no text\]$/,
+    );
+  });
+
   it('is appended to both write results', () => {
     const join = formatJoins([TEXT_JOIN]);
     assert.ok(formatDraftEmailResult({ emailId: 'd', mode: 'new', joins: [TEXT_JOIN] }).endsWith(join));

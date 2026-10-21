@@ -8,6 +8,7 @@ import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, Calend
 import type { SendDraftResult } from './send-draft-handler.js';
 import type { BodyEditsReceipt } from './body-edits.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
+import { JOIN_WINDOW } from './body-joins.js';
 import type { JoinLine, TokenJoin } from './body-joins.js';
 import { buildIdCollapseNote } from './id-collapse-note.js';
 
@@ -127,8 +128,11 @@ export function formatDraftEmailResult(result: ComposeDraftEmailResult): string 
     : `${summary}\n\nTokens: ${toolJson(result.tokens)}`) + formatJoins(result.joins);
 }
 
-const echoJoinItem = (line: JoinLine): string =>
-  typeof line === 'string' ? `"${line}"` : `[${line.label}, ${line.lines} line${line.lines === 1 ? '' : 's'}]`;
+const echoJoinItem = (line: JoinLine): string => {
+  if (typeof line === 'string') return `"${line}"`;
+  if (line.lines === 0) return `[${line.label}, renders no text]`;
+  return `[${line.label}, ${line.lines} line${line.lines === 1 ? '' : 's'}]`;
+};
 
 const blankLines = (n: number): string => `${n} blank line${n === 1 ? '' : 's'}`;
 
@@ -140,7 +144,7 @@ export function formatJoins(joins: TokenJoin[] | undefined): string {
   if (!joins?.length) return '';
   const lines = joins.map((j) => {
     const shown = j.block.map(echoJoinItem);
-    if (j.blockOmitted) shown.splice(2, 0, `… ${j.blockOmitted} more line${j.blockOmitted === 1 ? '' : 's'} …`);
+    if (j.blockOmitted) shown.splice(JOIN_WINDOW, 0, `… ${j.blockOmitted} more line${j.blockOmitted === 1 ? '' : 's'} …`);
     const spacing = (markup: string | undefined, blanks: number | undefined) =>
       markup !== undefined ? `markup "${markup}"` : blankLines(blanks ?? 0);
     return [

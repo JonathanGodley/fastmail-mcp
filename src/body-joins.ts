@@ -56,7 +56,8 @@ export const JOIN_LINE_ECHO_LIMIT = 120;
 /** Two block wrappers with inline styles fit; #176's doubled spacer is 36. */
 export const JOIN_MARKUP_ECHO_LIMIT = 80;
 
-const WINDOW = 2;
+/** Lines shown each side of a join, and at each end of a block. */
+export const JOIN_WINDOW = 2;
 
 const HISTORY: Partial<Record<BodyTokenName, HistoryLabel['label']>> = {
   quote: 'quoted original',
@@ -149,11 +150,12 @@ function textJoin(pieces: Piece[], at: number): TokenJoin {
     const line = { start: lineStart, end: m ? m.index : text.length };
     const h = history.find((r) => touches(line, r));
     const prev = items[items.length - 1];
+    const counted = text.slice(line.start, line.end).trim() === '' ? 0 : 1;
     if (h && prev && typeof prev.line === 'object') {
-      prev.line.lines++;
+      prev.line.lines += counted;
       prev.end = line.end;
     } else if (h) {
-      items.push({ ...line, line: { label: h.label, lines: 1 }, blank: false });
+      items.push({ ...line, line: { label: h.label, lines: counted }, blank: false });
     } else {
       const shown = echoJoinLine(text.slice(line.start, line.end));
       items.push({ ...line, line: shown, blank: shown === '' });
@@ -183,19 +185,19 @@ function textJoin(pieces: Piece[], at: number): TokenJoin {
   return {
     token: pieces[at].token!,
     part: 'textBody',
-    above: visible(items.slice(0, up + 1)).slice(-WINDOW),
+    above: visible(items.slice(0, up + 1)).slice(-JOIN_WINDOW),
     blankAbove,
     ...windowBlock(visible(items.slice(first, last + 1))),
     blankBelow,
-    below: visible(items.slice(down)).slice(0, WINDOW),
+    below: visible(items.slice(down)).slice(0, JOIN_WINDOW),
   };
 }
 
 function windowBlock(lines: JoinLine[]): Pick<TokenJoin, 'block' | 'blockOmitted'> {
-  if (lines.length <= 2 * WINDOW) return { block: lines };
+  if (lines.length <= 2 * JOIN_WINDOW) return { block: lines };
   return {
-    block: [...lines.slice(0, WINDOW), ...lines.slice(-WINDOW)],
-    blockOmitted: lines.length - 2 * WINDOW,
+    block: [...lines.slice(0, JOIN_WINDOW), ...lines.slice(-JOIN_WINDOW)],
+    blockOmitted: lines.length - 2 * JOIN_WINDOW,
   };
 }
 
@@ -236,24 +238,35 @@ function htmlJoin(pieces: Piece[], at: number): TokenJoin {
   const inComment = before.lastIndexOf('<!--') > before.lastIndexOf('-->');
   const lt = before.lastIndexOf('<');
   const inTag = !inComment && lt > before.lastIndexOf('>') && TAG_START.test(before.charAt(lt + 1));
+  // Where the tag or comment the token sits in opens and closes: the markup runs extend to
+  // them, and the lines either side are rendered without them, whose halves would otherwise
+  // render as text ("'>There").
+  let opensAt = before.length;
+  let closesAt = 0;
+  if (inComment || inTag) {
+    const close = inComment ? '-->' : '>';
+    const q = after.indexOf(close);
+    opensAt = inComment ? before.lastIndexOf('<!--') : lt;
+    closesAt = q === -1 ? after.length : q + close.length;
+  }
+  const lines = [...pieces];
+  lines[at - 1] = { text: before.slice(0, opensAt) };
+  lines[at + 1] = { text: after.slice(closesAt) };
   return {
     token: pieces[at].token!,
     part: 'htmlBody',
-    above: htmlLines(pieces.slice(0, at)).slice(-WINDOW),
-    markupAbove: echoMarkup(markupBefore(before, inComment, inTag), true),
+    above: htmlLines(lines.slice(0, at)).slice(-JOIN_WINDOW),
+    markupAbove: echoMarkup(markupBefore(before, opensAt), true),
     ...windowBlock(htmlLines([pieces[at]])),
-    markupBelow: echoMarkup(markupAfter(after, inComment, inTag), false),
-    below: htmlLines(pieces.slice(at + 1)).slice(0, WINDOW),
+    markupBelow: echoMarkup(markupAfter(after, closesAt), false),
+    below: htmlLines(lines.slice(at + 1)).slice(0, JOIN_WINDOW),
   };
 }
 
 const TAG_START = /[A-Za-z/!?]/;
 
-/** The run of tags, comments and whitespace ending where `seg` ends (at the token). */
-function markupBefore(seg: string, inComment: boolean, inTag: boolean): string {
-  let p = seg.length;
-  if (inComment) p = seg.lastIndexOf('<!--');
-  else if (inTag) p = seg.lastIndexOf('<');
+/** The run of tags, comments and whitespace before the token, extended back from `p`. */
+function markupBefore(seg: string, p: number): string {
   for (;;) {
     if (/\s/.test(seg.charAt(p - 1))) { p--; continue; }
     if (seg.endsWith('-->', p)) {
@@ -263,8 +276,9 @@ function markupBefore(seg: string, inComment: boolean, inTag: boolean): string {
       continue;
     }
     if (seg.charAt(p - 1) === '>') {
+      // A `>` with another `>` before its `<` is prose (`=>`), and ends the run.
       const q = seg.lastIndexOf('<', p - 2);
-      if (q === -1 || !TAG_START.test(seg.charAt(q + 1))) break;
+      if (q === -1 || !TAG_START.test(seg.charAt(q + 1)) || seg.lastIndexOf('>', p - 2) > q) break;
       p = q;
       continue;
     }
@@ -273,14 +287,8 @@ function markupBefore(seg: string, inComment: boolean, inTag: boolean): string {
   return seg.slice(p);
 }
 
-/** The run of tags, comments and whitespace starting where `seg` starts (at the token). */
-function markupAfter(seg: string, inComment: boolean, inTag: boolean): string {
-  let p = 0;
-  if (inComment || inTag) {
-    const close = inComment ? '-->' : '>';
-    const q = seg.indexOf(close);
-    p = q === -1 ? seg.length : q + close.length;
-  }
+/** The run of tags, comments and whitespace after the token, extended forward from `p`. */
+function markupAfter(seg: string, p: number): string {
   for (;;) {
     if (/\s/.test(seg.charAt(p))) { p++; continue; }
     if (seg.startsWith('<!--', p)) {
@@ -291,7 +299,8 @@ function markupAfter(seg: string, inComment: boolean, inTag: boolean): string {
     }
     if (seg.charAt(p) === '<' && TAG_START.test(seg.charAt(p + 1))) {
       const q = seg.indexOf('>', p + 1);
-      if (q === -1) break;
+      const reopened = seg.indexOf('<', p + 1);
+      if (q === -1 || (reopened !== -1 && reopened < q)) break;
       p = q + 1;
       continue;
     }

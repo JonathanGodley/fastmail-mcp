@@ -67,7 +67,7 @@ describe('body joins — text parts', () => {
     const { text, blocks } = expand('{{signature}}\n{{quote}}', 'SIG', '\nq1\n\nq2');
     const [sig] = buildJoins('textBody', text, blocks);
     assert.equal(sig.blankBelow, 0);
-    assert.deepEqual(sig.below, [{ label: 'quoted original', lines: 4 }]);
+    assert.deepEqual(sig.below, [{ label: 'quoted original', lines: 2 }], 'non-blank lines, as an html label counts');
   });
 
   it('leaves an empty line starting where a history block ends to the caller', () => {
@@ -210,6 +210,32 @@ describe('body joins — html parts', () => {
       const [join] = buildJoins('htmlBody', text, blocks);
       assert.deepEqual([join.markupAbove, join.markupBelow], [above, below], authored);
     }
+  });
+
+  it('ends a run at a prose > or < even when a real tag lies beyond it', () => {
+    for (const [authored, above, below] of [
+      ['<p>a -> {{signature}}</p>', ' ', '</p>'],
+      ['<p>Thanks => </p>{{signature}}', ' </p>', ''],
+      ['{{signature}}<a then <b>x', '', ''],
+    ]) {
+      const { text, blocks } = expand(authored);
+      const [join] = buildJoins('htmlBody', text, blocks);
+      assert.deepEqual([join.markupAbove, join.markupBelow], [above, below], authored);
+    }
+  });
+
+  it('shows no part of the tag or comment the token sits in as a display line', () => {
+    const { text, blocks } = expand('<p>Hi</p><p title="{{signature}}">There</p>');
+    const [join] = buildJoins('htmlBody', text, blocks);
+    assert.deepEqual([join.above, join.below], [['Hi'], ['There']]);
+    const { text: t2, blocks: b2 } = expand('<p>Hi</p><!-- {{signature}} --><p>x</p>');
+    const [j2] = buildJoins('htmlBody', t2, b2);
+    assert.deepEqual([j2.above, j2.below], [['Hi'], ['x']]);
+  });
+
+  it('counts a history label in non-blank lines, and an html one that renders nothing as 0', () => {
+    const { text, blocks } = expand('<p>Hi</p>{{signature}}{{quote}}', 'SIG', '<div><img src="https://example.com/x.png"></div>');
+    assert.deepEqual(buildJoins('htmlBody', text, blocks)[0].below, [{ label: 'quoted original', lines: 0 }]);
   });
 
   it('shows the rest of the segment when the tag the token sits in never closes', () => {
