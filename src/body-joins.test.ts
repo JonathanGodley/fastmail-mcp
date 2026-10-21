@@ -70,6 +70,11 @@ describe('body joins — text parts', () => {
     assert.deepEqual(sig.below, [{ label: 'quoted original', lines: 2 }], 'non-blank lines, as an html label counts');
   });
 
+  it('does not count a whitespace-only line of a history block', () => {
+    const { text, blocks } = expand('{{quote}}', 'SIG', 'q1\n   \nq2');
+    assert.deepEqual(buildJoins('textBody', text, blocks)[0].block, [{ label: 'quoted original', lines: 2 }]);
+  });
+
   it('leaves an empty line starting where a history block ends to the caller', () => {
     const { text, blocks } = expand('{{quote}}\nPS', 'SIG', 'q1\n');
     const [quote] = buildJoins('textBody', text, blocks);
