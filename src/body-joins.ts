@@ -238,6 +238,11 @@ function htmlJoin(pieces: Piece[], at: number): TokenJoin {
   // Where the tag or comment the token sits in opens and closes: the markup runs extend to
   // them, and the lines either side are rendered without them, whose halves would otherwise
   // render as text ("'>There").
+  //
+  // Read from the caller text next to this token only, so with two tokens in one tag or
+  // comment (`title="{{signature}}{{quote}}"`) the second is not seen as inside it and tag
+  // halves reach the lines. Accepted: tokens belong at block level, and there the markup run
+  // is what the caller reads. Carrying tag state across blocks is not worth it for that case.
   const open = openAtEnd(before);
   const opensAt = open ? open.start : before.length;
   let closesAt = 0;
