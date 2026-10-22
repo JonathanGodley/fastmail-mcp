@@ -90,4 +90,4 @@ gh issue close <N> --repo JonathanGodley/fastmail-mcp --comment "<cite the relea
 
 ## 10. Post-release
 
-- Confirm the tag's "Build and Release DXT" run succeeded and the release carries `fastmail-mcp-<version>.dxt` (`gh run list --repo JonathanGodley/fastmail-mcp --workflow build-dxt.yml --limit 1`), and that the push's `test.yml` run is green. Reconnect MCP clients to load the new `dist/`.
+- Confirm the tag's "Build and Release DXT" run succeeded and the release carries `fastmail-mcp-<version>.dxt` (`gh run list --repo JonathanGodley/fastmail-mcp --workflow build-dxt.yml --limit 1`), and that the push's `test.yml` run is green.
