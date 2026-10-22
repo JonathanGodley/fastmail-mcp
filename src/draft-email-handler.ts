@@ -973,10 +973,9 @@ export async function composeDraftEmail(
 
   // --- 12. Store, then report ----------------------------------------------
   const emailId = await client.createDraft(params);
-  // Asked with edit_draft's own descriptor. The governing part is always one the caller
-  // supplied, so edit_draft's derived-part withhold has no case here: a text-only call builds
-  // no html, an html call derives only the text, which does not govern, and the asAttachment
-  // filler is a fixed sentence the receipt reports.
+  // No derived-part withhold as on edit_draft: a text-only call builds no html, an html call
+  // derives only the text, which does not govern, and the asAttachment filler is a fixed
+  // sentence the receipt reports.
   const hash = await hashSavedDraft(emailId, (id) => client.readDraftBody(id));
 
   pooled.forEach((part, i) => {
