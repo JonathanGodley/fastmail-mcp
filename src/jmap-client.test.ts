@@ -1286,9 +1286,8 @@ describe('updateDraft', () => {
   // handed byte for byte — a quote survives an edit because the caller handed it back, and
   // vanishes because the caller did not, with no challenge either way.
   //
-  // A body edit must instead carry the `bodyHash` of the read it was written against. That
-  // proves the caller SAW the body it is replacing; it never proves the caller kept any of
-  // it. So these fixtures keep the raw Fastmail reply
+  // A body edit must instead carry the `bodyHash` of the read or write its copy came from.
+  // That proves the copy is current; it never proves the caller kept any of it. So these fixtures keep the raw Fastmail reply
   // shapes, because "a body with a quote in it is stored with the quote in it, unchanged" is
   // exactly the property to pin. Captured from a live store/fetch round-trip (2026-06-28)
   // and trimmed; the quoted lines carry synthetic content, because nothing reads them.
@@ -1491,11 +1490,10 @@ describe('updateDraft', () => {
     assert.equal(result.bodyHashWithheld, undefined);
   });
 
-  // The compose side issues none, in any mode. createDraft's whole result is the new id —
-  // there is nowhere for a hash to ride, and that is the design: a hash certifies that the
-  // caller SAW the stored body, and a compose result can only ever echo the bytes it just
-  // sent, which proves nothing about what the server stored. The caller reads the draft.
-  it('createDraft hands back an id and nothing else — no compose path issues a hash', async () => {
+  // createDraft returns the new id alone: a hash over the bytes it sent would prove nothing
+  // about what the server stored, so draft_email takes its hash from a re-read instead
+  // (`hashSavedDraft`).
+  it('createDraft hands back an id and nothing else', async () => {
     stubMakeRequest(client, {
       methodResponses: [['Email/set', { created: { draft: { id: 'email-42' } } }, 'createDraft']],
     });

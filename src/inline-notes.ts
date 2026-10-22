@@ -493,19 +493,20 @@ export function noteTokenEmpty(token: string, part: string, cause: BlockUnavaila
 }
 
 /**
- * A body edit arrived with no proof that the caller read the body it replaces.
+ * A body edit arrived with no proof that the caller's copy of the body is current.
  *
  * The sentence explains WHY rather than just naming the parameter: this tool stores what it
- * is handed and preserves nothing, so the hash is all that stands between a stale read and a
+ * is handed and preserves nothing, so the hash is all that stands between a stale copy and a
  * silent overwrite.
  */
 export function rejectMissingBodyHash(): string {
   return (
-    'This edit writes the draft\'s body, so it needs bodyHash — proof you have read the body ' +
-    'you are replacing. edit_draft stores the body you supply byte for byte and keeps nothing ' +
-    'of what is there, so an edit written from a stale read overwrites whatever changed in ' +
-    'between. Read the draft with get_email (fields: ["bodyText", "bodyHtml", "bodyHash"]) and ' +
-    'pass the bodyHash it returns. Metadata-only edits need none.'
+    'This edit writes the draft\'s body, so it needs bodyHash — proof that your copy of the ' +
+    'body is current. edit_draft stores the body you supply byte for byte and keeps nothing ' +
+    'of what is there, so an edit written from a stale copy overwrites whatever changed in ' +
+    'between. Pass the bodyHash from the draft_email or edit_draft result that saved this ' +
+    'draft, or read the draft with get_email (fields: ["bodyText", "bodyHtml", "bodyHash"]) ' +
+    'and pass the one it returns. Metadata-only edits need none.'
   );
 }
 
@@ -513,7 +514,7 @@ export function rejectMissingBodyHash(): string {
 export function rejectStaleBodyHash(): string {
   return (
     'The bodyHash you passed is not this draft\'s current one, so what it covers changed ' +
-    'after the read that issued it: either the body itself (the web UI, another client, or ' +
+    'after the read or write that issued it: either the body itself (the web UI, another client, or ' +
     'an edit you have already made), or the set of parts it is taken over — removing an ' +
     'embedded image changes that without writing a body. ' +
     'Nothing was written. Read the draft again with get_email, re-apply your changes to the ' +
@@ -625,18 +626,14 @@ export function noteDiscardedTextPart(): string {
   );
 }
 
-// Why this edit returns no bodyHash. Each names the caller's way out: a silently omitted
-// field cannot be told from a forgotten one.
+// Why a write result returns no bodyHash. Each names the caller's way out: a silently
+// omitted field cannot be told from a forgotten one.
 //
 // The way out is a re-read, except where a re-read cannot answer either (a flagged stored
 // body, or a part no read returns), where it is to recreate the draft. Those cases are NOT
-// enumerated here: the two below are the reasons this edit path owns, and everything about
-// the saved body is asked of `resolveDraftBodyHash` and reported through
-// `noteBodyHashAfterReRead`, so one rule decides it for both tools.
-//
-// A hash is returned ONLY over a re-read of the stored parts after the write, never over
-// the bytes the call sent: a store may normalise what it stores, and a hash over the sent
-// bytes would refuse the next edit as stale on a draft nobody had touched.
+// enumerated here: the constants below are the reasons the edit path owns, and everything
+// about the saved body is asked of `resolveDraftBodyHash` through `hashSavedDraft`, so one
+// rule decides it for every tool that issues a hash.
 
 export const NOTE_BODY_HASH_AFTER_EXPANSION =
   'this edit expanded {{signature}}, so the stored body carries a block you have not read. ' +
@@ -648,13 +645,10 @@ export const NOTE_BODY_HASH_DERIVED_PART =
   'the next body edit.';
 
 /**
- * A withheld-hash reason decided by the READ side, said on the edit surface.
- *
- * `edit_draft` does not judge the saved body itself: it asks `resolveDraftBodyHash` about
- * the draft it just re-read, so the two tools cannot disagree about the same stored bytes.
- * Those reasons are written for a caller that performed a read, and the caller of
- * `edit_draft` performed none — without this prefix, "this read did not return it whole"
- * names a read the caller never issued.
+ * A withheld-hash reason decided by the READ side, said on a write result. Those reasons are
+ * written for a caller that performed a read, and the caller of `draft_email` or `edit_draft`
+ * performed none: without this prefix, "this read did not return it whole" names a read the
+ * caller never issued.
  */
 export function noteBodyHashAfterReRead(reason: string): string {
   return `the saved draft was re-read to compute one, but ${reason}`;

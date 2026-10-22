@@ -98,11 +98,11 @@ const READS = [false, true].flatMap((bodyText) =>
 const REASONS: Record<string, string> = {
   degraded:
     'the server flagged part of this draft\'s stored body as truncated or as having '
-    + 'encoding problems, so this read did not return it whole and no read can prove you '
-    + 'saw it. Recreate the draft rather than editing its body.',
+    + 'encoding problems, so no read returns it whole to edit from. '
+    + 'Recreate the draft rather than editing its body.',
   unreadable:
     'this draft carries a body part no read returns (a part whose declared type does not '
-    + 'match the body list it sits in), so no read can prove you saw the whole body. '
+    + 'match the body list it sits in), so no read returns the whole body to edit from. '
     + 'Recreate the draft rather than editing its body.',
   'uneditable:text/plain':
     'this draft\'s body interleaves multiple text/plain parts, a layout editing cannot '
@@ -116,16 +116,16 @@ const REASONS: Record<string, string> = {
     'this read stripped quoted history out of bodyText, so it does not show the body as '
     + 'stored. Read the draft again without stripQuoted to get a bodyHash.',
   'projection:both':
-    'this read did not return the draft\'s stored body whole, so it cannot prove you saw '
-    + 'it. Read the draft with fields: ["bodyText", "bodyHtml", "bodyHash"] (or '
+    'this read did not return the draft\'s stored body whole, so it gave you no whole '
+    + 'copy to edit from. Read the draft with fields: ["bodyText", "bodyHtml", "bodyHash"] (or '
     + 'verbose:true) to get a bodyHash.',
   'projection:html':
-    'this read did not return the draft\'s stored body whole, so it cannot prove you saw '
-    + 'it. Read the draft with fields: ["bodyHtml", "bodyHash"] (or verbose:true) to get a '
+    'this read did not return the draft\'s stored body whole, so it gave you no whole '
+    + 'copy to edit from. Read the draft with fields: ["bodyHtml", "bodyHash"] (or verbose:true) to get a '
     + 'bodyHash.',
   'projection:text':
-    'this read did not return the draft\'s stored body whole, so it cannot prove you saw '
-    + 'it. Read the draft with fields: ["bodyText", "bodyHash"] to get a bodyHash.',
+    'this read did not return the draft\'s stored body whole, so it gave you no whole '
+    + 'copy to edit from. Read the draft with fields: ["bodyText", "bodyHash"] to get a bodyHash.',
 };
 const REASON_NAME = new Map(Object.entries(REASONS).map(([name, text]) => [text, name]));
 

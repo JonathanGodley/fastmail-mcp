@@ -900,9 +900,10 @@ populates it and it is arbitrary JSON a string-shaped scrubber cannot walk.
 
 Server text that reaches the caller on a *successful* result gets no help from that catch,
 so it is sanitised at its own render site. `orphanedOldDraftReason` and `bodyHashWithheld`
-are those fields today (`formatEditDraftResult` in `src/response-formatters.ts`, holding a
-server or exception message when an `edit_draft` replacement could not be moved to Trash, or
-when the re-read that would issue a body hash failed). Both go through `describeUntrusted`
+are those fields today (`formatEditDraftResult`, and `formatBodyHash` for both draft tools,
+in `src/response-formatters.ts`, holding a server or exception message when an `edit_draft`
+replacement could not be moved to Trash, or when the re-read that would issue a body hash
+failed). Both go through `describeUntrusted`
 rather than redaction alone: one assignment site for each is a caught exception's own
 message, so the text is arbitrary and can carry a line break that would split the warning
 into what reads as two outcomes. It happens where the value is rendered rather than where it

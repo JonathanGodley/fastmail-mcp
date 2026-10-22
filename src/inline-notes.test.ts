@@ -25,9 +25,11 @@ import {
   rejectCidCollisionOnDraft,
   rejectClearAttachmentsDanglingRefs,
   rejectDanglingCidRef,
+  rejectMissingBodyHash,
   rejectNoteCidRef,
   rejectRemovalDanglingRef,
   rejectReservedCidRef,
+  rejectStaleBodyHash,
   rejectUnrecreatableCid,
 } from './inline-notes.js';
 import type { NoteTally } from './inline-notes.js';
@@ -694,5 +696,33 @@ describe('rejectExpandSignatureWithoutToken', () => {
       'Place {{signature}} where your message ends, above any quoted or forwarded history (it is the ' +
       'whole sign-off, closing line included), or drop the flag and the body is stored as written.',
     ));
+  });
+});
+
+// Whole, because each names every source of a hash: a sentence dropped from one would send a
+// caller holding a draft_email or edit_draft result off to a read it does not need.
+describe('the missing- and stale-hash refusals', () => {
+  it('names every source of a hash when none was passed', () => {
+    assert.equal(
+      rejectMissingBodyHash(),
+      'This edit writes the draft\'s body, so it needs bodyHash — proof that your copy of the '
+      + 'body is current. edit_draft stores the body you supply byte for byte and keeps nothing '
+      + 'of what is there, so an edit written from a stale copy overwrites whatever changed in '
+      + 'between. Pass the bodyHash from the draft_email or edit_draft result that saved this '
+      + 'draft, or read the draft with get_email (fields: ["bodyText", "bodyHtml", "bodyHash"]) '
+      + 'and pass the one it returns. Metadata-only edits need none.',
+    );
+  });
+
+  it('says a stale hash can come from a read or a write', () => {
+    assert.equal(
+      rejectStaleBodyHash(),
+      'The bodyHash you passed is not this draft\'s current one, so what it covers changed '
+      + 'after the read or write that issued it: either the body itself (the web UI, another client, or '
+      + 'an edit you have already made), or the set of parts it is taken over — removing an '
+      + 'embedded image changes that without writing a body. '
+      + 'Nothing was written. Read the draft again with get_email, re-apply your changes to the '
+      + 'body it returns, and pass the bodyHash from that read.',
+    );
   });
 });

@@ -27,6 +27,7 @@ import {
 import type { CidPart } from './inline-images.js';
 import { CAUSE_SENTENCE, InlineNoteLedger, describePartNames, noteTokenEmpty } from './inline-notes.js';
 import { rejectFromAddress } from './jmap-client.js';
+import { hashSavedDraft } from './body-hash.js';
 import type { AttachmentPart, UploadAttachmentsOptions } from './jmap-client.js';
 import { matchSubjectPrefix, noteComposeSubjectPrefix } from './subject-prefix.js';
 
@@ -126,6 +127,9 @@ export interface ComposeDraftEmailResult {
   tokens?: DraftEmailReceipt;
   /** The text either side of each inserted block. Absent when no block was inserted. */
   joins?: TokenJoin[];
+  /** Exactly one of the two, over a re-read of the saved draft (`hashSavedDraft`). */
+  bodyHash?: string;
+  bodyHashWithheld?: string;
   /** What the draft embedded, could not, or was told about. Absent when there is nothing to say. */
   notes?: string[];
 }
@@ -141,6 +145,8 @@ export interface DraftEmailClient {
     options?: UploadAttachmentsOptions,
   ): Promise<AttachmentPart[]>;
   createDraft(params: DraftEmailParams): Promise<string>;
+  /** The saved draft's body parts with their values, for the hash the result hands back. */
+  readDraftBody(emailId: string): Promise<any>;
 }
 
 // ---------------------------------------------------------------------------
@@ -967,6 +973,11 @@ export async function composeDraftEmail(
 
   // --- 12. Store, then report ----------------------------------------------
   const emailId = await client.createDraft(params);
+  // Asked with edit_draft's own descriptor. The governing part is always one the caller
+  // supplied, so edit_draft's derived-part withhold has no case here: a text-only call builds
+  // no html, an html call derives only the text, which does not govern, and the asAttachment
+  // filler is a fixed sentence the receipt reports.
+  const hash = await hashSavedDraft(emailId, (id) => client.readDraftBody(id));
 
   pooled.forEach((part, i) => {
     ledger.record({ key: `pool:${i}`, outcome: 'pooled', name: part.name, isImage: isImageType(part.type) });
@@ -1044,6 +1055,7 @@ export async function composeDraftEmail(
     ...(params.bcc && { bcc: params.bcc }),
     ...(receipt && { tokens: receipt }),
     ...(joins.length > 0 && { joins }),
+    ...hash,
     ...(notes.length > 0 && { notes }),
   };
 }

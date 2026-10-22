@@ -121,7 +121,7 @@ export function formatDraftEmailResult(result: ComposeDraftEmailResult): string 
     result.to?.length ? `To: ${echoRecipients(result.to)}` : null,
     result.cc?.length ? `CC: ${echoRecipients(result.cc)}` : null,
     result.bcc?.length ? `BCC: ${echoRecipients(result.bcc)}` : null,
-  ].filter(Boolean).join(' ') + formatInlineNotes(result.notes);
+  ].filter(Boolean).join(' ') + formatBodyHash(result) + formatInlineNotes(result.notes);
 
   return (result.tokens === undefined
     ? summary
@@ -159,6 +159,14 @@ export function formatJoins(joins: TokenJoin[] | undefined): string {
   return `\n\nWhere each inserted block joins your text (display text, not bodyEdits.find input):\n${lines.join('\n')}`;
 }
 
+// Printed, or the caller could not use the hash; bodyHashWithheld can carry a failed
+// re-read's message, so it is neutralised like orphanedOldDraftReason.
+export function formatBodyHash(result: { bodyHash?: string; bodyHashWithheld?: string }): string {
+  if (result.bodyHash) return ` Body hash for your next edit of this draft: ${result.bodyHash}`;
+  if (result.bodyHashWithheld) return ` No body hash was issued: ${describeUntrusted(result.bodyHashWithheld)}`;
+  return '';
+}
+
 // The replaced copy's contents are echoed so a caller that edited from a stale read sees
 // what it overwrote, and can restore it from Trash (#65).
 export function formatEditDraftResult(result: UpdateDraftResult): string {
@@ -172,14 +180,7 @@ export function formatEditDraftResult(result: UpdateDraftResult): string {
   const replaced = fingerprint
     ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`
     : '';
-  // Printed, or the caller could not use the hash; bodyHashWithheld can carry a failed
-  // re-read's message, so it is neutralised like orphanedOldDraftReason.
-  const hash = result.bodyHash
-    ? ` Body hash for your next edit of this draft: ${result.bodyHash}`
-    : result.bodyHashWithheld
-      ? ` No body hash was issued: ${describeUntrusted(result.bodyHashWithheld)}`
-      : '';
-  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${hash}` +
+  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${formatBodyHash(result)}` +
     `${formatBodyEditsReceipt(result.bodyEdits)}${formatInlineNotes(result.notes)}${formatJoins(result.joins)}`;
 }
 

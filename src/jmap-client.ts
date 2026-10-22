@@ -18,7 +18,7 @@ import {
 import type { BodyEdit, BodyEditPart, BodyEditsReceipt, LocatedBodyEdit } from './body-edits.js';
 import {
   bodyHash, classifyPartType, collectDraftBodyParts, draftInterleavedTextType, draftPartKey,
-  isTextBodyType, resolveDraftBodyHash,
+  hashSavedDraft, isTextBodyType,
 } from './body-hash.js';
 import {
   buildUnionParts, cidKey, describePart, sanitizeDownloadFilename,
@@ -28,7 +28,7 @@ import {
 import type { CidPart, UnionPart } from './inline-images.js';
 import {
   InlineNoteLedger, describePartNames, emitInlineNotes,
-  noteBodyHashUnreadable, noteDiscardedTextPart, noteEmbedMissingAfterSave, noteEmbedUnconfirmed,
+  noteDiscardedTextPart, noteEmbedMissingAfterSave, noteEmbedUnconfirmed,
   noteEscapedTokenShips, noteHistoryTokenStored, noteNearMissToken, noteSentWithEmbedded,
   noteSignatureExpandedInOnePart, noteSignatureTokenStored, noteTokenEmpty,
   noteUnexpandedSpelling,
@@ -37,7 +37,7 @@ import {
   rejectInterleavedTextParts, rejectMissingBodyHash,
   rejectRemovalDanglingRef, rejectRepeatedSignatureToken, rejectReservedCidRef,
   rejectStaleBodyHash, rejectUncarriableBodyPart, rejectUnrecreatableCid,
-  NOTE_BODY_HASH_AFTER_EXPANSION, NOTE_BODY_HASH_DERIVED_PART, noteBodyHashAfterReRead,
+  NOTE_BODY_HASH_AFTER_EXPANSION, NOTE_BODY_HASH_DERIVED_PART,
 } from './inline-notes.js';
 import type { AttachmentAvailability } from './inline-notes.js';
 import { matchSubjectPrefix, noteEditSubjectPrefix } from './subject-prefix.js';
@@ -2322,9 +2322,9 @@ export class JmapClient {
       throw new InvalidInputError('textBody can\'t be cleared on its own while htmlBody is present — the text fallback is managed automatically (regenerated from htmlBody, or html-only if none can be derived). Omit textBody from clearFields; or use clearFields:[\'htmlBody\'] to make this a plain-text email.');
     }
 
-    // ---- Proof that the caller read the body it is replacing ----
-    // `bodyHash` is a LOST-UPDATE GUARD and nothing else: it proves the caller saw the body,
-    // never that it kept any of it. Recomputed over the same part set `get_email` hashes. The
+    // ---- Proof that the caller's copy of the body is current ----
+    // `bodyHash` is a LOST-UPDATE GUARD and nothing else: it proves nothing changed the body
+    // since the read or write that issued the hash, never that the caller kept any of it. Recomputed over the same part set `get_email` hashes. The
     // window to the write is accepted; there is no `ifInState` below.
     //
     // Gated on `touchesBody`, not on body-invariance, which the metadata path cannot promise
@@ -2907,9 +2907,7 @@ export class JmapClient {
     //    clearing htmlBody on a draft that never had one leaves stored text the caller saw, so
     //    that edit issues a hash.
     //
-    // PROVENANCE is the whole point: a returned hash comes from a RE-READ of the saved draft,
-    // never from the bytes sent, which would assert what the server stored on the strength of
-    // what was asked. A failed re-read has NO fallback: no hash, and the reason.
+    // Otherwise it comes from `hashSavedDraft`, which states the provenance rule.
     const governingSupplied = !isBlank(htmlBodyValue)
       ? wroteHtml
       : wroteText || (isBlank(existingHtmlValue) && textBodyValue === existingTextValue);
@@ -2921,31 +2919,9 @@ export class JmapClient {
       } else if (!governingSupplied) {
         bodyHashWithheld = NOTE_BODY_HASH_DERIVED_PART;
       } else {
-        try {
-          const saved = await this.readDraftBody(newEmailId);
-          // WHETHER THE SAVED BODY CAN BE HASHED IS THE READ SIDE'S RULE, ASKED RATHER THAN
-          // RE-STATED, so this hash and a later `get_email`'s agree by construction.
-          //
-          // THE DESCRIPTOR IS A CLAIM about what the response showed: `readDraftBody` fetches
-          // both lists whole, so anything less would withhold with a false read-scope reason.
-          const outcome = resolveDraftBodyHash(saved, {
-            bodyText: true,
-            bodyHtml: true,
-            stripQuoted: false,
-          });
-          if (!outcome) {
-            // Undefined only for a non-draft: the re-read did not come back as what we wrote.
-            // Raised so the read-failure note says so, rather than the field vanishing.
-            throw new Error(`the saved draft "${describeUntrusted(newEmailId)}" did not read back as a draft`);
-          }
-          if ('bodyHash' in outcome) {
-            issuedBodyHash = outcome.bodyHash;
-          } else {
-            bodyHashWithheld = noteBodyHashAfterReRead(outcome.bodyHashWithheld);
-          }
-        } catch (err) {
-          bodyHashWithheld = noteBodyHashUnreadable(err instanceof Error ? err.message : String(err));
-        }
+        const outcome = await hashSavedDraft(newEmailId, (id) => this.readDraftBody(id));
+        if ('bodyHash' in outcome) issuedBodyHash = outcome.bodyHash;
+        else bodyHashWithheld = outcome.bodyHashWithheld;
       }
     }
 
@@ -2985,7 +2961,7 @@ export class JmapClient {
    * `keywords` is required: without it `resolveDraftBodyHash` reads a non-draft and the hash
    * silently goes missing.
    */
-  private async readDraftBody(emailId: string): Promise<any> {
+  async readDraftBody(emailId: string): Promise<any> {
     const session = await this.getSession();
     const response = await this.makeRequest({
       using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],

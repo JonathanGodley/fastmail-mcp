@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto';
 import type { SimplifiedEmail } from './email-formatter.js';
+import { describeUntrusted } from './coerce.js';
+import { noteBodyHashAfterReRead, noteBodyHashUnreadable } from './inline-notes.js';
 
 // ---------------------------------------------------------------------------
 // The draft body hash: one lost-update guard, computed the same way on both sides
 // ---------------------------------------------------------------------------
 //
-// `get_email` issues the hash over a draft's stored body; `edit_draft`, which stores the body
+// `get_email` issues the hash over a draft's stored body, and the `draft_email` and
+// `edit_draft` results issue it over the draft they saved; `edit_draft`, which stores the body
 // it is handed byte for byte, refuses a body edit whose hash is absent or stale. It proves the
-// caller SAW the body it replaces and preserves none of it.
+// caller's copy of the body is current (nothing changed it since the read or write that issued
+// the hash) and preserves none of it.
 //
 // The hash is over EVERY stored body part, deduplicated across the two lists, whatever its
 // type: no part type is consulted, so a typeless part or several parts of one type are
@@ -219,8 +223,8 @@ export function resolveDraftBodyHash(email: any, read: DraftBodyHashRead): Draft
     return {
       bodyHashWithheld:
         'the server flagged part of this draft\'s stored body as truncated or as having ' +
-        'encoding problems, so this read did not return it whole and no read can prove you ' +
-        'saw it. Recreate the draft rather than editing its body.',
+        'encoding problems, so no read returns it whole to edit from. ' +
+        'Recreate the draft rather than editing its body.',
     };
   }
 
@@ -229,7 +233,7 @@ export function resolveDraftBodyHash(email: any, read: DraftBodyHashRead): Draft
     return {
       bodyHashWithheld:
         'this draft carries a body part no read returns (a part whose declared type does not ' +
-        'match the body list it sits in), so no read can prove you saw the whole body. ' +
+        'match the body list it sits in), so no read returns the whole body to edit from. ' +
         'Recreate the draft rather than editing its body.',
     };
   }
@@ -275,12 +279,41 @@ export function resolveDraftBodyHash(email: any, read: DraftBodyHashRead): Draft
     const verbose = wanted.includes('bodyHtml') ? ' (or verbose:true)' : '';
     return {
       bodyHashWithheld:
-        `this read did not return the draft's stored body whole, so it cannot prove you saw ` +
-        `it. Read the draft with fields: [${list}]${verbose} to get a bodyHash.`,
+        `this read did not return the draft's stored body whole, so it gave you no whole ` +
+        `copy to edit from. Read the draft with fields: [${list}]${verbose} to get a bodyHash.`,
     };
   }
 
   return { bodyHash: bodyHash(parts) };
+}
+
+/**
+ * The hash a write result hands back for the draft it saved, `draft_email`'s and
+ * `edit_draft`'s alike.
+ *
+ * PROVENANCE: it comes from a RE-READ of the saved draft, never from the bytes the call sent,
+ * which would assert what the server stored on the strength of what was asked. Whether it can
+ * be issued is asked of `resolveDraftBodyHash`, so a write's hash and a later `get_email`'s
+ * agree by construction; the descriptor claims both lists whole because `readBack` fetches
+ * them whole. A failed re-read gives a reason, never a throw: the draft is already saved.
+ */
+export async function hashSavedDraft(
+  emailId: string,
+  readBack: (emailId: string) => Promise<any>,
+): Promise<DraftBodyHashOutcome> {
+  try {
+    const saved = await readBack(emailId);
+    const outcome = resolveDraftBodyHash(saved, { bodyText: true, bodyHtml: true, stripQuoted: false });
+    if (!outcome) {
+      // Undefined only for a non-draft: the re-read did not come back as what was written.
+      throw new Error(`the saved draft "${describeUntrusted(emailId)}" did not read back as a draft`);
+    }
+    return 'bodyHash' in outcome
+      ? outcome
+      : { bodyHashWithheld: noteBodyHashAfterReRead(outcome.bodyHashWithheld) };
+  } catch (err) {
+    return { bodyHashWithheld: noteBodyHashUnreadable(err instanceof Error ? err.message : String(err)) };
+  }
 }
 
 /** What the get_email call being answered asked for. */

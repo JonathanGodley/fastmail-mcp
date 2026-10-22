@@ -7,8 +7,8 @@
 //     twice. Two different draft bodies that hash alike would let a stale edit through.
 //  2. THAT THE CANONICAL FORM IS INJECTIVE. The parts are joined, so without a length prefix
 //     two parts could spell one, and a part with no stored value could spell an empty one.
-//  3. WHEN A READ MAY ISSUE ONE. The hash certifies that the caller SAW the bytes it is about
-//     to replace, so a read that did not show them whole must withhold it — and say so,
+//  3. WHEN A READ MAY ISSUE ONE. The hash certifies that the caller's copy of the bytes it is
+//     about to replace is current, so a read that did not return them whole must withhold it — and say so,
 //     never fall silent, because a missing field reads exactly like "this draft has no hash".
 
 import { describe, it } from 'node:test';

@@ -7,9 +7,10 @@ import {
   CAUSE_SENTENCE, noteAttachmentsExcluded, noteDroppedQuoteImages, noteTokenEmpty,
 } from './inline-notes.js';
 import { EMAIL_BODY_PROPERTIES } from './jmap-client.js';
-import { normalizeBodies } from './body-format.js';
+import { buildBodyParts, normalizeBodies } from './body-format.js';
 import { noteComposeSubjectPrefix } from './subject-prefix.js';
 import { formatDraftEmailResult } from './response-formatters.js';
+import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -77,9 +78,22 @@ function spyClient(original: any = makeOriginal(), over: Partial<DraftEmailClien
       return [];
     },
     createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
+    readDraftBody: async (id) => savedDraft(id, calls.draft),
     ...over,
   };
   return { client, calls };
+}
+
+/**
+ * The saved draft as the hash re-read returns it: what `createDraft` would store for these
+ * params, through the same `normalizeBodies` and `buildBodyParts` it uses.
+ */
+function savedDraft(id: string, params: any) {
+  return {
+    id,
+    keywords: { $draft: true },
+    ...buildBodyParts(normalizeBodies({ textBody: params?.textBody, htmlBody: params?.htmlBody })),
+  };
 }
 
 const compose = (args: any, client: DraftEmailClient, dir?: string, allowBlob = false) =>
@@ -1206,6 +1220,7 @@ function plainClient(
       return uploadResult;
     },
     createDraft: async (p) => { calls.draft = p; return 'draft-9'; },
+    readDraftBody: async (id) => savedDraft(id, calls.draft),
     ...over,
   };
   return { client, calls };
@@ -1225,6 +1240,7 @@ describe("draft_email — mode:'new' reaches createDraft with every field it was
     );
     assert.deepEqual(r, {
       emailId: 'draft-9', mode: 'new', subject: 'Hi', to: ['a@b.example'], cc: ['c@d.example'],
+      bodyHash: bodyHash(collectDraftBodyParts(savedDraft('draft-9', calls.draft))),
     });
     assert.equal(calls.draft.subject, 'Hi');
   });
@@ -3985,5 +4001,101 @@ describe('sanitizeEmlFilename and isSettableMessageId, at their bounds', () => {
   it('accepts a Message-ID of exactly 998 characters and refuses 999', () => {
     assert.equal(isSettableMessageId('x'.repeat(998)), true);
     assert.equal(isSettableMessageId('x'.repeat(999)), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The body hash the result hands back (#214)
+// ---------------------------------------------------------------------------
+
+describe('draft_email — the bodyHash for the first edit of the saved draft', () => {
+  const READ = { bodyText: true, bodyHtml: true, stripQuoted: false };
+
+  // The re-read serves DIFFERENT bytes from the ones the call sent, so a hash over the sent
+  // params would pass every other assertion here and fail this one.
+  it('issues the hash of the RE-READ draft, never of the bytes the call sent', async () => {
+    const stored = {
+      id: 'draft-9', keywords: { $draft: true },
+      textBody: [{ partId: 'text', type: 'text/plain' }],
+      htmlBody: [{ partId: 'html', type: 'text/html' }],
+      bodyValues: { text: { value: 'what the SERVER stored' }, html: { value: '<p>what the SERVER stored</p>' } },
+    };
+    const reads: string[] = [];
+    const { client, calls } = plainClient(undefined, {
+      readDraftBody: async (id) => { reads.push(id); return stored; },
+    });
+    const r = await compose({ mode: 'new', to: ['a@b.example'], htmlBody: '<p>what the caller wrote</p>' }, client);
+    assert.deepEqual(reads, ['draft-9']);
+    assert.equal(r.bodyHash, bodyHash(collectDraftBodyParts(stored)));
+    assert.notEqual(r.bodyHash, bodyHash(collectDraftBodyParts(savedDraft('draft-9', calls.draft))));
+    assert.equal(r.bodyHashWithheld, undefined);
+  });
+
+  it('issues it over expanded blocks too: the signature and the quote are in what it covers', async () => {
+    const { client, calls } = spyClient();
+    const r = await compose({
+      mode: 'reply', originalEmailId: 'o1',
+      htmlBody: '<p>Agreed.</p><div>{{signature}}</div><div><br></div>{{quote}}',
+    }, client);
+    assert.match(calls.draft.htmlBody, /Test User/);
+    assert.match(calls.draft.htmlBody, /original html/);
+    assert.equal(r.bodyHash, bodyHash(collectDraftBodyParts(savedDraft('draft-9', calls.draft))));
+  });
+
+  // The asAttachment filler is the one governing part the caller did not write; it is a fixed
+  // sentence the receipt reports, so it is not withheld the way a derived part is.
+  it('issues it over the asAttachment filler body', async () => {
+    const { client, calls } = plainClient();
+    const r = await compose({ mode: 'forward', originalEmailId: 'o1', to: ['x@y.example'], asAttachment: true }, client);
+    assert.equal(calls.draft.textBody, 'Forwarded message attached.');
+    assert.equal(r.tokens?.fillerBody, true);
+    assert.equal(r.bodyHash, bodyHash(collectDraftBodyParts(savedDraft('draft-9', calls.draft))));
+  });
+
+  it('withholds with the read side\'s own reason when the saved draft is one get_email withholds for', async () => {
+    const flagged = {
+      id: 'draft-9', keywords: { $draft: true },
+      textBody: [{ partId: 'text', type: 'text/plain' }],
+      htmlBody: [{ partId: 'text', type: 'text/plain' }],
+      bodyValues: { text: { value: 'x', isTruncated: true } },
+    };
+    const readSide = resolveDraftBodyHash(flagged, READ);
+    assert.ok(readSide && 'bodyHashWithheld' in readSide);
+    const { client } = plainClient(undefined, { readDraftBody: async () => flagged });
+    const r = await compose({ mode: 'new', to: ['a@b.example'], textBody: 'x' }, client);
+    assert.equal(r.bodyHash, undefined);
+    assert.equal(r.bodyHashWithheld, `the saved draft was re-read to compute one, but ${readSide.bodyHashWithheld}`);
+  });
+
+  it('withholds naming get_email when the re-read fails, and the call still succeeds', async () => {
+    const { client } = plainClient(undefined, {
+      readDraftBody: async () => { throw new Error('network down'); },
+    });
+    const r = await compose({ mode: 'new', to: ['a@b.example'], textBody: 'x' }, client);
+    assert.equal(r.emailId, 'draft-9');
+    assert.equal(r.bodyHash, undefined);
+    assert.equal(
+      r.bodyHashWithheld,
+      're-reading the saved draft to compute one failed (network down). Read the draft with get_email to get a bodyHash.',
+    );
+  });
+
+  it('withholds when the re-read does not come back as a draft', async () => {
+    const { client } = plainClient(undefined, {
+      readDraftBody: async (id) => ({ ...savedDraft(id, { textBody: 'x' }), keywords: {} }),
+    });
+    const r = await compose({ mode: 'new', to: ['a@b.example'], textBody: 'x' }, client);
+    assert.equal(r.bodyHash, undefined);
+    assert.match(r.bodyHashWithheld!, /the saved draft "draft-9" did not read back as a draft/);
+  });
+
+  it('prints the hash, or the reason neutralised, in the result text', () => {
+    const base = { emailId: 'draft-9', mode: 'new' as const };
+    assert.match(
+      formatDraftEmailResult({ ...base, bodyHash: 'bh1-abc' }),
+      /Use send_draft to transmit it\. Body hash for your next edit of this draft: bh1-abc$/,
+    );
+    const withheld = formatDraftEmailResult({ ...base, bodyHashWithheld: 'it failed\u202e"here"' });
+    assert.match(withheld, /Use send_draft to transmit it\. No body hash was issued: it failed'here'$/);
   });
 });

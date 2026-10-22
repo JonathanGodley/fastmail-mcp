@@ -337,13 +337,15 @@ images are reconciled against the result.
 quote is dropped silently, and quote-shaped prose gets challenged.
 
 `edit_draft` answers a strictly weaker question and answers it exactly. Any edit that
-writes or clears a body must carry the `bodyHash` that `get_email` issued for that draft,
-which proves the caller is replacing the body it actually **read**. It does not prove the
-caller kept any of that body: someone who reads a reply draft and deliberately sends back a
-single line gets a draft holding a single line. What the hash removes is the *silent* drop —
-you cannot overwrite quoted history you never saw — and it removes it for every draft
-equally, foreign shapes included, because it is a fact about the bytes rather than a guess
-about their meaning.
+writes or clears a body must carry a `bodyHash` for that draft, issued by `get_email` or by
+the `draft_email` or `edit_draft` result that saved it, which proves the caller's copy of the
+body is **current**: nothing changed it since the read or write that issued the hash. It does
+not prove the caller kept any of that body, or even saw all of it: someone who deliberately
+sends back a single line gets a draft holding a single line. What the hash removes is the
+*silent* drop of a change made since — you cannot overwrite history that the web UI or another
+client added after your copy was taken — and it removes it for every draft equally, foreign
+shapes included, because it is a fact about the bytes rather than a guess about their
+meaning.
 
 **A `{{quote}}` handed back to `edit_draft` is text, not an instruction.** Neither history
 token expands on the edit path, and neither may be removed either: the body may be a foreign
@@ -353,7 +355,7 @@ than a refusal, because a refusal keyed on text somebody else wrote would recur 
 of that draft with nothing the caller could do about it.
 
 **Where the hash cannot be issued or cannot be spent, the tool says so** rather than letting a
-body edit through on a body nobody could have read faithfully. `get_email` withholds the hash
+body edit through on a body no read returns faithfully. `get_email` withholds the hash
 for a draft whose stored body no edit could reproduce — a part flagged truncated or with an
 encoding problem, a part no read returns, or a body interleaving two parts of the same text
 type (#85, #180) — and names recreating the draft as the way forward.
@@ -602,8 +604,8 @@ a `$draft` and restoring it is a move back to Drafts; Trash retention applies by
 not by keyword). A destroy would leave a replaced draft recoverable only from a
 support-side backup; #65 records the data loss that cost.
 
-A body edit from a stale copy is refused: it must carry the `bodyHash` from a read of the
-current body (see "How quoted history survives an edit" above). What the hash cannot catch
+A body edit from a stale copy is refused: it must carry the `bodyHash` of the current body
+from a read or from the write that saved it (see "How quoted history survives an edit" above). What the hash cannot catch
 is a caller who read the current body and then deliberately replaced it, or a change that
 lands between the check and the write, so the mitigation for those is on the disposal side
 plus disclosure:
