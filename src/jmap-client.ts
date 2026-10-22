@@ -37,7 +37,7 @@ import {
   rejectInterleavedTextParts, rejectMissingBodyHash,
   rejectRemovalDanglingRef, rejectRepeatedSignatureToken, rejectReservedCidRef,
   rejectStaleBodyHash, rejectUncarriableBodyPart, rejectUnrecreatableCid,
-  NOTE_BODY_HASH_AFTER_EXPANSION, NOTE_BODY_HASH_DERIVED_PART,
+  NOTE_BODY_HASH_DERIVED_PART,
 } from './inline-notes.js';
 import type { AttachmentAvailability } from './inline-notes.js';
 import { matchSubjectPrefix, noteEditSubjectPrefix } from './subject-prefix.js';
@@ -2894,14 +2894,14 @@ export class JmapClient {
     }
 
     // ---- The hash the caller's NEXT edit will need ----
-    // Issued only where the caller already knows, byte for byte, what the saved draft's
-    // governing part says (the html when one ships, else the text):
+    // Issued only where the saved draft's governing part (the html when one ships, else the
+    // text) is one the caller supplied or already held. A `{{signature}}` expanded into it
+    // does not change that: the join lines show where the block landed.
     //
     //  - A metadata-only edit issues none. It COPIES the bodies, so a held hash usually stays
     //    good, but that is a property of the DRAFT: a typeless body part is not carried (see
     //    `draftInterleavedTextType` in body-hash.ts), and re-filing an image out of a body list
     //    changes the hashed part set.
-    //  - A flagged edit expanded `{{signature}}` into the body: withheld.
     //  - A governing part this server DERIVED during this call (e.g. a text fallback from new
     //    html) was never shown to the caller: withheld. The test is SEEN-NESS, not authorship:
     //    clearing htmlBody on a draft that never had one leaves stored text the caller saw, so
@@ -2914,9 +2914,7 @@ export class JmapClient {
     let issuedBodyHash: string | undefined;
     let bodyHashWithheld: string | undefined;
     if (touchesBody) {
-      if (expandSignature) {
-        bodyHashWithheld = NOTE_BODY_HASH_AFTER_EXPANSION;
-      } else if (!governingSupplied) {
+      if (!governingSupplied) {
         bodyHashWithheld = NOTE_BODY_HASH_DERIVED_PART;
       } else {
         const outcome = await hashSavedDraft(newEmailId, (id) => this.readDraftBody(id));

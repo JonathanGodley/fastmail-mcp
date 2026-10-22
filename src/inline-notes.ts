@@ -631,13 +631,9 @@ export function noteDiscardedTextPart(): string {
 //
 // The way out is a re-read, except where a re-read cannot answer either (a flagged stored
 // body, or a part no read returns), where it is to recreate the draft. Those cases are NOT
-// enumerated here: the constants below are the reasons the edit path owns, and everything
+// enumerated here: the constant below is the reason the edit path owns, and everything
 // about the saved body is asked of `resolveDraftBodyHash` through `hashSavedDraft`, so one
 // rule decides it for every tool that issues a hash.
-
-export const NOTE_BODY_HASH_AFTER_EXPANSION =
-  'this edit expanded {{signature}}, so the stored body carries a block you have not read. ' +
-  'Read the draft with get_email to get a bodyHash for the next body edit.';
 
 export const NOTE_BODY_HASH_DERIVED_PART =
   'this edit left the draft\'s plain-text part standing as its body, and that part is derived ' +

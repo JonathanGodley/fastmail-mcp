@@ -1721,9 +1721,22 @@ describe('updateDraft', () => {
     const html = createdDraft(makeReq).bodyValues.html.value;
     assert.match(html, /Test User/);
     assert.equal(/\{\{signature\}\}/.test(html), false);
-    // An expansion rewrote the body, so what landed is not what the caller wrote.
-    assert.equal(result.bodyHash, undefined);
-    assert.match(result.bodyHashWithheld!, /expanded \{\{signature\}\}/);
+    // The join lines show where the block landed, so an expansion withholds nothing: the hash
+    // is the re-read's, as on any other body edit.
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.equal(result.bodyHash, hashOf(createdDraft(makeReq)));
+  });
+
+  it('issues the hash after a bodyEdits expansion too', async () => {
+    mock.method(client, 'getIdentities', async () => [SIGNING_IDENTITY]);
+    const makeReq = mockBodyEdit(client, HTML_ONLY_REPLY);
+    const result = await client.updateDraft('draft-1', {
+      bodyEdits: [{ find: '<p>my reply</p>', replace: '<p>my reply</p>{{signature}}' }],
+      expandSignature: true, bodyHash: hashOf(HTML_ONLY_REPLY),
+    });
+    assert.match(createdDraft(makeReq).bodyValues.html.value, /Test User/);
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.equal(result.bodyHash, hashOf(createdDraft(makeReq)));
   });
 
   it('shows the join at the site that expanded, though the same sign-off text is already in the body', async () => {
@@ -6135,8 +6148,8 @@ describe('updateDraft bodyEdits (#177)', () => {
       '<p>Thanks.</p><div><div>Test User</div></div><blockquote><p>{{signature}}</p></blockquote>',
     );
     assert.deepEqual(result.bodyEdits!.ops, [{ offset: 14, matchedSize: 11, replacementSize: '<div><div>Test User</div></div>'.length }]);
-    assert.equal(result.bodyHash, undefined);
-    assert.ok(result.bodyHashWithheld);
+    assert.equal(result.bodyHashWithheld, undefined);
+    assert.equal(result.bodyHash, hashOf(created(makeReq)));
     // A stored token outside the matches plus one in a replace, and no split token: no note.
     assert.equal(result.notes, undefined);
   });
