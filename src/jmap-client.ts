@@ -2324,8 +2324,9 @@ export class JmapClient {
 
     // ---- Proof that the caller's copy of the body is current ----
     // `bodyHash` is a LOST-UPDATE GUARD and nothing else: it proves nothing changed the body
-    // since the read or write that issued the hash, never that the caller kept any of it. Recomputed over the same part set `get_email` hashes. The
-    // window to the write is accepted; there is no `ifInState` below.
+    // since the read or write that issued the hash, never that the caller kept any of it.
+    // Recomputed over the same part set `get_email` hashes. The window to the write is
+    // accepted; there is no `ifInState` below.
     //
     // Gated on `touchesBody`, not on body-invariance, which the metadata path cannot promise
     // (see the hand-back below).
@@ -2903,9 +2904,10 @@ export class JmapClient {
     //    `draftInterleavedTextType` in body-hash.ts), and re-filing an image out of a body list
     //    changes the hashed part set.
     //  - A governing part this server DERIVED during this call (e.g. a text fallback from new
-    //    html) was never shown to the caller: withheld. The test is SEEN-NESS, not authorship:
-    //    clearing htmlBody on a draft that never had one leaves stored text the caller saw, so
-    //    that edit issues a hash.
+    //    html): withheld, because the caller does not hold its bytes and could not write a
+    //    bodyEdits find against it. The test is whether the caller holds the bytes, not
+    //    authorship: clearing htmlBody on a draft that never had one leaves stored text the
+    //    caller already held, so that edit issues a hash.
     //
     // Otherwise it comes from `hashSavedDraft`, which states the provenance rule.
     const governingSupplied = !isBlank(htmlBodyValue)

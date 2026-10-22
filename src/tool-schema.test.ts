@@ -1532,9 +1532,9 @@ describe('the listed paged tools declare position', () => {
   });
 });
 
-// edit_draft withholds no bodyHash after a {{signature}} expansion (#214): the join lines show
-// where the block landed. A surface still saying it does sends a caller to a read it does not
-// need. Each file is checked to carry `bodyHash` at all, so a wrong path cannot pass empty.
+// No surface says a {{signature}} expansion withholds the body hash (#214); one that did would
+// send a caller to a read it does not need. Each file is checked to carry `bodyHash` at all, so
+// a wrong path cannot pass empty.
 describe('no surface says a signature expansion withholds the body hash', () => {
   const STALE = [
     /expands anything (gets|returns) \**NO/i,
