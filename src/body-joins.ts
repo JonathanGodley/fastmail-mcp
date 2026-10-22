@@ -15,34 +15,23 @@ import { describePart } from './inline-images.js';
 
 export type JoinPart = 'textBody' | 'htmlBody';
 
-/**
- * A history block's text, shown as a count and never echoed: it was built from an original
- * someone else wrote, and the caller may not have read it.
- */
-export interface HistoryLabel {
-  label: 'quoted original' | 'forwarded message';
-  lines: number;
-}
-
-export type JoinLine = string | HistoryLabel;
-
 export interface TokenJoin {
   token: BodyTokenName;
   part: JoinPart;
   /** Up to 2 lines, top to bottom; empty at the start of the body. */
-  above: JoinLine[];
+  above: string[];
   /** Text parts: blank lines between `above` and the block, wherever they fall. */
   blankAbove?: number;
   /** Html parts: the tags, comments and whitespace on the caller's side of the token. */
   markupAbove?: string;
   /** The first 2 and last 2 lines, or all of them when there are 4 or fewer. Empty: renders no text. */
-  block: JoinLine[];
+  block: string[];
   /** Lines left out between the block's second and third shown lines. */
   blockOmitted?: number;
   markupBelow?: string;
   blankBelow?: number;
   /** Up to 2 lines; empty at the end of the body. */
-  below: JoinLine[];
+  below: string[];
 }
 
 export interface InsertedBlock {
@@ -58,11 +47,6 @@ export const JOIN_MARKUP_ECHO_LIMIT = 80;
 
 /** Lines shown each side of a join, and at each end of a block. */
 export const JOIN_WINDOW = 2;
-
-const HISTORY: Partial<Record<BodyTokenName, HistoryLabel['label']>> = {
-  quote: 'quoted original',
-  forward: 'forwarded message',
-};
 
 /** The blocks an expansion inserted, with their output offsets moved by `shift`. */
 export function insertedBlocks(sites: readonly ExpandedTokenSite[], shift = 0): InsertedBlock[] {
@@ -98,8 +82,6 @@ interface Piece {
   token?: BodyTokenName;
 }
 
-const historyOf = (p: Piece): HistoryLabel['label'] | undefined => (p.token ? HISTORY[p.token] : undefined);
-
 // ---------------------------------------------------------------------------
 // Text parts: physical lines, with blank runs counted
 // ---------------------------------------------------------------------------
@@ -110,7 +92,7 @@ interface Range {
 }
 
 interface Item extends Range {
-  line: JoinLine;
+  line: string;
   blank: boolean;
 }
 
@@ -121,26 +103,11 @@ function touches(line: Range, r: Range): boolean {
 }
 
 function textJoin(pieces: Piece[], at: number): TokenJoin {
-  // Rebuilt with each region redacted whole; a history block is kept as it is, since its
-  // text is only counted, never shown.
-  let text = '';
-  let group = '';
-  const history: (Range & { label: HistoryLabel['label'] })[] = [];
-  let block!: Range;
-  pieces.forEach((p, i) => {
-    const label = historyOf(p);
-    if (i !== at && !label) {
-      group += p.text;
-      return;
-    }
-    text += redactBearerTokens(group);
-    group = '';
-    const start = text.length;
-    text += label ? p.text : redactBearerTokens(p.text);
-    if (label) history.push({ start, end: text.length, label });
-    if (i === at) block = { start, end: text.length };
-  });
-  text += redactBearerTokens(group);
+  const joined = (list: Piece[]) => redactBearerTokens(list.map((p) => p.text).join(''));
+  const before = joined(pieces.slice(0, at));
+  const inserted = redactBearerTokens(pieces[at].text);
+  const text = before + inserted + joined(pieces.slice(at + 1));
+  const block: Range = { start: before.length, end: before.length + inserted.length };
 
   const items: Item[] = [];
   const breaks = /\r\n|\n|\r/g;
@@ -148,18 +115,8 @@ function textJoin(pieces: Piece[], at: number): TokenJoin {
   for (;;) {
     const m = breaks.exec(text);
     const line = { start: lineStart, end: m ? m.index : text.length };
-    const h = history.find((r) => touches(line, r));
-    const prev = items[items.length - 1];
-    const counted = text.slice(line.start, line.end).trim() === '' ? 0 : 1;
-    if (h && prev && typeof prev.line === 'object') {
-      prev.line.lines += counted;
-      prev.end = line.end;
-    } else if (h) {
-      items.push({ ...line, line: { label: h.label, lines: counted }, blank: false });
-    } else {
-      const shown = echoJoinLine(text.slice(line.start, line.end));
-      items.push({ ...line, line: shown, blank: shown === '' });
-    }
+    const shown = echoJoinLine(text.slice(line.start, line.end));
+    items.push({ ...line, line: shown, blank: shown === '' });
     if (!m) break;
     lineStart = m.index + m[0].length;
   }
@@ -193,7 +150,7 @@ function textJoin(pieces: Piece[], at: number): TokenJoin {
   };
 }
 
-function windowBlock(lines: JoinLine[]): Pick<TokenJoin, 'block' | 'blockOmitted'> {
+function windowBlock(lines: string[]): Pick<TokenJoin, 'block' | 'blockOmitted'> {
   if (lines.length <= 2 * JOIN_WINDOW) return { block: lines };
   return {
     block: [...lines.slice(0, JOIN_WINDOW), ...lines.slice(-JOIN_WINDOW)],
@@ -211,25 +168,9 @@ const render = (html: string): string => htmlToText(html, 'unconditional');
 const shownLines = (rendered: string): string[] =>
   rendered.split(/\r\n|\n|\r/).map(echoJoinLine).filter((l) => l !== '');
 
-/** The lines of a run of pieces: caller text and signatures redacted together, history as labels. */
-function htmlLines(pieces: Piece[]): JoinLine[] {
-  const out: JoinLine[] = [];
-  let group: string[] = [];
-  const flush = () => {
-    out.push(...shownLines(redactBearerTokens(group.join('\n'))));
-    group = [];
-  };
-  for (const p of pieces) {
-    const label = historyOf(p);
-    if (!label) {
-      group.push(render(p.text));
-      continue;
-    }
-    flush();
-    out.push({ label, lines: render(p.text).split(/\r\n|\n|\r/).filter((l) => l.trim() !== '').length });
-  }
-  flush();
-  return out;
+/** The lines of a run of pieces, each rendered on its own and redacted together. */
+function htmlLines(pieces: Piece[]): string[] {
+  return shownLines(redactBearerTokens(pieces.map((p) => render(p.text)).join('\n')));
 }
 
 function htmlJoin(pieces: Piece[], at: number): TokenJoin {

@@ -148,20 +148,20 @@ describe('formatJoins', () => {
     token: 'signature' as const, part: 'textBody' as const,
     above: [], blankAbove: 0,
     block: ['L1', 'L2', 'L5', 'L6'], blockOmitted: 2,
-    blankBelow: 1, below: [{ label: 'quoted original' as const, lines: 1 }],
+    blankBelow: 1, below: ['On Mon, A wrote:'],
   };
 
   it('renders one line per join in field order, after a heading that says it is display text', () => {
     assert.equal(
       formatJoins([TEXT_JOIN, {
         ...TEXT_JOIN, token: 'quote', block: [], blockOmitted: undefined, blankAbove: 1,
-        below: ['PS', { label: 'forwarded message', lines: 14 }],
+        below: ['PS', '---------- Forwarded message ----------'],
       }]),
       '\n\nWhere each inserted block joins your text (display text, not bodyEdits.find input):\n' +
       '{{signature}} joined in textBody: above: start of body; 0 blank lines; block "L1" / "L2" / … 2 more lines … / "L5" / "L6"; ' +
-      '1 blank line; below [quoted original, 1 line]\n' +
+      '1 blank line; below "On Mon, A wrote:"\n' +
       '{{quote}} joined in textBody: above: start of body; 1 blank line; block: renders no text; 1 blank line; ' +
-      'below "PS" / [forwarded message, 14 lines]',
+      'below "PS" / "---------- Forwarded message ----------"',
     );
   });
 
@@ -169,13 +169,6 @@ describe('formatJoins', () => {
     assert.match(formatJoins([{ ...TEXT_JOIN, blockOmitted: 1 }]), /… 1 more line …/);
     assert.equal(formatJoins(undefined), '');
     assert.equal(formatJoins([]), '');
-  });
-
-  it('says a history block that renders no text does so, rather than "0 lines"', () => {
-    assert.match(
-      formatJoins([{ ...TEXT_JOIN, below: [{ label: 'quoted original', lines: 0 }] }]),
-      /; below \[quoted original, renders no text\]$/,
-    );
   });
 
   it('is appended to both write results', () => {

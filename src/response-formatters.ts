@@ -9,7 +9,7 @@ import type { SendDraftResult } from './send-draft-handler.js';
 import type { BodyEditsReceipt } from './body-edits.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
 import { JOIN_WINDOW } from './body-joins.js';
-import type { JoinLine, TokenJoin } from './body-joins.js';
+import type { TokenJoin } from './body-joins.js';
 import { buildIdCollapseNote } from './id-collapse-note.js';
 
 // The summary heading every list/search response, written once for the raw and simplified
@@ -128,11 +128,7 @@ export function formatDraftEmailResult(result: ComposeDraftEmailResult): string 
     : `${summary}\n\nTokens: ${toolJson(result.tokens)}`) + formatJoins(result.joins);
 }
 
-const echoJoinItem = (line: JoinLine): string => {
-  if (typeof line === 'string') return `"${line}"`;
-  if (line.lines === 0) return `[${line.label}, renders no text]`;
-  return `[${line.label}, ${line.lines} line${line.lines === 1 ? '' : 's'}]`;
-};
+const echoJoinItem = (line: string): string => `"${line}"`;
 
 const blankLines = (n: number): string => `${n} blank line${n === 1 ? '' : 's'}`;
 

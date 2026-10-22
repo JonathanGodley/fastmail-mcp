@@ -37,12 +37,30 @@ describe('body joins — text parts', () => {
     );
   });
 
-  it('keeps a history block\'s line count to its own lines, and the caller line after it', () => {
+  it('shows a history block\'s lines like any block\'s, beside a join and as its own', () => {
     const { text, blocks } = expand('{{signature}}\n{{quote}}\nPS', 'SIG', 'q1\nq2\nq3');
     const [sig, quote] = buildJoins('textBody', text, blocks);
-    assert.deepEqual(sig.below, [{ label: 'quoted original', lines: 3 }, 'PS']);
-    assert.deepEqual(quote.block, [{ label: 'quoted original', lines: 3 }]);
+    assert.deepEqual(sig.below, ['q1', 'q2']);
+    assert.deepEqual(quote.above, ['SIG']);
+    assert.deepEqual(quote.block, ['q1', 'q2', 'q3']);
     assert.deepEqual(quote.below, ['PS']);
+  });
+
+  it('shows only a long history block\'s edges, with the middle counted', () => {
+    const { text, blocks } = expand('{{signature}}\n{{quote}}', 'SIG', 'q1\nq2\nq3\nq4\nq5\nq6');
+    const [, quote] = buildJoins('textBody', text, blocks);
+    assert.deepEqual(quote.block, ['q1', 'q2', 'q5', 'q6']);
+    assert.equal(quote.blockOmitted, 2);
+  });
+
+  it('redacts, neutralises and bounds a history line, beside a join and in its own', () => {
+    const hostile = 'A' + String.fromCharCode(0x202e) + '"B' + 'x'.repeat(200);
+    const { text, blocks } = expand('{{signature}}\n{{quote}}', 'SIG', `token Bearer\nabcdefghijklmnopqrstuvwxyz\n${hostile}`);
+    const [sig, quote] = buildJoins('textBody', text, blocks);
+    assert.equal(sig.below[0], 'token Bearer [REDACTED]');
+    assert.equal(sig.below[1], quote.block[quote.block.length - 1]);
+    const last = quote.block[quote.block.length - 1];
+    assert.ok(last.startsWith("A'B") && last.endsWith('…') && [...last].length === JOIN_LINE_ECHO_LIMIT + 1, last);
   });
 
   it('redacts the text before the block whole, so a credential split across lines is caught', () => {
@@ -63,22 +81,22 @@ describe('body joins — text parts', () => {
     }]);
   });
 
-  it('keeps an empty line inside a history block, or at its first character, in its label', () => {
+  it('counts an empty line at a history block\'s first character in the blank run beside it', () => {
     const { text, blocks } = expand('{{signature}}\n{{quote}}', 'SIG', '\nq1\n\nq2');
     const [sig] = buildJoins('textBody', text, blocks);
-    assert.equal(sig.blankBelow, 0);
-    assert.deepEqual(sig.below, [{ label: 'quoted original', lines: 2 }], 'non-blank lines, as an html label counts');
+    assert.equal(sig.blankBelow, 1);
+    assert.deepEqual(sig.below, ['q1', 'q2']);
   });
 
-  it('does not count a whitespace-only line of a history block', () => {
+  it('shows no whitespace-only line of a history block', () => {
     const { text, blocks } = expand('{{quote}}', 'SIG', 'q1\n   \nq2');
-    assert.deepEqual(buildJoins('textBody', text, blocks)[0].block, [{ label: 'quoted original', lines: 2 }]);
+    assert.deepEqual(buildJoins('textBody', text, blocks)[0].block, ['q1', 'q2']);
   });
 
   it('leaves an empty line starting where a history block ends to the caller', () => {
     const { text, blocks } = expand('{{quote}}\nPS', 'SIG', 'q1\n');
     const [quote] = buildJoins('textBody', text, blocks);
-    assert.deepEqual(quote.block, [{ label: 'quoted original', lines: 1 }]);
+    assert.deepEqual(quote.block, ['q1']);
     assert.equal(quote.blankBelow, 1);
     assert.deepEqual(quote.below, ['PS']);
   });
@@ -167,11 +185,12 @@ describe('body joins — html parts', () => {
     assert.equal(buildJoins('htmlBody', t2, b2)[0].markupAbove, "<a title='Bearer [REDACTED]");
   });
 
-  it('says a block that renders no text renders none, and labels a history block by its rendered lines', () => {
+  it('says a block that renders no text renders none, and shows a history block by its rendered lines', () => {
     const { text, blocks } = expand('<p>Hi</p>{{signature}}{{quote}}', '<div><img src="https://example.com/x.png"></div>', '<p>q1</p><p>q2</p>');
     const [sig, quote] = buildJoins('htmlBody', text, blocks);
     assert.deepEqual(sig.block, []);
-    assert.deepEqual(sig.below, [{ label: 'quoted original', lines: 2 }]);
+    assert.deepEqual(sig.below, ['q1', 'q2']);
+    assert.deepEqual(quote.block, ['q1', 'q2']);
     assert.equal(sig.markupBelow, '');
     assert.deepEqual(quote.above, ['Hi']);
   });
@@ -179,7 +198,7 @@ describe('body joins — html parts', () => {
   it('keeps caller text and history in body order, each piece on its own line, at most 2 below', () => {
     const { text, blocks } = expand('<p>Hi</p>{{signature}}<p>mid</p>{{quote}}<p>after</p>', '<b>SIG</b>', '<p>q1</p><p>&nbsp;</p><p>q2</p>');
     const [sig, quote] = buildJoins('htmlBody', text, blocks);
-    assert.deepEqual(sig.below, ['mid', { label: 'quoted original', lines: 2 }]);
+    assert.deepEqual(sig.below, ['mid', 'q1']);
     assert.deepEqual(quote.above, ['SIG', 'mid']);
   });
 
@@ -275,9 +294,14 @@ describe('body joins — html parts', () => {
     assert.deepEqual([j2.above, j2.below], [['Hi'], ['x']]);
   });
 
-  it('counts a history label in non-blank lines, and an html one that renders nothing as 0', () => {
+  it('shows no line for an html history block that renders nothing', () => {
     const { text, blocks } = expand('<p>Hi</p>{{signature}}{{quote}}', 'SIG', '<div><img src="https://example.com/x.png"></div>');
-    assert.deepEqual(buildJoins('htmlBody', text, blocks)[0].below, [{ label: 'quoted original', lines: 0 }]);
+    assert.deepEqual(buildJoins('htmlBody', text, blocks)[0].below, []);
+  });
+
+  it('redacts a history block\'s rendering together with the caller text beside it', () => {
+    const { text, blocks } = expand('<p>Hi</p>{{signature}}<p>auth Bearer</p>{{quote}}', 'SIG', '<p>abcdefghijklmnopqrstuvwxyz</p>');
+    assert.deepEqual(buildJoins('htmlBody', text, blocks)[0].below, ['auth Bearer [REDACTED]']);
   });
 
   it('shows the rest of the segment when the tag the token sits in never closes', () => {

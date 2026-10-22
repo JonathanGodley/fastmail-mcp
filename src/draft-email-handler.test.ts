@@ -11,6 +11,7 @@ import { buildBodyParts, normalizeBodies } from './body-format.js';
 import { noteComposeSubjectPrefix } from './subject-prefix.js';
 import { formatDraftEmailResult } from './response-formatters.js';
 import { bodyHash, collectDraftBodyParts, resolveDraftBodyHash } from './body-hash.js';
+import { JOIN_LINE_ECHO_LIMIT } from './body-joins.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -3841,41 +3842,48 @@ describe('draft_email — the join around each inserted block', () => {
       textBody: 'Agreed, Friday works.\n\n{{signature}}\n\n{{quote}}',
     }, withIdentity(SIGN_OFF));
     const [htmlSig, htmlQuote, textSig, textQuote] = r.joins!;
+    // The attribution line carries a date rendered in the server's zone.
+    const ATTRIBUTION = /^On .+, Alex Example wrote:$/;
     assert.deepEqual(r.joins!.map((j) => `${j.part}:${j.token}`), [
       'htmlBody:signature', 'htmlBody:quote', 'textBody:signature', 'textBody:quote',
     ]);
 
     assert.deepEqual(htmlSig.above, ['Agreed, Friday works.']);
     assert.equal(htmlSig.markupBelow, '</div><div><br></div>');
-    assert.deepEqual(htmlSig.below.map((l) => typeof l === 'object' && l.label), ['quoted original']);
+    assert.match(htmlSig.below[0], ATTRIBUTION);
+    assert.equal(htmlSig.below[1], '> original html');
     assert.equal(htmlSig.blankBelow, undefined, 'html reports markup, never blank counts');
     assert.deepEqual(htmlQuote.above, ['A. Sender', '555 0100']);
     assert.equal(htmlQuote.markupAbove, '</div><div><br></div>');
 
+    const attribution = textQuote.block[0];
+    assert.match(attribution, ATTRIBUTION);
     assert.deepEqual(textSig, {
       token: 'signature', part: 'textBody',
       above: ['Agreed, Friday works.'], blankAbove: 1,
       block: SIGN_OFF_LINES,
-      blankBelow: 1, below: [{ label: 'quoted original', lines: 2 }],
+      blankBelow: 1, below: [attribution, '> original text'],
     });
     assert.deepEqual(textQuote, {
       token: 'quote', part: 'textBody',
       above: ['A. Sender', '555 0100'], blankAbove: 1,
-      block: [{ label: 'quoted original', lines: 2 }],
+      block: [attribution, '> original text'],
       blankBelow: 0, below: [],
     });
   });
 
-  it('labels a line the signature shares with the quote, rather than echoing it', async () => {
+  it('shows a line the signature shares with the quote as stored, the run-together the caller has to fix', async () => {
     const r = await compose(
       { mode: 'reply', originalEmailId: 'o1', textBody: 'Thanks.\n\n{{signature}}{{quote}}' },
       withIdentity(SIGN_OFF),
     );
     const [sig, quote] = r.joins!;
-    assert.deepEqual(sig.block, ['Kind regards,', 'A. Sender', { label: 'quoted original', lines: 2 }]);
+    const shared = sig.block[2];
+    assert.match(shared, /^555 0100On .+, Alex Example wrote:$/);
+    assert.deepEqual(sig.block, ['Kind regards,', 'A. Sender', shared]);
+    assert.deepEqual(sig.below, ['> original text']);
     assert.deepEqual(quote.above, ['Kind regards,', 'A. Sender']);
-    assert.deepEqual(quote.block, [{ label: 'quoted original', lines: 2 }]);
-    assert.ok(!JSON.stringify(r.joins).includes('wrote'), JSON.stringify(r.joins));
+    assert.deepEqual(quote.block, [shared, '> original text']);
   });
 
   it('counts the whole blank run at a text boundary, and still shows the line above it', async () => {
@@ -3934,26 +3942,34 @@ describe('draft_email — the join around each inserted block', () => {
   });
 
   for (const mode of ['reply', 'forward'] as const) {
-    it(`echoes no text of the ${mode}'s history block in any join, in either part`, async () => {
-      const marker = 'MARKERX';
+    it(`shows the ${mode}'s history block by its edges, neutralised, in either part`, async () => {
+      const hostile = 'MARKERX' + String.fromCharCode(0x202e) + '"last"' + 'x'.repeat(200);
       const original = makeOriginal({
         bodyValues: {
-          t: { value: `${marker} one\n${marker} two\n${marker} three` },
-          h: { value: `<p>${marker} one</p><p>${marker} two</p>` },
+          t: { value: `MARKERX one\nMARKERX two\nMARKERX three\nMARKERX four\n${hostile}` },
+          h: { value: `<p>MARKERX one</p><p>MARKERX two</p><p>MARKERX three</p><p>${hostile}</p>` },
         },
       });
       const token = mode === 'reply' ? '{{quote}}' : '{{forward}}';
       const r = await compose({
         mode, originalEmailId: 'o1', to: ['sam@example.com'],
         htmlBody: `<p>Hi</p><div>{{signature}}</div>${token}<p>after</p>`,
-        textBody: `Hi\n{{signature}}${token}\nafter`,
+        textBody: `Hi\n{{signature}}\n${token}\nafter`,
       }, withIdentity(SIGN_OFF, original));
-      assert.equal(r.joins!.length, 4);
-      const label = mode === 'reply' ? 'quoted original' : 'forwarded message';
-      assert.ok(r.joins!.some((j) => j.block.some((l) => typeof l === 'object' && l.label === label)));
-      assert.ok(!JSON.stringify(r.joins).includes(marker), JSON.stringify(r.joins));
+      const history = r.joins!.filter((j) => j.token !== 'signature');
+      assert.deepEqual(history.map((j) => j.part), ['htmlBody', 'textBody']);
+      for (const join of history) {
+        assert.ok(join.blockOmitted! > 0, JSON.stringify(join));
+        const last = join.block[join.block.length - 1];
+        // The last line of the original, neutralised (no format character, quotes swapped)
+        // and cut at the line limit.
+        assert.ok(/MARKERX'last'x+…$/.test(last), last);
+        assert.equal([...last].length, JOIN_LINE_ECHO_LIMIT + 1);
+        assert.deepEqual(join.below, ['after']);
+      }
       const rendered = formatDraftEmailResult(r);
-      assert.ok(!rendered.includes(marker), rendered);
+      assert.ok(rendered.includes("MARKERX'last'"), rendered);
+      assert.ok(!rendered.includes(String.fromCharCode(0x202e)), rendered);
     });
   }
 

@@ -406,10 +406,13 @@ hostile text reads as data and never as the server speaking. The one exception i
 a Content-ID that passes the authorable vet is echoed raw inside a copy-and-paste repair
 clause, which is safe by construction — that vet admits only `[A-Za-z0-9._-]`.
 
-**No `draft_email` result echoes a quoted or forwarded block's text** (#214): the join a result
-shows labels any line holding a character of one with a line count, so a reply composed with
-`{{quote}}` over an original nobody read does not put that sender's text in front of the agent
-just before `send_draft`.
+**A `draft_email` result echoes the edges of a quoted or forwarded block** (#214): the join
+around each inserted block shows its first and last lines, and the lines either side of a
+signature can be the original's. That puts a few lines of the sender's text in front of the
+agent, accepted because a caller composing a reply or forward has nearly always just read the
+original, and the attribution line ("On <date>, <name> wrote:") is the server's own. They are
+display text like every join line: redacted, neutralised, and cut at 120 code points (a markup
+run at 80).
 
 Transmission also **writes two keyword flags** (`$answered`+`$seen`, or
 `$forwarded`+`$seen`) after a send succeeds (#52/#54, #30, #60). The compose surface is
