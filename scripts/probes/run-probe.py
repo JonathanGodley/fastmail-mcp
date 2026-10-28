@@ -13,7 +13,7 @@
 import json, os, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KEYS = ('FASTMAIL_API_TOKEN', 'FASTMAIL_CALDAV_USERNAME', 'FASTMAIL_CALDAV_PASSWORD',
+KEYS = ('FASTMAIL_API_TOKEN', 'FASTMAIL_WEB_TOKEN', 'FASTMAIL_CALDAV_USERNAME', 'FASTMAIL_CALDAV_PASSWORD',
         'FASTMAIL_CALDAV_DISPLAY_NAME', 'FASTMAIL_TIMEZONE')
 ENV_PATH = os.path.expanduser('~/.fastmail-mcp/.env')
 CFG_PATH = os.path.expanduser('~/.claude.json')
