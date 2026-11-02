@@ -7,12 +7,16 @@
 // Output: capability names, counts, wake times and the object's shape; subjects are
 // truncated to 24 characters.
 
-// FASTMAIL_WEB_TOKEN, when set, is the bearer token Fastmail's own web client sends,
-// so the run measures a first-party session instead. jmaplib reads FASTMAIL_API_TOKEN
-// at import, so the override must land before the dynamic import.
+// FASTMAIL_WEB_TOKEN and FASTMAIL_WEB_COOKIE, when set, are the bearer token and the
+// Cookie header Fastmail's own web client sends, so the run measures a first-party
+// session instead. The token alone gets 401 "Could not find cookie for bearer token
+// id". jmaplib reads its environment at import, so both must land before the import.
 const WEB = process.env.FASTMAIL_WEB_TOKEN;
-if (WEB) process.env.FASTMAIL_API_TOKEN = WEB;
-const { getSession, jmap } = await import('./jmaplib.mjs');
+if (WEB) {
+  process.env.FASTMAIL_API_TOKEN = WEB;
+  if (process.env.FASTMAIL_WEB_COOKIE) process.env.JMAPLIB_COOKIE = process.env.FASTMAIL_WEB_COOKIE;
+}
+const { getSession, jmap, AUTH } = await import('./jmaplib.mjs');
 import { makeChecker } from './probelib.mjs';
 
 const CYRUS = 'https://cyrusimap.org/ns/jmap/mail';
@@ -21,9 +25,8 @@ const FM_DEV_MAIL = 'https://www.fastmail.com/dev/mail'; // exists at the API la
 const STANDARD = ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail', 'urn:ietf:params:jmap:submission', 'urn:ietf:params:jmap:contacts'];
 const { check, failures } = makeChecker();
 
-console.log('credential:', WEB ? 'FASTMAIL_WEB_TOKEN (web client session)' : 'FASTMAIL_API_TOKEN');
-const TOKEN = process.env.FASTMAIL_API_TOKEN;
-const sessionRes = await fetch('https://api.fastmail.com/jmap/session', { headers: { Authorization: `Bearer ${TOKEN}` } });
+console.log('credential:', WEB ? `FASTMAIL_WEB_TOKEN (web client session, cookie ${process.env.FASTMAIL_WEB_COOKIE ? 'set' : 'NOT set'})` : 'FASTMAIL_API_TOKEN');
+const sessionRes = await fetch('https://api.fastmail.com/jmap/session', { headers: AUTH });
 if (sessionRes.status === 401) { console.error('AUTH FAILED: 401 from /jmap/session (a web session token may have expired). Stopping.'); process.exit(3); }
 const session = await sessionRes.json();
 const s = await getSession();

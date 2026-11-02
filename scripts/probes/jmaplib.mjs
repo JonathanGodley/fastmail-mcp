@@ -10,7 +10,9 @@ if (!TOKEN) {
   process.exit(2);
 }
 
-const AUTH = { Authorization: `Bearer ${TOKEN}` };
+// JMAPLIB_COOKIE, when a probe sets it before importing, rides with every request: a
+// web-session bearer token is only honoured alongside its session cookie.
+export const AUTH = { Authorization: `Bearer ${TOKEN}`, ...(process.env.JMAPLIB_COOKIE ? { Cookie: process.env.JMAPLIB_COOKIE } : {}) };
 
 export async function getSession() {
   const res = await fetch('https://api.fastmail.com/jmap/session', { headers: AUTH });
