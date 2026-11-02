@@ -646,7 +646,7 @@ Everything the hybrid shape folds away (`contexts`, `pref`, `@type`, …) is sti
 | Inbox + a label | The Inbox membership goes, the label stays, **Archive is not added** |
 | Inbox only | It moves to Archive |
 | Anywhere else, no Inbox | **Nothing.** It has already left the Inbox - the client calls this "already archived" - and that is a successful outcome |
-| Trash, Spam, Drafts, Scheduled, Sent or Snoozed, no Inbox | **Refused**, saying why, and naming an alternative in this server where one exists (a scheduled send and a snooze have none, and the refusal says so) |
+| Trash, Spam, Drafts, Scheduled, Sent or Snoozed, no Inbox | **Refused**, saying why, and naming an alternative in this server where one exists (a scheduled send has none, and the refusal says so; for a snooze it names `move_email`, which also clears the snooze) |
 
 Corroboration for the first row: of the 15,843 messages in Archive on the account this was measured against, **zero** are also in another mailbox. Fastmail never creates the Archive-plus-label state that a replace-then-add implementation produces.
 
@@ -1086,6 +1086,8 @@ Single (non-repeating) events are unaffected.
 ## Experimental: snooze
 
 Fastmail refuses snooze to API tokens: the capability that carries it answers "Disallowed capabilities for this type/client", and Fastmail's help says third-party clients cannot snooze. Its own web client can, so these tools run on that client's login instead of your API token. They are off unless you set `FASTMAIL_EXPERIMENTAL_SNOOZE=1`, and they are not in the tool count above. The measurements behind them are on [#35](https://github.com/JonathanGodley/fastmail-mcp/issues/35).
+
+**Without them, the API token still shows which messages are snoozed, but not until when.** A snoozed message carries `snoozed` in its `roles` on every read tool, and `list_emails` with `mailbox: "Snoozed"` lists them all. The wake time is the part Fastmail withholds: asked for with an API token, it is refused as an invalid argument, and sorting by it as an unsupported sort.
 
 **What you are handing over.** `FASTMAIL_WEB_COOKIE` is the session cookie of a logged-in Fastmail web login. It carries everything that login can do, not a scoped permission, and anyone holding it is logged in as you. It stops working when that login ends, for example when you log out of that browser or Fastmail ends the session; the tools then say so. Keep it in `~/.fastmail-mcp/.env` like the API token.
 
