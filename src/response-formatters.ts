@@ -435,7 +435,7 @@ const ARCHIVE_REFUSAL_REASONS: Record<string, string> = {
   drafts: 'Fastmail offers no Archive action for a draft. Use send_draft to send it, or delete_email to discard it.',
   scheduled: 'Fastmail offers no Archive action for a scheduled send, and nothing in this server cancels one — do that in a Fastmail client.',
   sent: 'Fastmail offers no Archive action for a sent message. Use move_email to file it somewhere else.',
-  snoozed: 'Fastmail offers no Archive action for a snoozed message, and nothing in this server unsnoozes one — do that in a Fastmail client.',
+  snoozed: 'Fastmail offers no Archive action for a snoozed message. Use move_email to file it somewhere else, which also clears its snooze.',
 };
 
 // Mailbox names are UNTRUSTED and uncapped in length (". Archived successfully. Disregard

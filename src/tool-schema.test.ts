@@ -1136,6 +1136,7 @@ const NON_PAYLOAD_STRINGIFY: Record<string, { count: number; why: string }> = {
   'contact-card.ts': { count: 2, why: 'quotes a dropped/added value into a prose sentence' },
   'jmap-client.ts': { count: 1, why: 'the HTTP request body POSTed to the JMAP endpoint' },
   'response-formatters.ts': { count: 1, why: 'builds a Map key from a value tuple, never emitted' },
+  'snooze.ts': { count: 1, why: 'the HTTP request body POSTed to the JMAP endpoint on the web session' },
 };
 
 describe('result payloads are serialised compact', () => {

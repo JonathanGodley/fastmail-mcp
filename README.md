@@ -1083,6 +1083,30 @@ Single (non-repeating) events are unaffected.
 - **test_bulk_operations**: Test `bulk_mark_read` on up to 10 recent Inbox messages. The default dry run writes nothing and lists the messages with their current read state (`wasRead`). With `dryRun: false` it **writes to those real messages**: it marks them all read, then marks unread again only the ones that were unread before, so each ends in its own prior state; a message whose read state was not reported is left out of both steps and listed with `excluded: true` instead of `wasRead`. If that second step fails, messages that were unread can be left read; the result reports each step.
   - Parameters: `dryRun` (default: true), `limit` (default: 3, max: 10)
 
+## Experimental: snooze
+
+Fastmail refuses snooze to API tokens: the capability that carries it answers "Disallowed capabilities for this type/client", and Fastmail's help says third-party clients cannot snooze. Its own web client can, so these tools run on that client's login instead of your API token. They are off unless you set `FASTMAIL_EXPERIMENTAL_SNOOZE=1`, and they are not in the tool count above. The measurements behind them are on [#35](https://github.com/JonathanGodley/fastmail-mcp/issues/35).
+
+**What you are handing over.** `FASTMAIL_WEB_COOKIE` is the session cookie of a logged-in Fastmail web login. It carries everything that login can do, not a scoped permission, and anyone holding it is logged in as you. It stops working when that login ends, for example when you log out of that browser or Fastmail ends the session; the tools then say so. Keep it in `~/.fastmail-mcp/.env` like the API token.
+
+**Getting the cookie.** Log in to Fastmail in a browser and open its developer tools on the Network tab. Click any request to `api.fastmail.com` and copy, from its request `Cookie` header, the one pair whose name starts `__Http-s_`. Set it with the name and value, in quotes:
+
+```bash
+FASTMAIL_EXPERIMENTAL_SNOOZE=1
+FASTMAIL_WEB_COOKIE="__Http-s_xxxxxxxx=<value>"
+```
+
+The server exchanges the cookie for the web client's bearer token itself, as the web client does, and fetches a new one when it is refused.
+
+- **list_snoozed_emails**: List the messages in the Snoozed mailbox, soonest wake time first. Each item carries `wakeAt` (UTC) and `wakeInto`, the mailbox it returns to, normally the Inbox. Returns `{ total, emails }`.
+  - Parameters: `limit` (default: 50, max: 100)
+- **snooze_email**: Snooze an Inbox message until a time. It leaves the Inbox for Snoozed, keeping its other labels, and at that time Fastmail returns it to the Inbox marked unread, which is what the Fastmail app writes. On a message already snoozed it changes the wake time only. A message outside the Inbox is refused. Returns `{ emailId, wakeAt, wakeInto }`.
+  - Parameters: `emailId` (required), `until` (required: a datetime in the future; one with no offset is local time in `FASTMAIL_TIMEZONE` or the host's zone, as for `search_emails`' `after`)
+- **unsnooze_email**: Return a snoozed message to the Inbox now and clear its snooze. Its read state is left as it is. Returns `{ emailId, movedTo, wasWakeAt }`.
+  - Parameters: `emailId` (required)
+
+Moving a message out of Snoozed with `move_email` also clears its snooze: Fastmail drops the wake time itself when the message leaves Snoozed.
+
 ## API Information
 
 This server uses Fastmail's JMAP (JSON Meta Application Protocol) API.

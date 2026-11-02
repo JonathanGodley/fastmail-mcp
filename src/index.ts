@@ -28,6 +28,7 @@ import { listMailboxes, createMailbox } from './mailbox-handler.js';
 import { createContactTool, getContactTool, updateContactTool, deleteContactTool, listContactsTool, searchContactsTool } from './contacts-handler.js';
 import { listCalendarEventsTool } from './calendar-list-handler.js';
 import { listEmailsTool, searchEmailsTool } from './email-list-handler.js';
+import { SNOOZE_TOOLS, WebSessionTransport, listSnoozedEmails, snoozeEmail, unsnoozeEmail } from './snooze.js';
 import createDebug from 'debug';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
@@ -134,6 +135,25 @@ function initializeClient(): JmapClient {
   const auth = new FastmailAuth(getAuthConfig());
   jmapClient = new JmapClient(auth);
   return jmapClient;
+}
+
+// The snooze tools (src/snooze.ts) exist only when this is "1": they run on a web login's
+// session cookie, which carries the whole account and lasts only as long as that login.
+const SNOOZE_ENABLED = findEnvValue(['FASTMAIL_EXPERIMENTAL_SNOOZE']).value === '1';
+let snoozeTransport: WebSessionTransport | null = null;
+
+function initializeSnoozeTransport(): WebSessionTransport {
+  if (snoozeTransport) return snoozeTransport;
+  const cookie = findEnvValue(['FASTMAIL_WEB_COOKIE']).value;
+  if (!cookie) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      'The snooze tools need FASTMAIL_WEB_COOKIE: the __Http-s_… cookie a logged-in Fastmail web session sends to api.fastmail.com, set in the environment or in ~/.fastmail-mcp/.env'
+    );
+  }
+  registerSecret(cookie);
+  snoozeTransport = new WebSessionTransport(cookie);
+  return snoozeTransport;
 }
 
 function initializeContactsCalendarClient(): ContactsCalendarClient {
@@ -1970,8 +1990,10 @@ const TOOLS = [
 
 // Per-tool allowed parameter keys + escape hatch, derived once from the same
 // inputSchema clients see. Drives the unknown-parameter guard (#11).
+const ACTIVE_TOOLS = SNOOZE_ENABLED ? [...TOOLS, ...SNOOZE_TOOLS] : TOOLS;
+
 const TOOL_SCHEMAS = new Map(
-  TOOLS.map(t => [
+  ACTIVE_TOOLS.map(t => [
     t.name,
     {
       keys: new Set(Object.keys((t.inputSchema as any).properties ?? {})),
@@ -1981,7 +2003,7 @@ const TOOL_SCHEMAS = new Map(
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return { tools: TOOLS };
+  return { tools: ACTIVE_TOOLS };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -1996,6 +2018,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // value coercion (coerceBool/coerceStringArray/...) is unaffected. (#11)
     const schema = TOOL_SCHEMAS.get(name);
     if (schema) assertKnownParams(name, args as any, schema.keys, schema.additional);
+
+    // Before initializeClient: the snooze tools never use the API token.
+    if (SNOOZE_ENABLED) {
+      switch (name) {
+        case 'list_snoozed_emails':
+          return { content: await listSnoozedEmails(args, initializeSnoozeTransport(), clampLimit((args as any).limit, 50, 100)) };
+        case 'snooze_email':
+          return { content: await snoozeEmail(args, initializeSnoozeTransport()) };
+        case 'unsnooze_email':
+          return { content: await unsnoozeEmail(args, initializeSnoozeTransport()) };
+      }
+    }
 
     const client = initializeClient();
 

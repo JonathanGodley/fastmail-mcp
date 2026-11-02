@@ -1153,3 +1153,39 @@ describe('every tool that declares position offers nextPosition (#212)', () => {
     assert.deepEqual(Object.keys(RUNNERS).filter((tool) => !declaring.includes(tool)), []);
   });
 });
+
+// The snooze tools run on a web login's cookie, so they must not appear unless asked for.
+describe('experimental snooze flag', () => {
+  const SNOOZE_NAMES = ['list_snoozed_emails', 'snooze_email', 'unsnooze_email'];
+
+  async function withServer<T>(flag: string | undefined, fn: (client: any) => Promise<T>): Promise<T> {
+    assertDistIsCurrent();
+    const env = testEnv();
+    env.FASTMAIL_API_TOKEN = FAKE_API_VALUE;
+    if (flag !== undefined) env.FASTMAIL_EXPERIMENTAL_SNOOZE = flag;
+    const client = createClient({ env });
+    try {
+      await client.init();
+      return await fn(client);
+    } finally {
+      client.close();
+    }
+  }
+  const listed = (client: any) => client.list().then((r: any) => r.tools.map((t: any) => t.name));
+
+  it('hides the snooze tools when the flag is unset or not "1"', async () => {
+    for (const flag of [undefined, 'true']) {
+      const names: string[] = await withServer(flag, listed);
+      assert.ok(names.length >= 41, `tools/list returned only ${names.length} tools`);
+      assert.deepEqual(names.filter((n) => SNOOZE_NAMES.includes(n)), [], `flag ${flag}`);
+    }
+  });
+
+  it('lists them with the flag, and asks for the cookie when it is missing', async () => {
+    await withServer('1', async (client) => {
+      const names: string[] = await listed(client);
+      assert.deepEqual(names.filter((n) => SNOOZE_NAMES.includes(n)), SNOOZE_NAMES);
+      await assert.rejects(client.call('list_snoozed_emails', {}), /FASTMAIL_WEB_COOKIE/);
+    });
+  });
+});

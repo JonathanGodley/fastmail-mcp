@@ -98,8 +98,9 @@ When a message is in two refusing roles, this server picks the first in the fixe
 `trash, junk, drafts, scheduled, sent, snoozed`, so the `snoozed`+`sent` message above is refused
 as **sent**. That ordering is a tiebreak for a deterministic message, not a claim about which
 state the client considers primary - nothing here measures that. Note the consequence: the
-message gets the Sent refusal, which names `move_email`, rather than the Snoozed one, which says
-this server cannot unsnooze. The more actionable sentence wins, and it is the less relevant one.
+message gets the Sent refusal rather than the Snoozed one. Both name `move_email`, but only the
+Snoozed one says that the move also clears the snooze, which Fastmail does when a message leaves
+Snoozed (measured by `scripts/probes/snooze-write.probe.mjs`; upstream Cyrus refuses that move).
 
 ### Caveat on the Inbox + Trash row
 
