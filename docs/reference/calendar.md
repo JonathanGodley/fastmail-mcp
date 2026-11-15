@@ -147,7 +147,7 @@ The ambiguity refusal is raised **before** the repeating-event refusal below.
 
 **What counts as repeating** is read off the stored record, not off the row you passed, and any one of four markers is enough: an `RRULE`; an `RDATE`, which is how a series **lists** its occurrences instead of stating a rule ([#162](https://github.com/JonathanGodley/fastmail-mcp/issues/162)); more than one `VEVENT` in the record, since one CalDAV resource is one UID; or a `RECURRENCE-ID` on any block, which makes that block an edited occurrence. The test fails **closed**.
 
-**A record with an event nested inside another component**, or a component closed out of order, is refused by `update_calendar_event` and `delete_calendar_event` whether it repeats or not, before any other check, because such a layout can hide a repeat rule or an attendee from those checks ([#237](https://github.com/JonathanGodley/fastmail-mcp/issues/237)). Use the Fastmail web interface for it. The read tools still list and return it as before.
+**A record with an event nested inside another component**, a component closed out of order, or a `BEGIN` or `END` line carrying parameters, is refused by `update_calendar_event` and `delete_calendar_event` whether it repeats or not, before the repeating-event checks, because such a layout can hide a repeat rule or an attendee from those checks ([#237](https://github.com/JonathanGodley/fastmail-mcp/issues/237)). Use the Fastmail web interface for it. The read tools still list and return it as before.
 
 `create_calendar_event` cannot make a repeating event, so this server will not rewrite or destroy a series it could not put back.
 
@@ -168,7 +168,7 @@ Refused, with nothing deleted:
 - `occurrence` on an event that does not repeat. It never falls back to deleting the whole event.
 - A series with attendees or an organizer anywhere in the record, an alarm's attendee included. Whether a series write may mail attendees is undecided, so this path sends no mail at all.
 - A series that is not one master carrying the record's only `RRULE` (plus edited occurrences), or that has an `RDATE` or an `EXRULE`, a start with no time zone, a time zone this server cannot resolve, or an edited occurrence whose `RECURRENCE-ID` cannot be read or carries `RANGE`. These are read over the whole record, except a time zone definition's own daylight rules.
-- A record whose components are not nested the way iCalendar requires: an event inside another component, or a component closed out of order. Such a layout can hide lines from a reading that goes event by event.
+- A record whose components are not nested the way iCalendar requires: an event inside another component, a component closed out of order, or a `BEGIN` or `END` line carrying parameters. Such a layout can hide lines from a reading that goes event by event.
 - An occurrence one of the series' stored `EXDATE`s already excludes, compared by the instant or date it names.
 - An occurrence that has been edited on its own. Its content is not the series', and what to do with its block is undecided.
 - A value that is not an occurrence the calendar server lists for the series, which includes one already deleted; a date-only value against a timed series, or a timed one against an all-day series.

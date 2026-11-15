@@ -485,12 +485,15 @@ interface OccurrenceSeries {
  * Walk a resource's logical lines with the stack of open components, calling `onProperty` for
  * each property line. Returns false when the component markers do not nest, or a VEVENT opens
  * anywhere but directly inside the VCALENDAR: the layouts that hide lines from
- * `extractVEventBlocks`, which closes a block at the first END:VEVENT (#146, #237).
+ * `extractVEventBlocks`, which closes a block at the first END:VEVENT (#146, #237). Also when a
+ * BEGIN or END line carries parameters: this server reads it as a property, and a parser that
+ * reads it as a marker would see another structure.
  */
 function walkICalComponents(icalData: string, onProperty: (line: string, stack: string[]) => void = () => {}): boolean {
   const stack: string[] = [];
   for (const line of unfoldedICalLines(icalData)) {
     const marker = markerLine(line);
+    if (marker && /^(BEGIN|END);/.test(marker)) return false;
     const begin = marker && /^BEGIN:(.+)$/.exec(marker);
     const end = marker && /^END:(.+)$/.exec(marker);
     if (begin) {
@@ -512,7 +515,8 @@ function walkICalComponents(icalData: string, onProperty: (line: string, stack: 
  */
 function hiddenLayoutRefusal(action: 'update' | 'delete', title: string): InvalidInputError {
   return new InvalidInputError(
-    `"${echoCallerText(title)}" is stored with an event nested inside another component, or a component closed out of order, `
+    `"${echoCallerText(title)}" is stored with an event nested inside another component, a component closed out of order, `
+    + 'or a BEGIN or END line carrying parameters, '
     + `and this server will not ${action === 'update' ? 'write to' : 'delete'} an event stored that way. Nothing was changed. `
     + 'Use the Fastmail web interface to change or delete it.',
   );
@@ -548,8 +552,8 @@ function assessOccurrenceSeries(icalData: string): { series: OccurrenceSeries } 
   const names = resourcePropertyNames(icalData);
   if (!names) {
     return {
-      reason: 'its components are not nested the way iCalendar requires (an event inside another component, or a component '
-        + 'closed out of order), so which event each line belongs to cannot be read',
+      reason: 'its components are not nested the way iCalendar requires (an event inside another component, a component '
+        + 'closed out of order, or a BEGIN or END line carrying parameters), so which event each line belongs to cannot be read',
     };
   }
   const count = (name: string) => names.filter(n => n === name).length;

@@ -4963,6 +4963,11 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
         mutate('END:VTIMEZONE', 'END:VTIMEZONE\r\nBEGIN:X-WRAP\r\nATTENDEE:mailto:guest@example.com\r\nEND:X-WRAP'), /has attendees or an organizer/],
       ['an RRULE in a top-level X- component',
         mutate('END:VTIMEZONE', 'END:VTIMEZONE\r\nBEGIN:X-WRAP\r\nRRULE:FREQ=DAILY\r\nEND:X-WRAP'), /not one series with a single repeat rule/],
+      // A marker with parameters reads as a property line, so the VTIMEZONE would seem still open.
+      ['an RRULE after an END marker carrying parameters',
+        mutate('END:VTIMEZONE', 'END;X-P=1:VTIMEZONE\r\nRRULE:FREQ=DAILY\r\nEND:VTIMEZONE'), NESTED],
+      ['a second event opened and closed by markers carrying parameters',
+        mutate('END:VTIMEZONE', 'END:VTIMEZONE\r\nBEGIN;X-P=1:VEVENT\r\nUID:other@example.com\r\nDTSTART:20260823T090000Z\r\nEND;X-P=1:VEVENT'), NESTED],
       ['an ATTENDEE in the top-level VTIMEZONE',
         mutate('TZOFFSETTO:+1000', 'TZOFFSETTO:+1000\r\nATTENDEE:mailto:guest@example.com'), /has attendees or an organizer/],
       ['an RDATE in a VTIMEZONE nested in the master',
@@ -5414,7 +5419,8 @@ describe('update and whole-event delete refuse a VEVENT nested inside the stored
     assert.ok(err instanceof Error && err.name === 'InvalidInputError', `expected InvalidInputError, got ${err}`);
     assert.equal(
       (err as Error).message,
-      `"Hidden 'x Separately" is stored with an event nested inside another component, or a component closed out of order, `
+      `"Hidden 'x Separately" is stored with an event nested inside another component, a component closed out of order, `
+        + 'or a BEGIN or END line carrying parameters, '
         + `and this server will not ${action} an event stored that way. Nothing was changed. Use the Fastmail web interface to change or delete it.`,
     );
     return true;
@@ -5440,6 +5446,17 @@ describe('update and whole-event delete refuse a VEVENT nested inside the stored
     const { c, m } = client(MEETING);
     await assert.rejects(() => c.updateCalendarEvent(UID, { start: '2026-08-22T11:00:00Z', end: '2026-08-22T12:00:00Z' }), refusal('write to'));
     nothingWritten(m);
+  });
+
+  it('a BEGIN or END marker carrying parameters is refused by delete and update', async () => {
+    // This server reads such a line as a property; a parser that honours it as a marker would see
+    // a different structure, so neither reading can be trusted to have seen every line.
+    const del = client(stored(['BEGIN;X-P=1:X-WRAP', 'END;X-P=1:X-WRAP'], []));
+    await assert.rejects(() => del.c.deleteCalendarEvent(UID), refusal('delete'));
+    nothingWritten(del.m);
+    const upd = client(stored(['BEGIN;X-P=1:VEVENT', 'END;X-P=1:VEVENT'], ['ATTENDEE:mailto:guest@example.com']));
+    await assert.rejects(() => upd.c.updateCalendarEvent(UID, { title: 'New' }), refusal('write to'));
+    nothingWritten(upd.m);
   });
 
   it('an update of a series whose RRULE follows a nested VEVENT is refused', async () => {
