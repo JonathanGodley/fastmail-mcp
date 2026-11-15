@@ -735,8 +735,8 @@ const CONTACT_VERBOSE_PARAM_DESC =
   'Return each emails/phones entry whole (contexts, pref and any other stored field) instead ' +
   'of the bare-string-or-{value,label} shape, and include the extra contact fields ' +
   '(addresses, photos, anniversaries). Returns organizations, titles, notes and online (URLs) ' +
-  'whole as keyed maps, keys kept, so a title\'s organizationId names an organizations key; the ' +
-  'default view\'s first-organization string stays as organization. Also returns kind on EVERY card, ' +
+  'whole as keyed maps (a title\'s organizationId names an organizations key), and still ' +
+  'returns organization. Also returns kind on EVERY card, ' +
   'including the individual the default view omits — so under verbose the presence of kind ' +
   'says nothing about what the card is; read its value. Not needed for most tasks.';
 

@@ -823,7 +823,7 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
       if (list.length) result.addresses = list;
     }
     // Copied whole with their keys: a title's organizationId and a localizations path name a key
-    // (RFC 9553 sections 2.2.5 and 2.7.1). A legacy string `notes` keeps the default view's value.
+    // (RFC 9553 sections 2.2.5 and 2.7.1).
     for (const key of ['organizations', 'titles', 'notes', 'online']) {
       const value = raw[key];
       if (value && typeof value === 'object' && Object.keys(value).length) result[key] = value;
