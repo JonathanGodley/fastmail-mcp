@@ -15,9 +15,9 @@
     "sha256": "54705b787e7b150e931b705992c1b89f44f861035a6988df4fa41ee56283bc72"
   },
   "list_calendar_events": {
-    "bytes": 4058,
-    "chars": 4046,
-    "sha256": "291ae7ec6b3ec6b1ec0bb23b0c7be7331ebb72cd7ad3461482ebdb661ee62e2b"
+    "bytes": 4096,
+    "chars": 4084,
+    "sha256": "4e8d97ceafb0d1372423fe94d0839a788b8da775ca09bbff78caaccb7ba95b08"
   },
   "list_contacts": {
     "bytes": 2430,

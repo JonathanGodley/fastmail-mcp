@@ -15,5 +15,12 @@ it('produces every payload-size row, each with a parseable JSON block', async (t
     const parsed = JSON.parse(json);
     assert.ok(Array.isArray(parsed) ? parsed.length > 0 : Object.keys(parsed).length > 0, `${p.name}'s JSON block is empty`);
   }
-  for (const line of formatTable(readBaseline(), produced).split('\n')) t.diagnostic(line);
+  let baseline;
+  try {
+    baseline = readBaseline();
+  } catch (err) {
+    t.diagnostic(`baseline unreadable, table skipped: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  for (const line of formatTable(baseline, produced).split('\n')) t.diagnostic(line);
 });

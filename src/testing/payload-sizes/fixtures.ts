@@ -8,8 +8,8 @@
 // - get_email: one received multipart/alternative message with a PDF attached.
 // - get_thread: a four-message reply chain across Inbox and Sent.
 // - list_calendar_events: a default call (no dates) on 4 May 2026 in Sydney, over two
-//   calendars: 12 rows, among them a weekly series, a monthly series with one instance in the
-//   window, two all-day events and a meeting with attendees.
+//   calendars: 12 rows, among them a weekly series, one instance of a monthly series that began
+//   in February, two all-day events and a meeting with attendees.
 // - list_contacts: a 20-card page out of 143: mostly a name and one address, a few phones and
 //   organisations, one note, one contact group.
 // Some names and subjects are non-ASCII, so bytes and characters differ as they do in real mail.
@@ -18,7 +18,8 @@
 // suffix only, because the secret scanner flags any other domain.
 //
 // The JMAP responses are keyed by the call id each client puts in its batch (see `answer` in
-// measure.ts).
+// measure.ts). The DAV stub ignores a request's filters, timeRange, expand and urlFilter: the
+// expanded objects are the server's answer as data, so the window and expansion go unexercised.
 
 import type { JmapSession } from '../../jmap-client.js';
 
@@ -494,6 +495,8 @@ export const EXPANDED_OBJECTS: CalendarObjectFixture[] = [
     calendarUrl: PERSONAL, url: `${PERSONAL}c7f02e19-bookclub.ics`,
     lines: vcalendar(vevent([
       'UID:c7f02e19-5a3d-4b8c-a1e6-0d9f7b2c4e85',
+      // The series began in February, so this is not its first instance.
+      'RECURRENCE-ID:20260514T090000Z',
       'DTSTART:20260514T090000Z', 'DTEND:20260514T110000Z',
       'SUMMARY:Book club', 'LOCATION:Jordan’s place',
       'DESCRIPTION:May: the lighthouse keeper one. Bring a plate.',
@@ -558,13 +561,7 @@ export const EXPANDED_OBJECTS: CalendarObjectFixture[] = [
 ];
 
 // The stored resources the follow-up read returns for each row the expanded listing cannot
-// classify on its own: the book club's stored master still carries its rule.
+// classify on its own. Only the one-off events are asked about, and each is stored as listed.
 export const STORED_OBJECTS: Record<string, string[]> = Object.fromEntries(
-  EXPANDED_OBJECTS.map((o) => [o.url, o.url.endsWith('-bookclub.ics')
-    ? vcalendar(vevent([
-      'UID:c7f02e19-5a3d-4b8c-a1e6-0d9f7b2c4e85',
-      'DTSTART;TZID=Australia/Sydney:20260212T190000', 'DTEND;TZID=Australia/Sydney:20260212T210000',
-      'RRULE:FREQ=MONTHLY;BYDAY=2TH', 'SUMMARY:Book club',
-    ]))
-    : o.lines]),
+  EXPANDED_OBJECTS.map((o) => [o.url, o.lines]),
 );
