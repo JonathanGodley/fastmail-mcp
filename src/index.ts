@@ -14,7 +14,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { setDefaultTimezone } from './email-formatter.js';
 import { buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrusted, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { composeDraftEmail } from './draft-email-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
 import { editDraft } from './edit-draft-handler.js';
@@ -528,7 +528,7 @@ const STATS_MAILBOX_PARAM_DESC =
   'Mailbox to report on (optional, defaults to all mailboxes; a blank value is rejected, so omit it for all). ' + MAILBOX_REF_FORMS;
 
 const LIST_PARENT_PARAM_DESC =
-  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox; a blank value is rejected rather than read as every mailbox. ' + MAILBOX_REF_FORMS;
+  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox; a blank value is rejected rather than read as every mailbox. Cannot be combined with topLevelOnly. ' + MAILBOX_REF_FORMS;
 
 const CREATE_PARENT_PARAM_DESC =
   'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
@@ -765,13 +765,17 @@ const TOOLS = [
         // No `properties` projection parameter, deliberately (upstream has one): a narrowed
         // set that dropped id/name/role/parentId would silently break the path column and
         // every path-form lookup. A large-account trim would be a feature to design.
-        description: 'List the mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, path, role, counts). Each mailbox carries `path`, its root-anchored "/"-separated location (e.g. Archive/2026/Receipts), which can be passed straight back to any mailbox parameter. Use parent to list one folder\'s direct children. Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response (no path — raw is untransformed JMAP).',
+        description: 'List the mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, path, role, counts). Each mailbox carries `path`, its root-anchored "/"-separated location (e.g. Archive/2026/Receipts), which can be passed straight back to any mailbox parameter. Use parent to list one folder\'s direct children, or topLevelOnly=true to list only the mailboxes at the top level. Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response (no path — raw is untransformed JMAP).',
         inputSchema: {
           type: 'object',
           properties: {
             parent: {
               type: 'string',
               description: LIST_PARENT_PARAM_DESC,
+            },
+            topLevelOnly: {
+              type: ['boolean', 'string'],
+              description: lenientBool('List only the mailboxes that have no parent (the Inbox\'s children are not included; parent: "inbox" lists them). Cannot be combined with parent.'),
             },
             verbose: {
               type: ['boolean', 'string'],
@@ -2713,7 +2717,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       default:
-        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: "${describeUntrusted(name)}"`);
     }
   } catch (error) {
     // EVERY branch below runs its message through redactBearerTokens, with no exemption:
