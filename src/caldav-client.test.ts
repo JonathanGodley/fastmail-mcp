@@ -4963,6 +4963,8 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
         mutate('END:VTIMEZONE', 'END:VTIMEZONE\r\nBEGIN:X-WRAP\r\nATTENDEE:mailto:guest@example.com\r\nEND:X-WRAP'), /has attendees or an organizer/],
       ['an RRULE in a top-level X- component',
         mutate('END:VTIMEZONE', 'END:VTIMEZONE\r\nBEGIN:X-WRAP\r\nRRULE:FREQ=DAILY\r\nEND:X-WRAP'), /not one series with a single repeat rule/],
+      ['an ATTENDEE in the top-level VTIMEZONE',
+        mutate('TZOFFSETTO:+1000', 'TZOFFSETTO:+1000\r\nATTENDEE:mailto:guest@example.com'), /has attendees or an organizer/],
       ['an RDATE in a VTIMEZONE nested in the master',
         mutate('SEQUENCE:1\r\nBEGIN:VALARM', 'SEQUENCE:1\r\nBEGIN:VTIMEZONE\r\nRDATE;TZID=Australia/Sydney:20261003T090000\r\nEND:VTIMEZONE\r\nBEGIN:VALARM'), /RDATE/],
     ] as Array<[string, string, RegExp]>) {
@@ -5031,7 +5033,7 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     });
 
     const FIRST = /is the first occurrence of "[^"]+", which this server never removes/;
-    const FIRST_NOT_LISTED = /the calendar server does not list the first occurrence of "[^"]+" at the start this server reads/;
+    const FIRST_NOT_LISTED = /the calendar server does not list the first occurrence of "[^"]+", unedited, at the start this server reads/;
 
     it('refuses the first occurrence of any series, bounded or not', async () => {
       await refuses(GOLDEN, '2026-08-21T23:00:00Z', FIRST);
@@ -5050,6 +5052,17 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     it('refuses any occurrence of a series whose first instance is gone, bounded or not', async () => {
       await refuses(GOLDEN, '2026-09-04T23:00:00Z', FIRST_NOT_LISTED, GOLDEN_INSTANCES.slice(1));
       await refuses(UNBOUNDED_UTC, '2026-04-13T10:00:00Z', FIRST_NOT_LISTED, UNBOUNDED_INSTANCES.slice(1));
+    });
+
+    it('refuses any occurrence of a series whose first instance is edited on its own', async () => {
+      // Retitled only, so it still starts at the series' start; it comes back with a
+      // RECURRENCE-ID all the same, so no block lacks one.
+      const firstEdited = mutate('RECURRENCE-ID;TZID=Australia/Sydney:20260829T090000', 'RECURRENCE-ID;TZID=Australia/Sydney:20260822T090000')
+        .replace('DTSTART;TZID=Australia/Sydney:20260829T093000', 'DTSTART;TZID=Australia/Sydney:20260822T090000');
+      await refuses(firstEdited, '2026-09-04T23:00:00Z', FIRST_NOT_LISTED, [
+        { ms: at('2026-08-21T23:00:00Z'), lines: ['RECURRENCE-ID:20260821T230000Z', 'DTSTART:20260821T230000Z'] },
+        ...GOLDEN_INSTANCES.slice(2),
+      ]);
     });
 
     // The stored VTIMEZONE is what the calendar server expands with; this server resolves the
@@ -5200,6 +5213,29 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
         return [{ data: expandedBlob(GOLDEN_INSTANCES.filter(i => i.ms >= from && i.ms < to)), url: CAL_URL + 'Weekly-copy.ics', etag: '"e"' }];
       });
       unconfirmed(elsewhere.result, /, but the answer does not hold the series, and neither does a second read for its first occurrence, /);
+    });
+
+    it('confirms from one read when the answer holds the series\' other occurrences without this one', async () => {
+      const daily = ALL_DAY.replace('RRULE:FREQ=YEARLY;COUNT=3', 'RRULE:FREQ=DAILY');
+      const instances: Instance[] = [
+        { ms: at('2026-08-22T00:00:00Z'), lines: ['DTSTART;VALUE=DATE:20260822'] },
+        { ms: at('2026-08-24T00:00:00Z'), lines: ['RECURRENCE-ID;VALUE=DATE:20260824', 'DTSTART;VALUE=DATE:20260824'], exdate: 'EXDATE;VALUE=DATE:20260824' },
+        // Inside the window around the 24th, which runs 14 hours past its UTC day.
+        { ms: at('2026-08-25T00:00:00Z'), lines: ['RECURRENCE-ID;VALUE=DATE:20260825', 'DTSTART;VALUE=DATE:20260825'] },
+      ];
+      let afterWriteQueries = 0;
+      const { client } = makeClient(daily, instances, {
+        expand: (params, written) => {
+          if (written !== undefined) afterWriteQueries++;
+          const from = Date.parse(params.timeRange!.start);
+          const to = Date.parse(params.timeRange!.end);
+          const live = instances.filter(i => i.ms >= from && i.ms < to && !(i.exdate && written?.includes(i.exdate)));
+          return live.length === 0 ? [] : [{ data: expandedBlob(live), url: EVENT_URL, etag: '"e"' }];
+        },
+      });
+      const result = await client.deleteCalendarEvent(UID, '2026-08-24');
+      assert.equal(result.occurrence?.failure, undefined);
+      assert.equal(afterWriteQueries, 1, 'no second read: the answer itself shows the occurrence gone');
     });
 
     it('confirms an empty window by finding the first instance in a second read', async () => {

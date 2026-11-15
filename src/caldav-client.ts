@@ -484,8 +484,8 @@ interface OccurrenceSeries {
 /**
  * The names of the resource's properties, read over the WHOLE text rather than per VEVENT block,
  * so a component `extractVEventBlocks` cannot see past cannot hide a line from the series gates.
- * A top-level VTIMEZONE's own lines are left out: its RRULE and RDATE are daylight rules, not
- * the event's. Undefined when the component markers do not nest, or a VEVENT is anywhere but
+ * A top-level VTIMEZONE's RRULE and RDATE lines are left out: they are daylight rules, not the
+ * event's. Undefined when the component markers do not nest, or a VEVENT is anywhere but
  * directly inside the VCALENDAR, which is the layout that hides lines from the block scan.
  */
 function resourcePropertyNames(icalData: string): string[] | undefined {
@@ -500,9 +500,10 @@ function resourcePropertyNames(icalData: string): string[] | undefined {
       stack.push(begin[1]);
     } else if (end) {
       if (stack.pop() !== end[1]) return undefined;
-    } else if (!(stack[0] === 'VCALENDAR' && stack[1] === 'VTIMEZONE')) {
-      const name = /^([A-Za-z0-9-]+)[;:]/.exec(line)?.[1];
-      if (name) names.push(name.toUpperCase());
+    } else {
+      const name = /^([A-Za-z0-9-]+)[;:]/.exec(line)?.[1]?.toUpperCase();
+      const daylightRule = stack[0] === 'VCALENDAR' && stack[1] === 'VTIMEZONE' && (name === 'RRULE' || name === 'RDATE');
+      if (name && !daylightRule) names.push(name);
     }
   }
   return stack.length === 0 ? names : undefined;
@@ -4644,10 +4645,11 @@ export class CalDAVCalendarClient {
     if ('unusable' in first) throw unusableBeforeWrite(first.unusable);
     if ('absent' in first || !expandedHoldsFirstInstance(first.blocks, series.start)) {
       throw new InvalidInputError(
-        `${quotedOccurrence} cannot be deleted here: the calendar server does not list the first occurrence of "${echoCallerText(title)}" `
-        + 'at the start this server reads from the stored event. This server removes an occurrence only while the first one is in '
-        + 'place, so the series keeps an occurrence and the exclusion is known to name the intended one. Nothing was deleted. '
-        + 'Use the Fastmail web interface to delete it.',
+        `${quotedOccurrence} cannot be deleted here: the calendar server does not list the first occurrence of "${echoCallerText(title)}", `
+        + 'unedited, at the start this server reads from the stored event, so it is gone, edited on its own, or placed by a stored '
+        + 'time zone definition that disagrees with this server\'s zone data. This server removes an occurrence only while the first '
+        + 'one is in place and unedited, so the series keeps an occurrence and the exclusion is known to name the intended one. '
+        + 'Nothing was deleted. Use the Fastmail web interface to delete it.',
       );
     }
 
