@@ -922,8 +922,7 @@ const BARE_REFERENCE = new RegExp(String.raw`\bJSON\s*\??\.\s*stringify\b(?!\s*\
 // this pass every comma, quote and paren left in the text is syntax, so a comma inside a
 // string, a comment or a regex cannot be mistaken for an argument separator, and a
 // JSON.stringify quoted in prose cannot be mistaken for a call. Text inside a `${}`
-// interpolation is deliberately left intact, because real call sites live there
-// (contact-card.ts builds its dropped-value sentence that way).
+// interpolation is deliberately left intact, because a real call site can live there.
 function blankLiterals(source: string): string {
   const out = [...source];
   const blankAt = (i: number) => {
@@ -1129,12 +1128,12 @@ function findStringifyAliases(source: string): number[] {
 // The JSON.stringify calls that are NOT payload serialisation, keyed by file with an exact
 // count, so ADDING one to an already-listed file still has to be justified here. The count
 // catches an addition and not a substitution: swapping contact-card.ts's prose-quoting call
-// for a payload serialisation leaves the count at 2 and passes. Everything else has to go
+// for a payload serialisation leaves the count at 1 and passes. Everything else has to go
 // through toolJson / redactedJson (see the header for what that does and does not buy).
 const NON_PAYLOAD_STRINGIFY: Record<string, { count: number; why: string }> = {
   'caldav-client.ts': { count: 1, why: 'the last-resort sort key for calendar rows, never emitted' },
   'coerce.ts': { count: 2, why: 'the seams themselves - toolJson and redactedJson' },
-  'contact-card.ts': { count: 2, why: 'quotes a dropped/added value into a prose sentence' },
+  'contact-card.ts': { count: 1, why: 'echoEntry, which quotes a dropped/added entry into a prose sentence' },
   'jmap-client.ts': { count: 1, why: 'the HTTP request body POSTed to the JMAP endpoint' },
   'response-formatters.ts': { count: 1, why: 'builds a Map key from a value tuple, never emitted' },
   'snooze.ts': { count: 1, why: 'the HTTP request body POSTed to the JMAP endpoint on the web session' },

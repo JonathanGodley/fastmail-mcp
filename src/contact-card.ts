@@ -265,6 +265,14 @@ export function isAmbiguousEntryEdit(outcome: EntryMergeOutcome): boolean {
   return outcome.dropped.length > 0 && outcome.added.length > 0;
 }
 
+// JSON.stringify leaves line separators, C1 controls and bidi/format characters raw. They are
+// escaped, not stripped, so the echo still parses back to the exact value the caller resends.
+export function echoEntry(value: unknown): string {
+  return JSON.stringify(value).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, (ch) =>
+    ch.split('').map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`).join(''),
+  );
+}
+
 /**
  * Reject an edit that both drops a known entry and adds an unknown one: it reads as a
  * correction or as a removal plus an unrelated addition, and silent replace is the lossy one.
@@ -278,7 +286,7 @@ export function assertUnambiguousEntryEdit(field: string, outcome: EntryMergeOut
 
   const shown = outcome.dropped.slice(0, MAX_ECHOED_DROPPED_ENTRIES);
   const more = outcome.dropped.length - shown.length;
-  const droppedText = `${shown.map((d) => JSON.stringify(d.entry)).join(', ')}${
+  const droppedText = `${shown.map((d) => echoEntry(d.entry)).join(', ')}${
     more > 0 ? `, …and ${more} more (read them in full with get_contact with verbose:true)` : ''
   }`;
 
@@ -286,7 +294,7 @@ export function assertUnambiguousEntryEdit(field: string, outcome: EntryMergeOut
     `This ${field} edit both drops ${outcome.dropped.length} existing entry(ies) and adds ` +
       `${outcome.added.length} the card does not have, which is ambiguous: it reads either as a ` +
       `correction to the existing entry or as its removal plus an unrelated addition. ` +
-      `Dropped: ${droppedText}. Added: ${outcome.added.map((v) => JSON.stringify(v)).join(', ')}. ` +
+      `Dropped: ${droppedText}. Added: ${outcome.added.map(echoEntry).join(', ')}. ` +
       `To EDIT an entry losslessly, resend it under its existing value (shown above) so it matches, ` +
       `changing only what you meant to change. To REPLACE the ${field} outright, pass ` +
       `allowEntryReplace:true — every ${field} entry is then written fresh from what you ` +
