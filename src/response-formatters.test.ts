@@ -588,8 +588,8 @@ describe('simplifyContact', () => {
   it('includes verbose fields when verbose=true', () => {
     const result = simplifyContact(raw, { verbose: true });
     assert.deepEqual(result.addresses, [{ street: '123 Main St', locality: 'Springfield' }]);
-    assert.deepEqual(result.titles, ['CEO']);
-    assert.deepEqual(result.online, ['https://example.com']);
+    assert.deepEqual(result.titles, raw.titles);
+    assert.deepEqual(result.online, raw.online);
     assert.deepEqual(result.photos, raw.photos);
     assert.deepEqual(result.anniversaries, raw.anniversaries);
   });
@@ -731,8 +731,13 @@ describe('simplifyContact', () => {
   });
 
   it('emits nothing for verbose entries that carry no value', () => {
-    const result = simplifyContact({ id: 'ct-v', addresses: { a: null }, titles: { t: {} }, online: { o: {} } }, { verbose: true });
+    const result = simplifyContact({ id: 'ct-v', addresses: { a: null } }, { verbose: true });
     assert.deepEqual(result, { id: 'ct-v' });
+  });
+
+  it('copies valueless titles and online entries whole under verbose', () => {
+    const result = simplifyContact({ id: 'ct-v', titles: { t: {} }, online: { o: {} } }, { verbose: true });
+    assert.deepEqual(result, { id: 'ct-v', titles: { t: {} }, online: { o: {} } });
   });
 
   it('omits an organization with a blank name', () => {
@@ -1187,7 +1192,7 @@ describe('simplifyContact verbose field formatting', () => {
     assert.equal(result.addresses[0].street, '123 Main St');
   });
 
-  it('simplifies titles to flat array in verbose mode', () => {
+  it('keeps titles as the keyed map in verbose mode', () => {
     const raw = {
       id: 'ct-title-1',
       titles: {
@@ -1196,12 +1201,10 @@ describe('simplifyContact verbose field formatting', () => {
       },
     };
     const result = simplifyContact(raw, { verbose: true });
-    assert.ok(Array.isArray(result.titles), 'titles should be an array');
-    assert.ok(result.titles.includes('CEO'));
-    assert.ok(result.titles.includes('Founder'));
+    assert.deepEqual(result.titles, raw.titles);
   });
 
-  it('simplifies online/URLs to flat array in verbose mode', () => {
+  it('keeps online/URLs as the keyed map in verbose mode', () => {
     const raw = {
       id: 'ct-url-1',
       online: {
@@ -1210,9 +1213,79 @@ describe('simplifyContact verbose field formatting', () => {
       },
     };
     const result = simplifyContact(raw, { verbose: true });
-    assert.ok(Array.isArray(result.online), 'online should be an array');
-    assert.ok(result.online.includes('https://example.com'));
-    assert.ok(result.online.includes('https://github.com/example'));
+    assert.deepEqual(result.online, raw.online);
+  });
+});
+
+// ---------- simplifyContact: verbose keeps the keyed maps whole (#206) ----------
+
+describe('simplifyContact verbose keyed maps', () => {
+  const card = {
+    id: 'ct-206',
+    organizations: {
+      o1: { '@type': 'Organization', name: 'Quillfeather Labs' },
+      o2: { '@type': 'Organization', name: 'Brindlewood Trust', units: [{ '@type': 'OrgUnit', name: 'Archives' }] },
+    },
+    titles: {
+      t1: { '@type': 'Title', name: 'Engineer' },
+      t2: { '@type': 'Title', kind: 'role', name: 'Treasurer', organizationId: 'o2' },
+    },
+    notes: {
+      n1: { '@type': 'Note', note: 'First note' },
+      n2: { '@type': 'Note', note: 'Second note', created: '2026-01-02T03:04:05Z', author: { '@type': 'Author', name: 'Wren Example' } },
+    },
+    online: {
+      w1: { uri: 'https://quillfeather.example', contexts: { work: true } },
+    },
+  };
+
+  it('keeps every organization and its key', () => {
+    assert.deepEqual(simplifyContact(card, { verbose: true }).organizations, card.organizations);
+  });
+
+  it('keeps every title whole, and each organizationId names an emitted organization key', () => {
+    const result = simplifyContact(card, { verbose: true });
+    assert.deepEqual(result.titles, card.titles);
+    for (const title of Object.values(result.titles) as any[]) {
+      if (title.organizationId !== undefined) assert.ok(title.organizationId in result.organizations, title.organizationId);
+    }
+  });
+
+  it('keeps every note whole and keyed', () => {
+    assert.deepEqual(simplifyContact(card, { verbose: true }).notes, card.notes);
+  });
+
+  it('keeps every online entry whole and keyed', () => {
+    assert.deepEqual(simplifyContact(card, { verbose: true }).online, card.online);
+  });
+
+  it('keeps a notes array whole, and a legacy string notes as the string', () => {
+    const notes = [{ note: 'First note' }, { note: 'Second note' }];
+    assert.deepEqual(simplifyContact({ id: 'ct-na', notes }, { verbose: true }).notes, notes);
+    assert.equal(simplifyContact({ id: 'ct-ns', notes: 'VIP client' }, { verbose: true }).notes, 'VIP client');
+  });
+
+  it('passes a malformed organizations, titles, notes or online through as stored under verbose only', () => {
+    const malformed = { id: 'ct-ss', organizations: 'ab', titles: 5, notes: 7, online: 'ab' };
+    assert.deepEqual(simplifyContact(malformed, { verbose: true }), malformed);
+    assert.deepEqual(simplifyContact(malformed), { id: 'ct-ss' });
+    const blank = { id: 'ct-sb', organizations: '', titles: '', notes: '', online: '' };
+    assert.deepEqual(simplifyContact(blank, { verbose: true }), { id: 'ct-sb' });
+  });
+
+  it('skips a null note entry in either view', () => {
+    const notes = { n1: null, n2: { note: 'Kept note' } };
+    assert.equal(simplifyContact({ id: 'ct-nn', notes }).notes, 'Kept note');
+    assert.deepEqual(simplifyContact({ id: 'ct-nn', notes }, { verbose: true }).notes, notes);
+  });
+
+  it('the default view still shows the first organization name and the notes joined', () => {
+    const result = simplifyContact(card);
+    assert.equal(result.organization, 'Quillfeather Labs');
+    assert.equal(result.notes, 'First note\nSecond note');
+    assert.equal('organizations' in result, false);
+    assert.equal('titles' in result, false);
+    assert.equal('online' in result, false);
   });
 });
 
