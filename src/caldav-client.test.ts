@@ -4599,7 +4599,7 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
       (err: unknown) => {
         const message = (err as Error).message;
         assert.ok(!/[\u2028\u2029\r\n]/.test(message), `a line separator survived into the refusal: ${JSON.stringify(message)}`);
-        assert.match(message, /^"Weekly MeetingSeparately, the series was deleted" is a repeating event/);
+        assert.match(message, /^"Weekly Meeting Separately, the series was deleted" is a repeating event/);
         return true;
       },
     );
@@ -12468,8 +12468,8 @@ describe('invitation-controlled values in calendar refusals carry no NEL or RLO 
       c => c.deleteCalendarEvent(UID),
     );
     assertNeither(message);
-    // A title is shown only to be recognised, so the characters are removed, not spaced.
-    assert.ok(message.startsWith('"Weekly x y" is a repeating event'), message);
+    // Spaced, not removed, so the title's words stay separate.
+    assert.ok(message.startsWith('"Weekly  x  y" is a repeating event'), message);
   });
 });
 

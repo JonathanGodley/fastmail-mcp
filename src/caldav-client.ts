@@ -2,7 +2,7 @@ import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, url
 // Caller-fixable input must throw coerce.ts's tagged InvalidInputError, which the CallTool
 // boundary maps to InvalidParams; a plain Error surfaces as InternalError. See
 // docs/conventions.md.
-import { InvalidInputError, describeUntrusted, describeUntrustedAt,etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS, zoneOffsetMsAt, utcMsFromComponents } from './coerce.js';
+import { InvalidInputError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS, zoneOffsetMsAt, utcMsFromComponents } from './coerce.js';
 import { trimEnd } from './trim-end.js';
 import { foldICalLine } from './ical-fold.js';
 // A calendar window interprets local dates in the same zone the rest of the server displays,
@@ -386,10 +386,10 @@ export function recurringSeriesRefusal(
   const consequence = action === 'delete'
     ? 'Deleting it would remove every occurrence, past and future, and the server would mail a cancellation to every attendee.'
     : 'Changing it would move every occurrence, and where single occurrences have already been edited on their own there is no agreed answer for what should happen to them.';
-  // The unescaped title is attacker-choosable text shown only to be recognised
-  // (docs/conventions.md, untrusted values in prose).
+  // The unescaped title is attacker-choosable text (docs/conventions.md, untrusted values in
+  // prose), so it goes through the shared echo inside its double quotes.
   return new InvalidInputError(
-    `"${describeUntrusted(title)}" is a repeating event, and this server will not ${action} it. `
+    `"${echoCallerText(title)}" is a repeating event, and this server will not ${action} it. `
     + `${consequence} `
     + 'There is no parameter, flag or confirmation that overrides this, so do not look for one: '
     + 'this server cannot CREATE a repeating event (create_calendar_event writes single events only), '
@@ -3507,7 +3507,7 @@ export class CalDAVCalendarClient {
           // Invitation-authored values, echoed (#141). The guarantee is no extra LINES, not no
           // attacker prose inside the quotes.
           throw new InvalidInputError(
-            `Refused: repeating event "${describeUntrusted(title)}" (id ${echoCallerText(id)}, ` +
+            `Refused: repeating event "${echoCallerText(title)}" (id ${echoCallerText(id)}, ` +
             `calendar ${echoCallerText(calendar)}) expands to ${blocks.length} occurrences in the ` +
             `range searched for this window, more than the ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} ` +
             'this server will materialise for one series. This is a deliberate limit; narrow the ' +
