@@ -1,6 +1,7 @@
 // Drift guards keeping docs/reference/tools.md's tool reference, the README's tool list and
-// the `check_function_availability` report in step with the `TOOLS` array. Both are hand-maintained lists of tool names, and both go
-// stale when a tool is added and its entry is never written.
+// the `check_function_availability` report in step with the `TOOLS` array. All three are
+// hand-maintained lists of tool names, and all go stale when a tool is added and its entry
+// is never written.
 //
 // A count-only check passes when the "Available Tools (N Total)" heading is bumped but the
 // entry is missing, so the assertion is SET EQUALITY between TOOLS and the reference, in both
