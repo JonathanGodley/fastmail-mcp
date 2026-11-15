@@ -457,6 +457,29 @@ export function extractTzidParam(line: string): string | undefined {
 }
 
 /**
+ * The TZID an update inherits from a stored DTSTART/DTEND line, or a refusal when that line
+ * cannot be read (#234): unbalanced quoting in its parameters hides the value boundary, so what
+ * `extractTzidParam` returns is wrong or missing, and a control character in the TZID (a lone CR
+ * included) would be written into the new line.
+ *
+ * Deliberately not RFC 5545 §3.2's grammar: an unquoted comma (`TZID=Eastern Time (US & Canada),
+ * Bogota`) or an empty `TZID=` breaks it but round-trips, so it inherits as before.
+ */
+function inheritableStoredTzid(storedProp: string, line: string): string | undefined {
+  const tzid = extractTzidParam(line);
+  let fault: string | undefined;
+  if (findValueBoundary(line) === -1) fault = 'its parameters have unbalanced quotes';
+  else if (tzid !== undefined && /[\x00-\x08\x0A-\x1F\x7F]/.test(tzid)) fault = 'its TZID contains a control character';
+  if (fault === undefined) return tzid;
+  const echoed = tzid === undefined ? '' : ` (TZID "${describeUntrustedAt(tzid, ZONE_ECHO_LIMIT)}")`;
+  throw new InvalidInputError(
+    `The stored ${storedProp}${echoed} is malformed: ${fault}, so its time zone cannot be carried over ` +
+    `to the new value. Pass both start and end with timeZone, both with Z or a UTC offset, or both as ` +
+    `date-only values.`
+  );
+}
+
+/**
  * Which content lines start a property of the block itself: not a folded continuation, not a
  * BEGIN:/END: marker, and not inside a nested component. A VALARM's DESCRIPTION, ATTENDEE,
  * DURATION or UID is the alarm's; read as the event's, an update writes the alarm's recipient
@@ -1655,7 +1678,7 @@ export function formatDateTimeProperty(
     if (originalVevent) {
       const rawLines = parseAllICalProperties(originalVevent, propName);
       if (rawLines.length > 0) {
-        const storedTzid = extractTzidParam(rawLines[0]);
+        const storedTzid = inheritableStoredTzid(propName, rawLines[0]);
         if (storedTzid !== undefined) {
           return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
         }
@@ -1664,7 +1687,7 @@ export function formatDateTimeProperty(
       if (propName === 'DTEND') {
         const startLines = parseAllICalProperties(originalVevent, 'DTSTART');
         if (startLines.length > 0) {
-          const storedTzid = extractTzidParam(startLines[0]);
+          const storedTzid = inheritableStoredTzid('DTSTART', startLines[0]);
           if (storedTzid !== undefined) {
             return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
           }
