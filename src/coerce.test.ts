@@ -1546,6 +1546,18 @@ describe('contact entry coercion', () => {
     );
   });
 
+  it('names at most ten unknown keys on an entry and counts the rest', () => {
+    const entry = { address: 'a@b.example', ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`k${i}`, 1])) };
+    const shown = Array.from({ length: 10 }, (_, i) => `"k${i}"`).join(', ');
+    assert.throws(
+      () => coerceContactEmails([entry]),
+      (e: any) => {
+        assert.ok(e.message.startsWith(`emails[0] has unknown key(s): ${shown}, …and 2 more. Valid:`), e.message);
+        return true;
+      },
+    );
+  });
+
   it('rejects a repeated value, naming both positions', () => {
     // A repeat cannot be matched against the stored card twice, so it would silently
     // surface as an unknown addition and trip the ambiguity guard for no reason.

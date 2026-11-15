@@ -104,8 +104,8 @@ const LIST_ECHO_CAP = 30;
  * Join a capped list and SAY when it was capped: a truncated list with no tail reads as a
  * complete one. The items arrive already rendered (quoted, described); this only bounds them.
  */
-export function joinCapped(items: string[], separator = ', '): string {
-  const shown = items.slice(0, LIST_ECHO_CAP);
+export function joinCapped(items: string[], separator = ', ', cap = LIST_ECHO_CAP): string {
+  const shown = items.slice(0, cap);
   const listed = shown.join(separator);
   return items.length > shown.length ? `${listed}${separator}…and ${items.length - shown.length} more` : listed;
 }
@@ -356,9 +356,7 @@ const UNKNOWN_KEYS_ECHO_CAP = 10;
 
 /** Caller-supplied keys as quoted, neutralised spans, capped at UNKNOWN_KEYS_ECHO_CAP. */
 function quoteCallerKeys(keys: string[]): string {
-  const shown = keys.slice(0, UNKNOWN_KEYS_ECHO_CAP).map((k) => `"${describeUntrusted(k)}"`).join(', ');
-  const rest = keys.length - UNKNOWN_KEYS_ECHO_CAP;
-  return rest > 0 ? `${shown}, …and ${rest} more` : shown;
+  return joinCapped(keys.map((k) => `"${describeUntrusted(k)}"`), ', ', UNKNOWN_KEYS_ECHO_CAP);
 }
 
 // Hard-reject any argument key the tool didn't declare in its inputSchema, so a
