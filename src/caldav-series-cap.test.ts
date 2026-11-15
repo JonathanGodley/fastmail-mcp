@@ -91,9 +91,9 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
         const message = (err as Error).message;
         // Everything the caller needs to find the series and narrow around it.
         assert.match(message, /"Every minute"/);
-        assert.match(message, /id dense@fm/);
+        assert.match(message, /id "dense@fm"/);
         assert.match(message, new RegExp(`${CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1} occurrences`));
-        assert.match(message, /calendar Work/);
+        assert.match(message, /calendar "Work"/);
         // THE LIMIT ITSELF. The error names the number, so the figure is pinned here,
         // interpolated from the constant rather than written as a literal so a deliberate
         // change to the cap moves the assertion with it.
@@ -125,7 +125,7 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
     await assert.rejects(
       () => client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END),
       (err: unknown) => {
-        assert.match((err as Error).message, /calendar \/cal\/nameless\//);
+        assert.match((err as Error).message, /calendar "\/cal\/nameless\/"/);
         return true;
       },
     );
@@ -164,7 +164,7 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
       () => client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END),
       (err: unknown) => {
         // The title still identifies it, which is why an empty id is survivable.
-        assert.match((err as Error).message, /"Every minute" \(id , calendar Work\)/);
+        assert.match((err as Error).message, /"Every minute" \(id "", calendar "Work"\)/);
         return true;
       },
     );
@@ -184,10 +184,63 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
     await assert.rejects(
       () => client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END),
       (err: unknown) => {
-        assert.match((err as Error).message, /id dense@fm, calendar \) expands to/);
+        assert.match((err as Error).message, /id "dense@fm", calendar ""\) expands to/);
         return true;
       },
     );
+  });
+
+  // Title, UID and calendar name are each written by whoever sent the invitation or shared the
+  // calendar, so none may carry NEL (a C1 line break) or RLO (a bidi override) into the refusal
+  // (#182). Each becomes a space, so a title's words stay separate.
+  describe('carries no NEL or RLO from an invitation-controlled value', () => {
+    const NEL = String.fromCharCode(0x85);
+    const RLO = String.fromCharCode(0x202e);
+
+    async function refusalFor(uid: string, summary: string, calendarName: string): Promise<string> {
+      const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+      (client as any).client = makeMockDAVClient([{ displayName: calendarName, url: '/cal/work/' }], {
+        fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+          { data: expandedBlob(uid, summary, CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1), url: '/w-dense.ics' },
+        ]),
+      });
+      try {
+        await client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END);
+      } catch (err) {
+        const message = (err as Error).message;
+        assert.ok(!message.includes(NEL), `NEL survived: ${JSON.stringify(message)}`);
+        assert.ok(!message.includes(RLO), `RLO survived: ${JSON.stringify(message)}`);
+        return message;
+      }
+      return assert.fail('expected the listing to be refused');
+    }
+
+    it('in the SUMMARY', async () => {
+      const message = await refusalFor('dense@fm', `Every ${NEL}x ${RLO}y`, 'Work');
+      assert.ok(message.includes('repeating event "Every  x  y" (id "dense@fm"'), message);
+    });
+
+    it('in the UID', async () => {
+      const message = await refusalFor(`dense${NEL}x${RLO}y@fm`, 'Every minute', 'Work');
+      assert.ok(message.includes('(id "dense x y@fm", calendar "Work")'), message);
+    });
+
+    it('in the calendar name', async () => {
+      const message = await refusalFor('dense@fm', 'Every minute', `Wo${NEL}r${RLO}k`);
+      assert.ok(message.includes('calendar "Wo r k") expands to'), message);
+    });
+
+    // A closing parenthesis and a sentence end need no control character to forge server prose,
+    // so both values sit inside quotes their own `"` cannot close.
+    it('cannot close the parentheses from the UID', async () => {
+      const message = await refusalFor('x) is fine; no limit applies. Next (id y', 'Standup', 'Work');
+      assert.ok(message.includes('(id "x) is fine; no limit applies. Next (id y", calendar "Work")'), message);
+    });
+
+    it('cannot close the parentheses from the calendar name', async () => {
+      const message = await refusalFor('dense@fm', 'Standup', 'Work) is fine; no limit applies. Next (calendar y');
+      assert.ok(message.includes('(id "dense@fm", calendar "Work) is fine; no limit applies. Next (calendar y")'), message);
+    });
   });
 
   it('materialises a series sitting exactly ON the cap', async () => {

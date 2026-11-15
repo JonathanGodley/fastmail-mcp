@@ -457,6 +457,75 @@ export function extractTzidParam(line: string): string | undefined {
 }
 
 /**
+ * Why a stored property line's parameters cannot be trusted to locate its value, or `undefined`.
+ * RFC 5545 §3.1: a parameter value is unquoted text with no `"`, or one quoted string, and values
+ * are comma-separated. So a `"` must open a value (straight after `=` or `,`) and its partner must
+ * close one (straight before `;`, `:` or `,`). A misplaced one, in any number, lets the quote-aware
+ * scans in `findValueBoundary` and `extractTzidParam` read parameters as value or the reverse.
+ */
+function storedParamFault(line: string): 'quote' | 'no-value' | 'name-space' | undefined {
+  let atValueStart = false;
+  // Between a `;` and its `=`. §3.1's grammar allows no whitespace there, and a name with any
+  // beside it is not recognised, so its value (a TZID, say) is silently not read.
+  let inName = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inName && (ch === ' ' || ch === '\t')) return 'name-space';
+    if (ch === '"') {
+      if (!atValueStart) return 'quote';
+      const close = line.indexOf('"', i + 1);
+      if (close === -1) return 'quote';
+      const next = line[close + 1];
+      if (next === undefined) return 'no-value';
+      if (next !== ';' && next !== ':' && next !== ',') return 'quote';
+      i = close;
+      atValueStart = false;
+      continue;
+    }
+    if (ch === ':') return undefined;
+    if (ch === ';') inName = true;
+    else if (ch === '=') inName = false;
+    atValueStart = ch === '=' || ch === ',';
+  }
+  return 'no-value';
+}
+
+/**
+ * The TZID an update inherits from a stored DTSTART/DTEND line, or a refusal when that line
+ * cannot be read (#234): a misplaced quote or a missing value means what `extractTzidParam`
+ * returns is wrong or missing, and a control character in the TZID (a lone CR included) would be
+ * written into the new line.
+ *
+ * Deliberately not RFC 5545 §3.2's grammar: an unquoted comma (`TZID=Eastern Time (US & Canada),
+ * Bogota`) or an empty `TZID=` breaks it but round-trips, so it inherits as before.
+ */
+function inheritableStoredTzid(storedProp: string, line: string): string | undefined {
+  const paramFault = storedParamFault(line);
+  const tzid = paramFault === undefined ? extractTzidParam(line) : undefined;
+  let reason: string;
+  let echoed = '';
+  if (paramFault !== undefined) {
+    // What was parsed is not the TZID, so the raw parameter text is shown instead.
+    const firstSemicolon = line.indexOf(';');
+    const firstColon = line.indexOf(':');
+    const params = firstSemicolon === -1 ? '' : line.slice(firstSemicolon + 1, firstColon === -1 ? undefined : firstColon);
+    reason = paramFault === 'quote' ? 'a quote in its parameters is misplaced'
+      : paramFault === 'name-space' ? 'a parameter name has whitespace beside it' : 'it has no value';
+    if (params !== '') echoed = ` (parameters "${describeUntrustedAt(params, ZONE_ECHO_LIMIT)}")`;
+  } else if (tzid !== undefined && /[\x00-\x08\x0A-\x1F\x7F]/.test(tzid)) {
+    reason = 'its TZID contains a control character';
+    echoed = ` (TZID "${describeUntrustedAt(tzid, ZONE_ECHO_LIMIT)}")`;
+  } else {
+    return tzid;
+  }
+  throw new InvalidInputError(
+    `The stored ${storedProp} is malformed: ${reason}${echoed}, so its time zone cannot be carried ` +
+    `over to the new value. Pass both start and end with timeZone, both with Z or a UTC offset, or ` +
+    `both as date-only values.`
+  );
+}
+
+/**
  * Which content lines start a property of the block itself: not a folded continuation, not a
  * BEGIN:/END: marker, and not inside a nested component. A VALARM's DESCRIPTION, ATTENDEE,
  * DURATION or UID is the alarm's; read as the event's, an update writes the alarm's recipient
@@ -1655,7 +1724,7 @@ export function formatDateTimeProperty(
     if (originalVevent) {
       const rawLines = parseAllICalProperties(originalVevent, propName);
       if (rawLines.length > 0) {
-        const storedTzid = extractTzidParam(rawLines[0]);
+        const storedTzid = inheritableStoredTzid(propName, rawLines[0]);
         if (storedTzid !== undefined) {
           return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
         }
@@ -1664,7 +1733,7 @@ export function formatDateTimeProperty(
       if (propName === 'DTEND') {
         const startLines = parseAllICalProperties(originalVevent, 'DTSTART');
         if (startLines.length > 0) {
-          const storedTzid = extractTzidParam(startLines[0]);
+          const storedTzid = inheritableStoredTzid('DTSTART', startLines[0]);
           if (storedTzid !== undefined) {
             return { line: foldICalLine(`${propName};TZID=${storedTzid}:${serialized}`, lineEnding), tzidSource: 'stored' };
           }
@@ -1754,9 +1823,9 @@ function describeFrame(d: DatePropertyFrame): string {
     case 'zoned':
       // A `default` TZID (#157) was filled in by this server; do not word it as the caller's.
       if (d.tzidSource === 'default') {
-        return `a date-time in the account's configured time zone (${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}), applied because you named none`;
+        return `a date-time in the account's configured time zone (${describeUntrustedAt(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}), applied because you named none`;
       }
-      return `a date-time in time zone ${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}`;
+      return `a date-time in time zone "${describeUntrustedAt(d.tzid!, ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(d.tzid!)}`;
   }
 }
 
@@ -1769,8 +1838,7 @@ function describeFrame(d: DatePropertyFrame): string {
  *
  * Every DTSTART/DTEND value these refusals render goes through `echoCallerText` inside DOUBLE
  * quotes (#190): a side the caller left alone is read verbatim from the stored VEVENT, so an
- * invitation wrote it. `describeFrame`'s TZID is echoed BARE, which is inert only because these
- * sentences single-quote nothing; adding a `'...'` span to any of them reopens it.
+ * invitation wrote it. `describeFrame`'s TZID is quoted the same way.
  * `suggestion` needs no echo: `nextDay` constrains it to `^\d{4}-\d{2}-\d{2}$`.
  */
 function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFrame): void {
@@ -2297,6 +2365,15 @@ export const CALENDAR_UID_ECHO_LIMIT = 320;
  * `Invalid credentials: PROPFIND <url> returned 401 Unauthorized`.
  */
 export const LOGIN_FAILURE_ECHO_LIMIT = 200;
+
+/**
+ * The bound on the zone a calendar write's success sentence names (#182). Outlook writes Windows
+ * display names such as "(UTC+01:00) Belgrade, Bratislava, Budapest, Ljubljana, Prague" as TZIDs.
+ * The success sentence is the only place the caller learns what was written, so it gets the wider
+ * bound; the refusals that name a stored zone only explain a conflict, so they keep
+ * `ZONE_ECHO_LIMIT`.
+ */
+export const WRITTEN_ZONE_ECHO_LIMIT = 100;
 
 /**
  * Is this entry of the calendar-home listing BROKEN — i.e. did the server fail to describe it?
@@ -3072,10 +3149,11 @@ function assertDavOk(resp: unknown, action: string): void {
       throw new Error(`Failed to ${action}: server returned no status`);
     }
     if (status < 200 || status >= 300) {
-      // Server-authored, so echoed; the default bound, since nobody pastes a reason phrase back.
+      // Remote-authored, so quoted: bare, a full stop in it ends this sentence and writes the
+      // next. The default bound, since nobody pastes a reason phrase back.
       const reason = (r as any)?.statusText;
       const phrase = typeof reason === 'string' && reason.trim().length > 0
-        ? ` ${echoCallerText(reason)}`
+        ? ` "${echoCallerText(reason)}"`
         : '';
       throw new Error(`Failed to ${action}: server returned ${status}${phrase}`);
     }
@@ -3132,7 +3210,7 @@ function classifyWrittenLine(formatted: FormattedDateProperty): CalendarZoneWrit
 
 function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
   switch (info.kind) {
-    case 'zoned': return `zone ${info.zone}${etcGmtOffsetNote(info.zone ?? '')}`;
+    case 'zoned': return `zone "${describeUntrustedAt(info.zone, WRITTEN_ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(info.zone ?? '')}`;
     case 'utc': return 'UTC';
     case 'floating': return 'floating (no zone)';
     case 'allday': return 'all-day (no time component)';
@@ -3225,7 +3303,7 @@ function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start'
     // stored tzid is invitation-authored, so it is echoed inside DOUBLE quotes (#190).
     throw new InvalidInputError(
       `timeZone would rewrite ${updatedSide} into '${callerZone}'${etcGmtOffsetNote(callerZone)} while the stored ${strandedLabel} stays ` +
-      `in "${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(desc.tzid)} untouched — silently producing a two-zone event. ` +
+      `in "${describeUntrustedAt(desc.tzid, ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(desc.tzid)} untouched — silently producing a two-zone event. ` +
       `Pass BOTH start and end alongside timeZone (re-send the ${strandedLabel} you are not otherwise ` +
       `moving, unchanged, to keep its wall clock), or omit timeZone.`
     );
@@ -3266,7 +3344,7 @@ export class CalDAVCalendarClient {
       // A plain Error: configuration, not caller input. `detail` is remote-authored, so it takes
       // `describeUntrustedAt`, which also redacts an echoed credential (#182).
       throw new Error(
-        `CalDAV login failed: ${describeUntrustedAt(detail, LOGIN_FAILURE_ECHO_LIMIT)}. Check the configured CalDAV app password ` +
+        `CalDAV login failed: "${describeUntrustedAt(detail, LOGIN_FAILURE_ECHO_LIMIT)}". Check the configured CalDAV app password ` +
         `(a separate credential from the Fastmail JMAP API token).`,
       );
     }
@@ -3498,8 +3576,8 @@ export class CalDAVCalendarClient {
           // Invitation-authored values, echoed (#141). The guarantee is no extra LINES, not no
           // attacker prose inside the quotes.
           throw new InvalidInputError(
-            `Refused: repeating event "${echoCallerText(title)}" (id ${echoCallerText(id)}, ` +
-            `calendar ${echoCallerText(calendar)}) expands to ${blocks.length} occurrences in the ` +
+            `Refused: repeating event "${echoCallerText(title)}" (id "${echoCallerText(id)}", ` +
+            `calendar "${echoCallerText(calendar)}") expands to ${blocks.length} occurrences in the ` +
             `range searched for this window, more than the ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} ` +
             'this server will materialise for one series. This is a deliberate limit; narrow the ' +
             'window to list around it. If you have a genuine use for a series this dense, open an ' +

@@ -2612,6 +2612,39 @@ describe('echoCallerText bound', () => {
   });
 });
 
+// The rule for which helper a value takes is in docs/conventions.md, "Untrusted values in prose" (#182).
+describe('echoCallerText neutralises C1 controls and bidi overrides, and keeps other format characters', () => {
+  const ch = (code: number) => String.fromCharCode(code);
+
+  it('turns NEL into a space', () => {
+    assert.equal(echoCallerText(`a${ch(0x85)}b`), 'a b');
+  });
+
+  it('turns another C1 control into a space', () => {
+    assert.equal(echoCallerText(`a${ch(0x9b)}b`), 'a b');
+  });
+
+  it('turns a bidi override into a space', () => {
+    assert.equal(echoCallerText(`a${ch(0x202e)}b`), 'a b');
+  });
+
+  it('turns a bidi isolate into a space', () => {
+    assert.equal(echoCallerText(`a${ch(0x2066)}b`), 'a b');
+  });
+
+  it('keeps ZWJ, ZWNJ, LRM and RLM', () => {
+    const name = `a${ch(0x200d)}b${ch(0x200c)}c${ch(0x200e)}d${ch(0x200f)}e`;
+    assert.equal(echoCallerText(name), name);
+  });
+});
+
+describe('echoCallerText cuts at a whole code point', () => {
+  it('keeps an emoji straddling the bound whole rather than leaving half a surrogate pair', () => {
+    const emoji = String.fromCodePoint(0x1f600);
+    assert.equal(echoCallerText(`${'x'.repeat(59)}${emoji}y`), `${'x'.repeat(59)}${emoji}…`);
+  });
+});
+
 describe('coerceStringArrayStrict unwraps a padded JSON array', () => {
   it('type-checks the elements of a JSON-string array that carries surrounding whitespace', () => {
     rejectsAsInvalidInput(() => coerceStringArrayStrict('  [null]  ', 'ids'), /ids\[0\] must be a string; received null/);

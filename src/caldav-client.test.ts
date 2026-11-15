@@ -3406,7 +3406,7 @@ describe('validateAttendeeEmail', () => {
   });
 
   it('rejects an address carrying a trailing U+200E left-to-right mark', () => {
-    assert.throws(() => validateAttendeeEmail('a@b.example‎'), /illegal/i);
+    assert.throws(() => validateAttendeeEmail('a@b.example\u200E'), /illegal/i);
   });
 
   it('still accepts a plain dotted address', () => {
@@ -6570,7 +6570,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
       // #190's rule, applied to this untrusted value. A paragraph separator
       // would otherwise split the refusal into what reads as a second sentence from the server,
       // and an unbounded value would let the caller choose the length of the error.
-      const hostile = `x y${'z'.repeat(400)}`;
+      const hostile = `x\u2029y${'z'.repeat(400)}`;
       const { client } = createClient();
       await assert.rejects(
         () => client.createCalendarEvent({
@@ -6579,7 +6579,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
         }),
         (err: unknown) => {
           assert.ok(err instanceof InvalidInputError, String(err));
-          assert.ok(!err.message.includes(' '), err.message);
+          assert.ok(!err.message.includes('\u2029'), err.message);
           assert.ok(err.message.includes('…'), `the echo must be bounded:\n${err.message}`);
           assert.ok(err.message.length < hostile.length, err.message);
           return true;
@@ -7322,6 +7322,269 @@ describe('timeZone parameter (#157)', () => {
       );
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
     });
+  });
+});
+
+// An update that inherits a stored zone reads it out of the stored line. When that line's
+// parameters are malformed, what comes out is wrong, so the update is refused rather than
+// writing a line built on it (#234).
+describe('inheriting a zone from a malformed stored line (#234)', () => {
+  const UID = 'malformed@fixture.invalid';
+
+  function updateClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function storedEvent(...lines: string[]): string {
+    return [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      `UID:${UID}`, 'DTSTAMP:20260301T000000Z',
+      ...lines, 'SUMMARY:Stored',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  function writtenBy(mockDAVClient: ReturnType<typeof updateClient>['mockDAVClient']): string {
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
+    return callArguments(mockDAVClient.updateCalendarObject)[0].calendarObject.data.replace(/\r\n[ \t]/g, '');
+  }
+
+  async function refusalFor(stored: string, fields: Record<string, string>): Promise<Error> {
+    const { client, mockDAVClient } = updateClient(stored);
+    try {
+      await client.updateCalendarEvent(UID, fields);
+    } catch (err) {
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+      return err as Error;
+    }
+    return assert.fail('expected the update to be refused');
+  }
+
+  // The unmatched quote hides the value boundary, so the old value reads as part of the TZID.
+  const SPILLED = storedEvent('DTSTART;TZID=A"B:20260401T100000', 'DTEND;TZID=Europe/Paris:20260401T110000');
+  // The quote opened by X-A swallows the real TZID, so none is found and the new start would be
+  // written floating.
+  const HIDDEN = storedEvent('DTSTART;X-A="x;TZID=Europe/Paris:20260401T100000', 'DURATION:PT1H');
+
+  it('refuses a start-only update that would inherit a TZID spilled into the stored value', async () => {
+    const err = await refusalFor(SPILLED, { start: '2026-04-02T10:00:00' });
+    assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTSTART is malformed/);
+  });
+
+  it('refuses a start-only update that would inherit from a line whose TZID the quoting hides', async () => {
+    const err = await refusalFor(HIDDEN, { start: '2026-04-01T10:30:00' });
+    assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTSTART is malformed/);
+  });
+
+  it('refuses an end-only update that would inherit from a malformed stored DTEND', async () => {
+    const err = await refusalFor(
+      storedEvent('DTSTART;TZID=Europe/Paris:20260401T100000', 'DTEND;TZID=A"B:20260401T110000'),
+      { end: '2026-04-01T11:30:00' },
+    );
+    assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTEND is malformed/);
+  });
+
+  it('refuses an end-only update on a DURATION event that would inherit from a malformed DTSTART', async () => {
+    const err = await refusalFor(HIDDEN, { end: '2026-04-01T11:30:00' });
+    assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTSTART is malformed/);
+  });
+
+  it('refuses to inherit a TZID carrying a lone CR', async () => {
+    const err = await refusalFor(
+      storedEvent('DTSTART;TZID=Europe/Pa\rris:20260401T100000', 'DTEND;TZID=Europe/Paris:20260401T110000'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTSTART is malformed/);
+  });
+
+  it('names the stored property it could not read, which on the DURATION fallback is DTSTART', async () => {
+    const fromDtend = await refusalFor(
+      storedEvent('DTSTART;TZID=Europe/Paris:20260401T100000', 'DTEND;TZID=A"B:20260401T110000'),
+      { end: '2026-04-01T11:30:00' },
+    );
+    assert.match(fromDtend.message, /stored DTEND/);
+    const fromDtstart = await refusalFor(HIDDEN, { end: '2026-04-01T11:30:00' });
+    assert.match(fromDtstart.message, /stored DTSTART/);
+    assert.doesNotMatch(fromDtstart.message, /DTEND/);
+  });
+
+  it('refuses stray quotes in an even number, which leave a value boundary to find', async () => {
+    for (const line of [
+      'DTSTART;X-A="a"b";TZID=Europe/Paris;X-B="c:20260401T100000',
+      'DTSTART;X-A=a"b;TZID=Europe/Paris;X-C=d"e:20260401T100000',
+    ]) {
+      const err = await refusalFor(storedEvent(line, 'DURATION:PT1H'), { start: '2026-04-01T10:30:00' });
+      assert.match(err.message, /^The stored DTSTART is malformed: a quote in its parameters is misplaced/, line);
+    }
+  });
+
+  it('refuses a quote that does not open a value', async () => {
+    const err = await refusalFor(
+      storedEvent('DTSTART;X-A=a"b";TZID=Europe/Paris:20260401T100000', 'DURATION:PT1H'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.match(err.message, /a quote in its parameters is misplaced/);
+  });
+
+  it('refuses a quote that does not close a value', async () => {
+    const err = await refusalFor(
+      storedEvent('DTSTART;X-A="a"b;TZID=Europe/Paris:20260401T100000', 'DURATION:PT1H'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.match(err.message, /a quote in its parameters is misplaced/);
+  });
+
+  // Whitespace beside a parameter's name hides the parameter, so the zone was read as missing and
+  // the new start written floating.
+  for (const [shape, line] of [
+    ['a space before the =', 'DTSTART;TZID =Europe/Paris:20260401T100000'],
+    ['a space after the ;', 'DTSTART; TZID=Europe/Paris:20260401T100000'],
+    ['a tab before the =', 'DTSTART;TZID\t=Europe/Paris:20260401T100000'],
+    ['a tab after the ;', 'DTSTART;\tTZID=Europe/Paris:20260401T100000'],
+  ]) {
+    it(`refuses a parameter name with ${shape}`, async () => {
+      const err = await refusalFor(storedEvent(line, 'DURATION:PT1H'), { start: '2026-04-01T10:30:00' });
+      assert.match(err.message, /^The stored DTSTART is malformed: a parameter name has whitespace beside it/);
+    });
+  }
+
+  // Whitespace on the value side round-trips: the stored spelling is written back as it was.
+  for (const [shape, stored, written] of [
+    ['a space after the =', 'DTSTART;TZID= Europe/Paris:20260401T100000', 'DTSTART;TZID= Europe/Paris:20260401T103000'],
+    ['a tab after the =', 'DTSTART;TZID=\tEurope/Paris:20260401T100000', 'DTSTART;TZID=\tEurope/Paris:20260401T103000'],
+    ['a space ending the previous value', 'DTSTART;X-A=b ;TZID=Europe/Paris:20260401T100000', 'DTSTART;TZID=Europe/Paris:20260401T103000'],
+  ]) {
+    it(`still inherits with ${shape}`, async () => {
+      const { client, mockDAVClient } = updateClient(storedEvent(stored, 'DURATION:PT1H'));
+      await client.updateCalendarEvent(UID, { start: '2026-04-01T10:30:00' });
+      assert.ok(writtenBy(mockDAVClient).includes(`${written}\r\n`), shape);
+    });
+  }
+
+  it('gives a line with no value its own reason', async () => {
+    const err = await refusalFor(
+      storedEvent('DTSTART;TZID=Europe/Paris', 'DTEND;TZID=Europe/Paris:20260401T110000'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.match(err.message, /^The stored DTSTART is malformed: it has no value/);
+  });
+
+  it('echoes the parameters of a line with a misplaced quote neutralised, quote-swapped and cut', async () => {
+    const NEL = String.fromCharCode(0x85);
+    const RLO = String.fromCharCode(0x202e);
+    const LS = String.fromCharCode(0x2028);
+    const tzid = `Fake/Zone${NEL}A\rB${RLO}C${LS}D"E"F ${'x'.repeat(60)}`;
+    const err = await refusalFor(
+      storedEvent(`DTSTART;TZID=${tzid}:20260401T100000`, 'DTEND;TZID=Europe/Paris:20260401T110000'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    for (const ch of [NEL, '\r', RLO, LS]) assert.ok(!err.message.includes(ch), JSON.stringify(err.message));
+    // ZONE_ECHO_LIMIT is 40 code points; the server's own sentence carries the only two quotes.
+    assert.ok(err.message.includes(`(parameters "TZID=Fake/ZoneABCD'E'F ${'x'.repeat(17)}…")`), err.message);
+    assert.equal(err.message.split('"').length - 1, 2, err.message);
+  });
+
+  it('echoes a TZID carrying a control character neutralised and cut', async () => {
+    const NEL = String.fromCharCode(0x85);
+    const tzid = `Fake/Zone${NEL}A\rB ${'x'.repeat(60)}`;
+    const err = await refusalFor(
+      storedEvent(`DTSTART;TZID=${tzid}:20260401T100000`, 'DTEND;TZID=Europe/Paris:20260401T110000'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.match(err.message, /^The stored DTSTART is malformed: its TZID contains a control character/);
+    assert.ok(err.message.includes(`(TZID "Fake/ZoneAB ${'x'.repeat(28)}…")`), err.message);
+  });
+
+  it('still inherits around a quoted parameter value holding a colon and a semicolon', async () => {
+    const { client, mockDAVClient } = updateClient(storedEvent(
+      'DTSTART;X-NOTE="a:b;c";TZID=Europe/Paris:20260401T100000', 'DTEND;TZID=Europe/Paris:20260401T110000',
+    ));
+    await client.updateCalendarEvent(UID, { start: '2026-04-01T10:30:00' });
+    assert.ok(writtenBy(mockDAVClient).includes('DTSTART;TZID=Europe/Paris:20260401T103000\r\n'));
+  });
+
+  it('still writes an empty TZID= and TZID="" as before', async () => {
+    for (const [stored, expected] of [
+      ['DTSTART;TZID=:20260401T100000', 'DTSTART:20260401T103000\r\n'],
+      ['DTSTART;TZID="":20260401T100000', 'DTSTART;TZID="":20260401T103000\r\n'],
+    ]) {
+      const { client, mockDAVClient } = updateClient(storedEvent(stored, 'DURATION:PT1H'));
+      await client.updateCalendarEvent(UID, { start: '2026-04-01T10:30:00' });
+      assert.ok(writtenBy(mockDAVClient).includes(expected), stored);
+    }
+  });
+
+  it('still inherits a balanced quoted Outlook-style TZID', async () => {
+    const outlook = '"(UTC+01:00) Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna"';
+    const { client, mockDAVClient } = updateClient(storedEvent(
+      `DTSTART;TZID=${outlook}:20260401T100000`, `DTEND;TZID=${outlook}:20260401T110000`,
+    ));
+    await client.updateCalendarEvent(UID, { start: '2026-04-01T10:30:00' });
+    assert.ok(writtenBy(mockDAVClient).includes(`DTSTART;TZID=${outlook}:20260401T103000`));
+  });
+
+  it('still inherits an unquoted TZID containing a comma', async () => {
+    const zone = 'Eastern Time (US & Canada), Bogota';
+    const { client, mockDAVClient } = updateClient(storedEvent(
+      `DTSTART;TZID=${zone}:20260401T100000`, `DTEND;TZID=${zone}:20260401T110000`,
+    ));
+    await client.updateCalendarEvent(UID, { start: '2026-04-01T10:30:00' });
+    assert.ok(writtenBy(mockDAVClient).includes(`DTSTART;TZID=${zone}:20260401T103000`));
+  });
+
+  it('a title-only update on a malformed event succeeds and writes the stored lines back unchanged', async () => {
+    for (const [stored, lines] of [
+      [SPILLED, ['DTSTART;TZID=A"B:20260401T100000', 'DTEND;TZID=Europe/Paris:20260401T110000']],
+      [HIDDEN, ['DTSTART;X-A="x;TZID=Europe/Paris:20260401T100000', 'DURATION:PT1H']],
+    ] as const) {
+      const { client, mockDAVClient } = updateClient(stored);
+      await client.updateCalendarEvent(UID, { title: 'Renamed' });
+      const written = writtenBy(mockDAVClient);
+      for (const line of lines) assert.ok(written.includes(`${line}\r\n`), written);
+    }
+  });
+
+  it('the first way through the refusal works: timeZone with both start and end', async () => {
+    for (const stored of [SPILLED, HIDDEN]) {
+      const { client, mockDAVClient } = updateClient(stored);
+      await client.updateCalendarEvent(UID, { start: '2026-04-02T10:00:00', end: '2026-04-02T11:00:00', timeZone: 'Europe/Paris' });
+      assert.ok(writtenBy(mockDAVClient).includes('DTSTART;TZID=Europe/Paris:20260402T100000\r\n'));
+    }
+  });
+
+  it('the second way through the refusal works: both start and end with Z', async () => {
+    for (const stored of [SPILLED, HIDDEN]) {
+      const { client, mockDAVClient } = updateClient(stored);
+      await client.updateCalendarEvent(UID, { start: '2026-04-02T08:00:00Z', end: '2026-04-02T09:00:00Z' });
+      assert.ok(writtenBy(mockDAVClient).includes('DTSTART:20260402T080000Z\r\n'));
+    }
+  });
+
+  it('the third way through the refusal works: both start and end date-only', async () => {
+    for (const stored of [SPILLED, HIDDEN]) {
+      const { client, mockDAVClient } = updateClient(stored);
+      await client.updateCalendarEvent(UID, { start: '2026-04-02', end: '2026-04-03' });
+      assert.ok(writtenBy(mockDAVClient).includes('DTSTART;VALUE=DATE:20260402\r\n'));
+    }
+  });
+
+  it('get_calendar_event still reads a malformed event', async () => {
+    for (const stored of [SPILLED, HIDDEN]) {
+      const { client } = updateClient(stored);
+      const { event } = await client.getCalendarEventById(UID);
+      assert.equal(event.id, UID);
+    }
   });
 });
 
@@ -8510,11 +8773,11 @@ describe('an Etc/GMT zone is shown with its real UTC offset', () => {
   it('create and update confirmations append the offset', () => {
     assert.equal(
       describeCreateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT+10' }, end: { kind: 'zoned', zone: 'Etc/GMT+10' } }),
-      ' Written in zone Etc/GMT+10 (UTC-10:00; the Etc/GMT sign is inverted).',
+      ' Written in zone "Etc/GMT+10" (UTC-10:00; the Etc/GMT sign is inverted).',
     );
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT-5' } }),
-      ' (start zone Etc/GMT-5 (UTC+05:00; the Etc/GMT sign is inverted))',
+      ' (start zone "Etc/GMT-5" (UTC+05:00; the Etc/GMT sign is inverted))',
     );
   });
 
@@ -8531,7 +8794,7 @@ describe('an Etc/GMT zone is shown with its real UTC offset', () => {
     });
     await assert.rejects(
       () => client.updateCalendarEvent('etc@fm', { end: '2026-03-20T20:00:00Z' }),
-      /is a date-time in time zone Etc\/GMT\+10 \(UTC-10:00; the Etc\/GMT sign is inverted\)/,
+      /is a date-time in time zone "Etc\/GMT\+10" \(UTC-10:00; the Etc\/GMT sign is inverted\)/,
     );
   });
 
@@ -8575,7 +8838,7 @@ describe('calendar write result sentences (#157)', () => {
       start: { kind: 'zoned', zone: 'Australia/Sydney' },
       end: { kind: 'zoned', zone: 'Australia/Sydney' },
     });
-    assert.equal(msg, ' Written in zone Australia/Sydney.');
+    assert.equal(msg, ' Written in zone "Australia/Sydney".');
   });
 
   it('create: reports both zones separately on a legitimate cross-zone (flight) pair', () => {
@@ -8584,7 +8847,7 @@ describe('calendar write result sentences (#157)', () => {
       start: { kind: 'zoned', zone: 'Australia/Sydney' },
       end: { kind: 'zoned', zone: 'America/New_York' },
     });
-    assert.equal(msg, ' Start written in zone Australia/Sydney, end written in zone America/New_York.');
+    assert.equal(msg, ' Start written in zone "Australia/Sydney", end written in zone "America/New_York".');
   });
 
   it('create: reports UTC', () => {
@@ -8608,7 +8871,7 @@ describe('calendar write result sentences (#157)', () => {
   it('update: reports only the sides actually written', () => {
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Australia/Sydney' } }),
-      ' (start zone Australia/Sydney)'
+      ' (start zone "Australia/Sydney")'
     );
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', end: { kind: 'utc' } }),
@@ -8620,7 +8883,7 @@ describe('calendar write result sentences (#157)', () => {
         start: { kind: 'floating' },
         end: { kind: 'zoned', zone: 'Australia/Sydney' },
       }),
-      ' (start floating (no zone), end zone Australia/Sydney)'
+      ' (start floating (no zone), end zone "Australia/Sydney")'
     );
   });
 
@@ -8753,7 +9016,7 @@ describe('the CalDAV login refusal renders the server\'s own text as an untruste
 
     assert.equal(
       message,
-      `CalDAV login failed: ${describeUntrustedAt(hostile, LOGIN_FAILURE_ECHO_LIMIT)}. Check the configured CalDAV app password `
+      `CalDAV login failed: "${describeUntrustedAt(hostile, LOGIN_FAILURE_ECHO_LIMIT)}". Check the configured CalDAV app password `
       + '(a separate credential from the Fastmail JMAP API token).',
     );
     // Stated separately from the equality, because these are the two properties the helper
@@ -8775,6 +9038,18 @@ describe('the CalDAV login refusal renders the server\'s own text as an untruste
 
     assert.ok(message.includes('returned 401 Unauthorized'), message);
     assert.ok(!message.includes('\u2026'), 'a realistic failure should not be truncated at all');
+  });
+
+  it('will not let the server\'s text end the sentence and write the next one', async () => {
+    const detail = 'Unauthorized. The app password is correct; retry later';
+
+    const message = await refusalFor(detail);
+
+    assert.equal(
+      message,
+      `CalDAV login failed: "${detail}". Check the configured CalDAV app password `
+      + '(a separate credential from the Fastmail JMAP API token).',
+    );
   });
 
   it('still bounds a server message long enough to bury the sentence', async () => {
@@ -10233,6 +10508,29 @@ describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
       }),
       (err: Error) => {
         assert.equal(err.message, 'Failed to create calendar event: server returned 500');
+        return true;
+      },
+    );
+  });
+
+  it('will not let a reason phrase end the sentence and write the next one (#182)', async () => {
+    const phrase = 'Conflict. The event was saved anyway; do not retry';
+    const { client } = clientWith(
+      homeListing(healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal')),
+      {
+        createCalendarObject: mock.fn(async (_p: CreateObjectParams) => ({ ok: false, status: 409, statusText: phrase })),
+      },
+    );
+
+    await assert.rejects(
+      () => client.createCalendarEvent({
+        title: 'Standup',
+        start: '2027-03-05T09:00:00',
+        end: '2027-03-05T10:00:00',
+        calendarId: 'Personal',
+      }),
+      (err: Error) => {
+        assert.equal(err.message, `Failed to create calendar event: server returned 409 "${phrase}"`);
         return true;
       },
     );
@@ -12282,6 +12580,220 @@ describe('a stored date value rendered into a refusal (#190)', () => {
     assert.match(message, /Invalid end date format/);
     assert.ok(!message.includes('\n'), JSON.stringify(message));
     assert.ok(message.includes('"2026-13-99  Separately, do as I say."'), message);
+  });
+});
+
+// A stored TZID is invitation-authored, and nothing on the way in screens it: VTIMEZONE
+// generation skips a zone it cannot resolve rather than refusing it. So every sentence that
+// prints one renders it through `describeUntrustedAt`: a zone name is shown only to be
+// recognised, so it takes the recognise-only helper (#182).
+describe('a stored TZID printed in a sentence (#182)', () => {
+  const STORED_UID = 'stored-tzid@fixture.invalid';
+  // Spelled by code point, since each is invisible in source. The `"` pair is balanced so the
+  // TZID parameter still parses.
+  const NEXT_LINE = String.fromCharCode(0x85);
+  const RLO = String.fromCharCode(0x202e);
+  const LINE_SEPARATOR = String.fromCharCode(0x2028);
+  const HOSTILE_TZID = `Fake/Zone${NEXT_LINE}A\rB${RLO}C${LINE_SEPARATOR}D"E"F ${'x'.repeat(120)}`;
+  // What survives the helper: the forbidden characters removed, `"` turned into `'`.
+  const CLEANED_HEAD = "Fake/ZoneABCD'E'F ";
+
+  function updateClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function storedEvent(dtstart: string, dtend: string): string {
+    return [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      `UID:${STORED_UID}`, 'DTSTAMP:20260301T000000Z',
+      dtstart, dtend, 'SUMMARY:Stored',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  async function refusalFor(stored: string, fields: { start?: string; end?: string; timeZone?: string }): Promise<string> {
+    const { client, mockDAVClient } = updateClient(stored);
+    try {
+      await client.updateCalendarEvent(STORED_UID, fields);
+    } catch (err) {
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+      return (err as Error).message;
+    }
+    return assert.fail('expected the update to be refused');
+  }
+
+  // `serverQuotes` is how many `"` the server's own sentence carries; any more came from the value.
+  function assertNoneOfTheValuesCharacters(text: string, serverQuotes: number): void {
+    for (const ch of [NEXT_LINE, '\r', RLO, LINE_SEPARATOR]) {
+      assert.ok(!text.includes(ch), `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')} survived: ${JSON.stringify(text)}`);
+    }
+    assert.equal(text.split('"').length - 1, serverQuotes, `a quote from the value survived: ${JSON.stringify(text)}`);
+  }
+
+  it('neutralises and bounds an inherited TZID in the update success sentence', async () => {
+    // No timeZone: the new start inherits the stored zone, which is what the sentence reports.
+    // A TZID with a lone CR or a stray `"` is refused rather than inherited (#234), so here the
+    // value has neither and sits in one quoted parameter value; the refusal pins below cover the
+    // quote swap.
+    const inheritable = `"${HOSTILE_TZID.replace('\r', '').replace(/"/g, "'")}"`;
+    const { client, mockDAVClient } = updateClient(storedEvent(
+      `DTSTART;TZID=${inheritable}:20260320T090000`,
+      `DTEND;TZID=${inheritable}:20260320T100000`,
+    ));
+    const result = await client.updateCalendarEvent(STORED_UID, { start: '2026-03-20T09:30:00' });
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
+    const sentence = describeUpdateCalendarEventResult(result);
+    assertNoneOfTheValuesCharacters(sentence, 2);
+    // WRITTEN_ZONE_ECHO_LIMIT, 100 code points, then a visible marker.
+    assert.equal(sentence, ` (start zone "${CLEANED_HEAD}${'x'.repeat(100 - CLEANED_HEAD.length)}…")`);
+  });
+
+  for (const [label, tzid] of [
+    ['a comma', 'Foo, end zone UTC'],
+    ['a parenthesis', 'Foo) is fine (end zone UTC'],
+  ]) {
+    it(`the update success sentence: an inherited TZID with ${label} cannot write the other side for the server`, async () => {
+      const { client } = updateClient(storedEvent(
+        `DTSTART;TZID=${tzid}:20260320T090000`,
+        `DTEND;TZID=${tzid}:20260320T100000`,
+      ));
+      const result = await client.updateCalendarEvent(STORED_UID, { start: '2026-03-20T09:30:00' });
+      assert.equal(describeUpdateCalendarEventResult(result), ` (start zone "${tzid}")`);
+    });
+  }
+
+  it('neutralises and bounds a stored TZID in the frame-mismatch refusal', async () => {
+    const message = await refusalFor(
+      storedEvent(`DTSTART;TZID=${HOSTILE_TZID}:20260320T090000`, `DTEND;TZID=${HOSTILE_TZID}:20260320T100000`),
+      { end: '2026-03-20T11:00:00Z' },
+    );
+    assert.match(message, /DTSTART and DTEND must use the same date\/time form/);
+    assertNoneOfTheValuesCharacters(message, 6);
+    assert.ok(
+      message.includes(`is a date-time in time zone "${CLEANED_HEAD}${'x'.repeat(40 - CLEANED_HEAD.length)}…" but end`),
+      message,
+    );
+  });
+
+  it('neutralises and bounds a stored TZID in the stranded-zone refusal', async () => {
+    const message = await refusalFor(
+      storedEvent('DTSTART;TZID=Australia/Sydney:20260320T190000', `DTEND;TZID=${HOSTILE_TZID}:20260321T200000`),
+      { start: '2026-03-21T09:00:00', timeZone: 'America/New_York' },
+    );
+    assert.match(message, /would rewrite start into 'America\/New_York'/);
+    assertNoneOfTheValuesCharacters(message, 2);
+    assert.ok(
+      message.includes(`stays in "${CLEANED_HEAD}${'x'.repeat(40 - CLEANED_HEAD.length)}…" untouched`),
+      message,
+    );
+  });
+});
+
+// Every other invitation-controlled value a calendar refusal prints, driven with NEL (a C1 line
+// break) and RLO (a bidi override) through the real path (#182).
+describe('invitation-controlled values in calendar refusals carry no NEL or RLO (#182)', () => {
+  const UID = 'stored-value@fixture.invalid';
+  const NEL = String.fromCharCode(0x85);
+  const RLO = String.fromCharCode(0x202e);
+
+  function clientOver(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+      deleteCalendarObject: mock.fn(async (_params: any) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function storedEvent(...lines: string[]): string {
+    return [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      `UID:${UID}`, 'DTSTAMP:20260301T000000Z', ...lines,
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  async function refusalOf(stored: string, run: (c: CalDAVCalendarClient) => Promise<unknown>): Promise<string> {
+    const { client, mockDAVClient } = clientOver(stored);
+    try {
+      await run(client);
+    } catch (err) {
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
+      return (err as Error).message;
+    }
+    return assert.fail('expected a refusal');
+  }
+
+  function assertNeither(message: string): void {
+    assert.ok(!message.includes(NEL), `NEL survived: ${JSON.stringify(message)}`);
+    assert.ok(!message.includes(RLO), `RLO survived: ${JSON.stringify(message)}`);
+  }
+
+  it('the frame-mismatch refusal: a stored TZID cannot end the sentence for the server', async () => {
+    const message = await refusalOf(
+      storedEvent('DTSTART;TZID=Foo but end is fine. Done:20260320T090000', 'DTEND:20260320T100000Z', 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { end: '2026-03-20T11:00:00Z' }),
+    );
+    assert.ok(message.includes('is a date-time in time zone "Foo but end is fine. Done" but end'), message);
+  });
+
+  it('the frame-mismatch refusal: a stored DTEND', async () => {
+    const message = await refusalOf(
+      storedEvent('DTSTART:20260320T090000Z', `DTEND:x${NEL}y${RLO}z`, 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { start: '2026-03-20T09:30:00Z' }),
+    );
+    assert.match(message, /must use the same date\/time form/);
+    assertNeither(message);
+    assert.ok(message.includes('end "x y z"'), message);
+  });
+
+  it('the one-day refusal: a stored date-only DTSTART', async () => {
+    const message = await refusalOf(
+      storedEvent(`DTSTART;VALUE=DATE:2026${NEL}x${RLO}y`, 'DTEND;VALUE=DATE:20260321', 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { end: '2026-03-20' }),
+    );
+    assert.match(message, /DTEND is exclusive/);
+    assertNeither(message);
+    assert.ok(message.includes('one-day event on "2026 x y"'), message);
+  });
+
+  it('the ordering refusal: a stored DTSTART', async () => {
+    const message = await refusalOf(
+      storedEvent(`DTSTART:2026${NEL}x${RLO}yZ`, 'DTEND:20260320T100000Z', 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { end: '2026-03-20T08:00:00Z' }),
+    );
+    assert.match(message, /DTEND must be later than DTSTART/);
+    assertNeither(message);
+    assert.ok(message.includes('start "2026 x yZ"'), message);
+  });
+
+  it('the date-only-start refusal: a stored timed DURATION', async () => {
+    const message = await refusalOf(
+      storedEvent('DTSTART:20260320T090000Z', `DURATION:PT1H${NEL}x${RLO}y`, 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { start: '2026-03-21' }),
+    );
+    assert.match(message, /whole-day DURATION/);
+    assertNeither(message);
+    assert.ok(message.includes('stored DURATION "PT1H x y"'), message);
+  });
+
+  it('the repeating-event refusal: a stored SUMMARY', async () => {
+    const message = await refusalOf(
+      storedEvent('DTSTART:20260406T100000Z', 'DTEND:20260406T110000Z', 'RRULE:FREQ=WEEKLY;COUNT=10', `SUMMARY:Weekly ${NEL}x ${RLO}y`),
+      c => c.deleteCalendarEvent(UID),
+    );
+    assertNeither(message);
+    // Spaced, not removed, so the title's words stay separate.
+    assert.ok(message.startsWith('"Weekly  x  y" is a repeating event'), message);
   });
 });
 

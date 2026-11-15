@@ -143,10 +143,10 @@ export const DESCRIBE_PART_MAX = 64;
  * server prose. The `"` to `'` swap protects a DOUBLE-quoted span only (#190); inside `'…'`
  * the value's own `'` closes the span.
  *
- * So: A CALLER THAT QUOTES QUOTES WITH `"…"`. A caller that renders the value BARE is judged
- * on the whole sentence: A NEW `'…'` SPAN IN ANY SENTENCE THAT RENDERS A BARE ONE REOPENS
- * THIS. No list of bare callers is kept, deliberately; the mechanical half is a drift guard
- * in coerce.test.ts.
+ * So A CALLER QUOTES WITH `"…"`. Rendered bare, a value can supply a `)` or a full stop and
+ * write the server's next words; this file's renders are quoted, and in a calendar message a
+ * value an invitation or a remote server controls is always quoted (docs/conventions.md, #182). The mechanical half is a drift guard in
+ * coerce.test.ts.
  *
  * Truncation is marked, so two values differing past the cap never print identically. An
  * all-stripped value renders as '' with no placeholder: the server's words must not stand
