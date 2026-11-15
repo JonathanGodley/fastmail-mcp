@@ -1452,7 +1452,8 @@ export class JmapClient {
    *
    * The dividing question is "what should the caller do next": a type belongs here only when
    * re-forming the request is the route to success. An unknown type stays out. Drawn from RFC
-   * 8620 §5.3, plus `invalidArguments` (§3.6.2), which real servers return per record.
+   * 8620 §5.3, plus `invalidArguments` (§3.6.2), which real servers return per record, and
+   * RFC 8621 §2.5's `mailboxHasEmail`/`mailboxHasChild` (move the mail or children, then retry).
    *
    * Deliberately OUT: `overQuota` (the fix is freeing capacity, not a new call), `rateLimit`
    * (a pause then retry), `stateMismatch` (re-read then retry), `forbidden`, the server
@@ -1465,6 +1466,8 @@ export class JmapClient {
     'invalidPatch',
     'tooLarge',
     'singleton',
+    'mailboxHasEmail',
+    'mailboxHasChild',
   ]);
 
   private static isCallerFixableSetError(type: string): boolean {
@@ -1794,6 +1797,11 @@ export class JmapClient {
   // Fetch the account's mailboxes, whole and unprojected. Narrowing to one parent is
   // `filterMailboxesByParent`.
   async getMailboxes(): Promise<any[]> {
+    return (await this.readMailboxesWithState()).mailboxes;
+  }
+
+  // getMailboxes plus the Mailbox state the list was read at; undefined when the server sent none.
+  private async readMailboxesWithState(): Promise<{ mailboxes: any[]; state?: string }> {
     const session = await this.getSession();
 
     const request: JmapRequest = {
@@ -1804,7 +1812,9 @@ export class JmapClient {
     };
 
     const response = await this.makeRequest(request);
-    return this.getListResult(response, 0);
+    const mailboxes = this.getListResult(response, 0);
+    const state = this.getMethodResult(response, 0)?.state;
+    return { mailboxes, state: typeof state === 'string' ? state : undefined };
   }
 
   // Create a mailbox. Returns:
@@ -1860,6 +1870,110 @@ export class JmapClient {
       ? leaf
       : (parentPath === undefined ? undefined : `${parentPath}${MAILBOX_PATH_SEPARATOR}${leaf}`);
     return { mailbox, created, path };
+  }
+
+  /**
+   * Delete one empty mailbox that has no children, has a null role, and the account may
+   * delete. The checks run on a read that completes first, because a JMAP batch cannot make
+   * the destroy conditional on them; that read's state guards the destroy as `ifInState`.
+   * The server's own `mailboxHasEmail`/`mailboxHasChild` refusals are a further layer, not
+   * the only one, since neither they nor `ifInState` has been measured on Fastmail.
+   *
+   * `deletedMailbox` is read inside the destroy batch, so it is the mailbox as destroyed. It
+   * is best-effort: absent after a confirmed destroy, the call still succeeds without it.
+   */
+  async deleteMailbox(input: string): Promise<{ deleted: string; deletedMailbox?: any }> {
+    const ref = requireNonEmpty(input, 'mailbox', 'pass the id, role, name or path of the mailbox to delete');
+
+    const session = await this.getSession();
+    const { mailboxes, state } = await this.readMailboxesWithState();
+    const target = resolveMailbox(mailboxes, ref);
+    const id: string = target.id;
+    const label = `mailbox "${describeUntrusted(buildMailboxPathMap(mailboxes).paths.get(id) ?? target.name)}" (id "${describeUntrusted(id)}")`;
+
+    // The role and rights refusals come first and alone: acting on the mailbox cannot clear them.
+    // A role mailbox is a kind create_mailbox (name and parentId only) cannot produce.
+    if (target.role !== null) {
+      const why = target.role === undefined
+        ? 'the server reported no role for it, so it cannot be shown to be an ordinary folder'
+        : `it is a system mailbox with the role "${describeUntrusted(target.role)}"`;
+      throw new InvalidInputError(
+        `Cannot delete ${label}: ${why}. create_mailbox cannot make a mailbox with a role, so this tool will not ` +
+          'destroy one it could never put back. Delete it in the Fastmail web interface instead.',
+      );
+    }
+    if (target.myRights?.mayDelete !== true) {
+      throw new Error(
+        `Cannot delete ${label}: the server does not grant this account permission to delete it ` +
+          '(myRights.mayDelete is not true). Nothing was deleted.',
+      );
+    }
+
+    const blockers: string[] = [];
+    const remedies: string[] = [];
+    const total = target.totalEmails;
+    if (typeof total !== 'number') {
+      blockers.push('the server did not report how many messages it holds, so it cannot be shown to be empty');
+    } else if (total > 0) {
+      blockers.push(`it holds ${total} ${total === 1 ? 'message' : 'messages'}`);
+      remedies.push(
+        'Move the mail out with move_email or bulk_move, or take the label off with remove_labels or bulk_remove_labels.',
+      );
+    }
+    const children = mailboxes.filter(mb => mb && mb.parentId === id).length;
+    if (children > 0) {
+      blockers.push(`it has ${children} child ${children === 1 ? 'mailbox' : 'mailboxes'}`);
+      remedies.push(`list_mailboxes with parent: "${describeUntrusted(id)}" lists them.`);
+    }
+    if (blockers.length > 0) {
+      throw new InvalidInputError(
+        `Cannot delete ${label}: ${blockers.join(', and ')}. This tool deletes one empty mailbox with no ` +
+          `children at a time, and never deletes mail.${remedies.length ? ' ' + remedies.join(' ') : ''}`,
+      );
+    }
+
+    if (state === undefined) {
+      throw new Error(
+        `The server returned no Mailbox state with the mailbox list, so deleting ${label} could not be guarded ` +
+          'against a change made since the read; nothing was deleted.',
+      );
+    }
+
+    const response = await this.makeRequest({
+      using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+      methodCalls: [
+        ['Mailbox/get', { accountId: session.accountId, ids: [id] }, 'doomedMailbox'],
+        ['Mailbox/set', {
+          accountId: session.accountId,
+          destroy: [id],
+          ifInState: state,
+          // Explicit: `true` would destroy the mail in the mailbox (RFC 8621 section 2.5).
+          onDestroyRemoveEmails: false,
+        }, 'deleteMailbox'],
+      ],
+    });
+
+    const setEntry = response.methodResponses?.[1];
+    if (setEntry?.[0] === 'error' && setEntry[1]?.type === 'stateMismatch') {
+      throw new Error(
+        `The mailboxes changed since they were read, so ${label} was not deleted; nothing was deleted. Retry the ` +
+          'delete_mailbox call: it re-reads them first. Any change to any mailbox, including new mail arriving, ' +
+          'can cause this refusal.',
+      );
+    }
+    const result = this.getMethodResult(response, 1);
+    if (result.notDestroyed?.[id]) {
+      this.throwSingleSetError(result.notDestroyed[id], 'delete mailbox');
+    }
+    if (!Array.isArray(result.destroyed) || !result.destroyed.includes(id)) {
+      throw new Error(
+        `The server neither confirmed nor refused the deletion of ${label}: it reported the id in neither its ` +
+          'destroyed list nor its notDestroyed map. Call list_mailboxes to see whether it still exists.',
+      );
+    }
+
+    const deletedMailbox = this.readListResultIfPresent(response, 0)[0];
+    return deletedMailbox ? { deleted: id, deletedMailbox } : { deleted: id };
   }
 
   // With no explicit `mailbox`, applies the same default Trash/Spam exclusion and hidden

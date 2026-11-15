@@ -968,6 +968,8 @@ request is the route to success:
 | `invalidPatch` | `InvalidParams` | The patch does not apply. We build it from the caller's fields. |
 | `tooLarge` | `InvalidParams` | Over the per-object size limit; send something smaller. Matches how `uploadBlob` already classifies an over-limit attachment before it is sent. |
 | `singleton` | `InvalidParams` | The target's type forbids the operation. A retry can never succeed; naming a different target can. |
+| `mailboxHasEmail` | `InvalidParams` | The mailbox still holds mail. Once the mail is moved out, the same call succeeds. `delete_mailbox`'s own check for this gets the same code. |
+| `mailboxHasChild` | `InvalidParams` | The mailbox still has children. Once it has none, the same call succeeds. `delete_mailbox`'s own check for this gets the same code. |
 | `forbidden` | `InternalError` | A permission refusal. No argument grants permission. |
 | `overQuota` | `InternalError` | The account is at capacity. Neither code fits perfectly — a bare retry will not help either — but the fix is freeing capacity, not re-forming the call. |
 | `rateLimit` | `InternalError` | Retrying after a pause is exactly the right recovery, which is what `InternalError` signals. |
@@ -982,7 +984,7 @@ A bulk mutator applies the same table per entry and is caller-fixable only when 
 failure in the batch is: one operational failure means no single re-form clears the call.
 
 Every throwing set-error site routes through the classifier — `Email/set` `notUpdated`,
-`ContactCard/set` `notCreated`/`notUpdated`/`notDestroyed`, and the three draft-lifecycle
+`ContactCard/set` `notCreated`/`notUpdated`/`notDestroyed`, `Mailbox/set` `notCreated`/`notDestroyed`, and the three draft-lifecycle
 `notCreated` throws (`createDraft`, the `edit_draft` recreate, and the `EmailSubmission/set`
 in `send_draft`). Route new set-error sites through `throwSingleSetError`: a site that builds
 its message from `describeSetError` alone throws a plain `Error` whatever the type, so

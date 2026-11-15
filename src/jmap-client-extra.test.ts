@@ -454,6 +454,8 @@ describe('moveEmail', () => {
     'invalidPatch',
     'tooLarge',
     'singleton',
+    'mailboxHasEmail',
+    'mailboxHasChild',
   ];
 
   for (const type of CALLER_FIXABLE_TYPES) {
@@ -5235,6 +5237,268 @@ describe('createMailbox', () => {
     const result = await client.createMailbox({ name: 'Receipts', parent: 'mb-loop-a' });
     assert.equal(result.path, undefined);
     assert.equal(result.mailbox.parentId, 'mb-loop-a');
+  });
+});
+
+// ---------- deleteMailbox ----------
+
+describe('deleteMailbox', () => {
+  let client: JmapClient;
+
+  const PROJECTS = { id: 'mb-projects', name: 'Projects', role: null, parentId: null, myRights: { mayDelete: true }, totalEmails: 0 };
+  const OLD = { id: 'mb-old', name: 'Old', role: null, parentId: 'mb-projects', myRights: { mayDelete: true }, totalEmails: 0, sortOrder: 5 };
+  const ROLE_ARCHIVE = { id: 'mb-archive', name: 'Archive', role: 'archive', parentId: null, myRights: { mayDelete: true }, totalEmails: 0 };
+  // The in-batch copy differs from the first read, so the echo's source can be told apart.
+  const OLD_AS_DESTROYED = { ...OLD, sortOrder: 9 };
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  type Opts = { list?: any[]; state?: any; set?: (ids: string[]) => any; echo?: any[] | null; destroyResponse?: any };
+
+  // The read answers with `list` and `state` (null omits it); a destroy succeeds unless `set`
+  // says otherwise, so a removed check shows up as "a Mailbox/set was sent", not a stub crash.
+  function stubDelete(opts: Opts = {}) {
+    const list = opts.list ?? [PROJECTS, OLD, ROLE_ARCHIVE];
+    return stubRequests(client, async (req) => {
+      if (!req.methodCalls.some(c => c[0] === 'Mailbox/set')) {
+        const read: any = { list };
+        if (opts.state !== null) read.state = opts.state ?? 'state-1';
+        return { methodResponses: [['Mailbox/get', read, 'mailboxes']] };
+      }
+      if (opts.destroyResponse !== undefined) return opts.destroyResponse;
+      const ids: string[] = (req.methodCalls[1][1] as any).destroy;
+      const echo = opts.echo === null ? undefined : (opts.echo ?? [OLD_AS_DESTROYED]);
+      return {
+        methodResponses: [
+          echo === undefined ? ['error', { type: 'serverFail' }, 'doomedMailbox'] : ['Mailbox/get', { list: echo }, 'doomedMailbox'],
+          opts.set ? opts.set(ids) : ['Mailbox/set', { destroyed: ids }, 'deleteMailbox'],
+        ],
+      };
+    });
+  }
+
+  function setWasSent(makeReq: ReturnType<typeof stubRequests>): boolean {
+    return makeReq.mock.calls.some(c => c.arguments[0].methodCalls.some(m => m[0] === 'Mailbox/set'));
+  }
+
+  it('destroys with the read state as ifInState and onDestroyRemoveEmails false, echoing the in-batch copy', async () => {
+    const makeReq = stubDelete();
+    const result = await client.deleteMailbox('Projects/Old');
+    assert.equal(makeReq.mock.callCount(), 2);
+    const request = callArguments(makeReq, 1)[0];
+    assert.deepEqual(request.using, ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail']);
+    const batch = request.methodCalls;
+    assert.equal(batch.length, 2);
+    assert.deepEqual(batch[0], ['Mailbox/get', { accountId: ACCOUNT_ID, ids: ['mb-old'] }, 'doomedMailbox']);
+    assert.equal(batch[1][0], 'Mailbox/set');
+    assert.equal(batch[1][2], 'deleteMailbox');
+    const set: any = batch[1][1];
+    assert.deepEqual(set.destroy, ['mb-old']);
+    assert.equal(set.ifInState, 'state-1');
+    assert.strictEqual(set.onDestroyRemoveEmails, false);
+    assert.deepEqual(result, { deleted: 'mb-old', deletedMailbox: OLD_AS_DESTROYED });
+  });
+
+  it('succeeds without deletedMailbox when the in-batch read fails after a confirmed destroy', async () => {
+    stubDelete({ echo: null });
+    assert.deepEqual(await client.deleteMailbox('mb-old'), { deleted: 'mb-old' });
+  });
+
+  it('succeeds without deletedMailbox when the in-batch read comes back empty', async () => {
+    stubDelete({ echo: [] });
+    assert.deepEqual(await client.deleteMailbox('mb-old'), { deleted: 'mb-old' });
+  });
+
+  async function assertRefused(list: any[], ref: string, cls: 'input' | 'plain', pattern: RegExp, state?: any) {
+    client = makeClient();
+    const makeReq = stubDelete({ list, state });
+    await assert.rejects(
+      () => client.deleteMailbox(ref),
+      (err: Error) => {
+        if (cls === 'input') assert.ok(err instanceof InvalidInputError, err.message);
+        else assert.equal(err.name, 'Error', err.message);
+        assert.match(err.message, pattern);
+        return true;
+      },
+    );
+    assert.equal(setWasSent(makeReq), false, 'no Mailbox/set may be sent');
+  }
+
+  it('refuses a role mailbox even when mayDelete is true', async () => {
+    await assertRefused([ROLE_ARCHIVE], 'mb-archive', 'input', /role "archive".*Fastmail web interface/);
+  });
+
+  it('names the mailbox by its path and id in a refusal, or by its name when it has no path', async () => {
+    await assertRefused(
+      [PROJECTS, { ...OLD, totalEmails: 3 }], 'mb-old', 'input',
+      /^Cannot delete mailbox "Projects\/Old" \(id "mb-old"\): /,
+    );
+    await assertRefused(
+      [{ ...OLD, parentId: 'mb-gone', totalEmails: 3 }], 'mb-old', 'input',
+      /^Cannot delete mailbox "Old" \(id "mb-old"\): /,
+    );
+  });
+
+  it('gives the role refusal when the mailbox fails both the role and the rights check', async () => {
+    await assertRefused([{ ...ROLE_ARCHIVE, myRights: { mayDelete: false } }], 'mb-archive', 'input', /role "archive"/);
+  });
+
+  it('refuses a mailbox whose role is absent, failing closed', async () => {
+    const { role: _role, ...noRole } = OLD;
+    await assertRefused([PROJECTS, noRole], 'mb-old', 'input', /reported no role/);
+  });
+
+  it('refuses unless myRights.mayDelete is exactly true', async () => {
+    const { myRights: _rights, ...noRights } = OLD;
+    for (const mb of [
+      { ...OLD, myRights: { mayDelete: false } },
+      { ...OLD, myRights: { mayDelete: 'true' } },
+      { ...OLD, myRights: { mayDelete: 1 } },
+      noRights,
+    ]) {
+      await assertRefused(
+        [PROJECTS, mb], 'mb-old', 'plain',
+        /^Cannot delete mailbox "Projects\/Old" \(id "mb-old"\): the server does not grant .*mayDelete is not true/,
+      );
+    }
+  });
+
+  it('refuses a mailbox that holds mail, with the count and the tools to move it', async () => {
+    await assertRefused([PROJECTS, { ...OLD, totalEmails: 3 }], 'mb-old', 'input', /holds 3 messages\..*move_email.*remove_labels/);
+  });
+
+  it('names no delete tool in the mail refusal', async () => {
+    client = makeClient();
+    stubDelete({ list: [PROJECTS, { ...OLD, totalEmails: 3 }] });
+    await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+      assert.doesNotMatch(err.message, /delete_email|bulk_delete/);
+      return true;
+    });
+  });
+
+  it('refuses a mailbox whose totalEmails is absent, failing closed', async () => {
+    const { totalEmails: _total, ...noCount } = OLD;
+    await assertRefused([PROJECTS, noCount], 'mb-old', 'input', /did not report how many messages.*never deletes mail\.$/);
+  });
+
+  it('refuses a mailbox with a child and points at list_mailboxes, never at deleting the child', async () => {
+    const child = { ...OLD, id: 'mb-child', name: 'Child', parentId: 'mb-old' };
+    await assertRefused([PROJECTS, OLD, child], 'mb-old', 'input', /has 1 child mailbox\..*list_mailboxes with parent: "mb-old"/);
+    client = makeClient();
+    stubDelete({ list: [PROJECTS, OLD, child] });
+    await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+      assert.doesNotMatch(err.message, /delete the child|delete each/i);
+      return true;
+    });
+  });
+
+  it('names mail and children together in one refusal', async () => {
+    const child = { ...OLD, id: 'mb-child', name: 'Child', parentId: 'mb-old' };
+    const child2 = { ...child, id: 'mb-child2', name: 'Child2' };
+    await assertRefused(
+      [PROJECTS, { ...OLD, totalEmails: 1 }, child, child2], 'mb-old', 'input',
+      new RegExp(
+        '^Cannot delete mailbox "Projects/Old" \\(id "mb-old"\\): it holds 1 message, and it has 2 child mailboxes\\. ' +
+          'This tool deletes one empty mailbox with no children at a time, and never deletes mail\\. ' +
+          'Move the mail out with move_email or bulk_move, or take the label off with remove_labels or bulk_remove_labels\\. ' +
+          'list_mailboxes with parent: "mb-old" lists them\\.$',
+      ),
+    );
+  });
+
+  it('refuses before writing when the read carries no state, or a non-string one', async () => {
+    for (const state of [null, 7]) {
+      await assertRefused([PROJECTS, OLD], 'mb-old', 'plain', /no Mailbox state.*nothing was deleted/, state);
+    }
+  });
+
+  it('refuses a blank mailbox before any request', async () => {
+    for (const blank of ['', '   ']) {
+      client = makeClient();
+      const makeReq = stubDelete();
+      await assert.rejects(
+        () => client.deleteMailbox(blank),
+        (err: Error) => err instanceof InvalidInputError &&
+          err.message === 'mailbox cannot be empty; pass the id, role, name or path of the mailbox to delete',
+      );
+      assert.equal(makeReq.mock.callCount(), 0);
+    }
+  });
+
+  it('refuses an ambiguous flat name without writing', async () => {
+    const dupe = { ...OLD, id: 'mb-old2', parentId: null };
+    await assertRefused([PROJECTS, OLD, dupe], 'Old', 'input', /ambiguous/);
+  });
+
+  it('keeps a hostile mailbox name on one line, with its double quote swapped', async () => {
+    client = makeClient();
+    stubDelete({ list: [{ ...OLD, parentId: null, name: 'Evil\n"Injected', totalEmails: 2 }] });
+    await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+      assert.ok(!err.message.includes('\n'), err.message);
+      assert.ok(!err.message.includes('"Injected'), err.message);
+      return true;
+    });
+  });
+
+  for (const type of ['mailboxHasEmail', 'mailboxHasChild', 'notFound']) {
+    it(`reports a server ${type} as caller-fixable input`, async () => {
+      stubDelete({ set: ids => ['Mailbox/set', { notDestroyed: { [ids[0]]: { type } } }, 'deleteMailbox'] });
+      await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+        assert.ok(err instanceof InvalidInputError, err.message);
+        assert.equal(err.message, `Failed to delete mailbox: ${type}`);
+        return true;
+      });
+    });
+  }
+
+  it('reports a server forbidden as a plain Error', async () => {
+    stubDelete({ set: ids => ['Mailbox/set', { notDestroyed: { [ids[0]]: { type: 'forbidden' } } }, 'deleteMailbox'] });
+    await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+      assert.ok(!(err instanceof InvalidInputError));
+      assert.equal(err.message, 'Failed to delete mailbox: forbidden');
+      return true;
+    });
+  });
+
+  it('reports a method-level stateMismatch as nothing deleted, retryable', async () => {
+    stubDelete({ set: () => ['error', { type: 'stateMismatch' }, 'deleteMailbox'] });
+    await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+      assert.ok(!(err instanceof InvalidInputError));
+      assert.equal(
+        err.message,
+        'The mailboxes changed since they were read, so mailbox "Projects/Old" (id "mb-old") was not deleted; nothing was deleted. ' +
+          'Retry the delete_mailbox call: it re-reads them first. Any change to any mailbox, including new mail arriving, ' +
+          'can cause this refusal.',
+      );
+      return true;
+    });
+  });
+
+  it('reports any other method-level error on the destroy as that error, not as a state change', async () => {
+    stubDelete({ set: () => ['error', { type: 'serverFail' }, 'deleteMailbox'] });
+    await assert.rejects(() => client.deleteMailbox('mb-old'), /^Error: JMAP error: serverFail$/);
+  });
+
+  it('reports a destroy response that is missing or malformed as such', async () => {
+    for (const [destroyResponse, pattern] of [
+      [{}, /missing expected method at index 1/],
+      [{ methodResponses: [['Mailbox/get', { list: [] }, 'doomedMailbox'], ['error']] }, /malformed/],
+    ] as const) {
+      client = makeClient();
+      stubDelete({ destroyResponse });
+      await assert.rejects(() => client.deleteMailbox('mb-old'), pattern);
+    }
+  });
+
+  it('fails when the server neither confirms nor refuses the destroy', async () => {
+    stubDelete({ set: () => ['Mailbox/set', { destroyed: [] }, 'deleteMailbox'] });
+    await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+      assert.ok(!(err instanceof InvalidInputError));
+      assert.match(err.message, /neither confirmed nor refused.*list_mailboxes/);
+      return true;
+    });
   });
 });
 

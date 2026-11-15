@@ -1,14 +1,15 @@
 import { buildMailboxPathMap, filterMailboxesByParent, filterTopLevelMailboxes } from './jmap-client.js';
 import { simplifyMailbox, buildUnpathableMailboxNote } from './response-formatters.js';
-import { coerceBool, InvalidInputError, toolJson } from './coerce.js';
+import { coerceBool, describeUntrusted, InvalidInputError, toolJson } from './coerce.js';
 
 /**
- * The slice of the JMAP client the mailbox tools need, so both handlers can be exercised
+ * The slice of the JMAP client the mailbox tools need, so the handlers can be exercised
  * with a stub instead of a live account. `JmapClient` satisfies it structurally.
  */
 export interface MailboxClient {
   getMailboxes(): Promise<any[]>;
   createMailbox(input: { name: string; parent?: string }): Promise<{ mailbox: any; created: any; path?: string }>;
+  deleteMailbox(mailbox: string): Promise<{ deleted: string; deletedMailbox?: any }>;
 }
 
 export type ToolContent = Array<{ type: 'text'; text: string }>;
@@ -71,5 +72,25 @@ export async function createMailbox(args: any, client: MailboxClient): Promise<T
   ];
   const note = path === undefined ? buildUnpathableMailboxNote([mailbox.id]) : null;
   if (note) content.push({ type: 'text', text: note });
+  return content;
+}
+
+/**
+ * delete_mailbox. Every refusal lives in the client method. No raw or verbose: the only
+ * mailbox returned is the echo, which is always the untransformed JMAP object.
+ */
+export async function deleteMailbox(args: any, client: MailboxClient): Promise<ToolContent> {
+  const { deleted, deletedMailbox } = await client.deleteMailbox(args?.mailbox);
+
+  const content: ToolContent = [{ type: 'text', text: toolJson({ deleted, deletedMailbox }) }];
+  if (deletedMailbox === undefined) {
+    // Not a throw: that would report a failure for a completed delete.
+    content.push({
+      type: 'text',
+      text:
+        `WARNING: mailbox "${describeUntrusted(deleted)}" was deleted, but the server did not return it alongside the ` +
+        'destroy, so `deletedMailbox` is absent and its name and parent cannot be read back here.',
+    });
+  }
   return content;
 }

@@ -512,6 +512,10 @@ default with a hidden-count note. The accepted residuals:
   thing is minting a mailbox *named* after a role ("Archive", "Trash"): that is why the fixed
   destinations resolve by exact role only (`archive_email`, `delete_email`) and remain unreachable
   this way.
+- **`delete_mailbox` destroys no mail.** It destroys only an empty mailbox with no children and a
+  null role that the account may delete (`myRights.mayDelete` exactly `true`), checks all of that
+  before writing, and always sends `onDestroyRemoveEmails: false`, so no code path can destroy the
+  mail in a folder. Its refusals reflect mailbox names and ids through `describeUntrusted`.
 - **The hidden-count note covers ONLY Trash/Spam.** It does **not** disclose a `move_email` to
   `Archive` or a custom folder — that conceals mail with **zero disclosure**. So move concealment
   is not "mitigated by the note" for non-Trash/Spam destinations; this is stated plainly rather

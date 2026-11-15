@@ -19,7 +19,7 @@ Falsy `role` and `parentId` are stripped in default and verbose (use `raw` if yo
 
 ## Naming a mailbox
 
-Every parameter that names a mailbox - `mailbox` on the read tools, `targetMailbox` on `move_email`/`bulk_move`, `parent` on `list_mailboxes`/`create_mailbox`, each entry of a `mailboxes` array on the label tools, and each entry of `search_emails`' `requiredMailboxes`/`excludeMailboxes` - resolves through one matcher, in this order:
+Every parameter that names a mailbox - `mailbox` on the read tools, `targetMailbox` on `move_email`/`bulk_move`, `parent` on `list_mailboxes`/`create_mailbox`, `mailbox` on `delete_mailbox`, each entry of a `mailboxes` array on the label tools, and each entry of `search_emails`' `requiredMailboxes`/`excludeMailboxes` - resolves through one matcher, in this order:
 
 1. **Exact id**, matched case-**sensitively**.
 2. **Role** - `inbox`, `archive`, `sent`, `drafts`, `trash`, `junk` - matched case-insensitively.

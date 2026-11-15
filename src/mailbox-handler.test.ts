@@ -4,7 +4,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { listMailboxes, createMailbox } from './mailbox-handler.js';
+import { listMailboxes, createMailbox, deleteMailbox } from './mailbox-handler.js';
 import type { MailboxClient } from './mailbox-handler.js';
 
 const TREE = [
@@ -17,6 +17,7 @@ function stubClient(overrides: Partial<MailboxClient> = {}): MailboxClient {
   return {
     getMailboxes: async () => TREE,
     createMailbox: async () => ({ mailbox: { id: 'mb-new', name: 'Receipts', parentId: null }, created: { id: 'mb-new' }, path: 'Receipts' }),
+    deleteMailbox: async () => ({ deleted: 'mb-old', deletedMailbox: { id: 'mb-old', name: 'Old', role: null } }),
     ...overrides,
   };
 }
@@ -223,5 +224,37 @@ describe('mailbox tool boolean flags', () => {
     await assert.rejects(() => listMailboxes({ topLevelOnly: 'yes' }, {} as any), /topLevelOnly must be true or false/);
     await assert.rejects(() => createMailbox({ name: 'X', raw: 'yes' }, {} as any), /raw must be true or false/);
     await assert.rejects(() => createMailbox({ name: 'X', verbose: 'yes' }, {} as any), /verbose must be true or false/);
+  });
+});
+
+describe('delete_mailbox handler', () => {
+  it('passes mailbox to the client and returns {deleted, deletedMailbox} alone', async () => {
+    const seen: string[] = [];
+    const client = stubClient({
+      deleteMailbox: async (mailbox) => {
+        seen.push(mailbox);
+        return { deleted: 'mb-old', deletedMailbox: { id: 'mb-old', name: 'Old', role: null } };
+      },
+    });
+    const content = await deleteMailbox({ mailbox: 'Projects/Old' }, client);
+    assert.deepEqual(seen, ['Projects/Old']);
+    assert.deepEqual(content.map(c => c.type), ['text']);
+    assert.deepEqual(parseFirst(content), {
+      deleted: 'mb-old',
+      deletedMailbox: { id: 'mb-old', name: 'Old', role: null },
+    });
+  });
+
+  it('warns in a separate item when the echo is absent', async () => {
+    const content = await deleteMailbox({ mailbox: 'mb-old' }, stubClient({ deleteMailbox: async () => ({ deleted: 'mb-old' }) }));
+    assert.deepEqual(content.map(c => c.type), ['text', 'text']);
+    assert.deepEqual(parseFirst(content), { deleted: 'mb-old' });
+    assert.match(content[1].text, /^WARNING: mailbox "mb-old" was deleted.*`deletedMailbox` is absent/);
+  });
+
+  it('passes an absent mailbox to the client, whose blank check refuses it', async () => {
+    const seen: unknown[] = [];
+    await deleteMailbox(undefined, stubClient({ deleteMailbox: async (mailbox) => { seen.push(mailbox); return { deleted: 'x' }; } }));
+    assert.deepEqual(seen, [undefined]);
   });
 });

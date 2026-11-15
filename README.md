@@ -104,13 +104,13 @@ If the calendar or contacts tools report themselves unavailable or forbidden, ru
 
 ## Tools
 
-The server has 41 tools. Each one's parameters and behaviour are in [docs/reference/tools.md](docs/reference/tools.md).
+The server has 42 tools. Each one's parameters and behaviour are in [docs/reference/tools.md](docs/reference/tools.md).
 
 | Group | Tools |
 |---|---|
 | Mail reading | `list_emails`, `search_emails`, `get_email`, `get_thread` |
 | Composing and sending | `draft_email`, `edit_draft`, `send_draft` |
-| Filing | `list_mailboxes`, `create_mailbox`, `move_email`, `archive_email`, `add_labels`, `remove_labels`, `mark_email_read`, `pin_email`, `delete_email` |
+| Filing | `list_mailboxes`, `create_mailbox`, `delete_mailbox`, `move_email`, `archive_email`, `add_labels`, `remove_labels`, `mark_email_read`, `pin_email`, `delete_email` |
 | Bulk | `bulk_mark_read`, `bulk_pin`, `bulk_move`, `bulk_delete`, `bulk_add_labels`, `bulk_remove_labels` |
 | Attachments | `get_email_attachments`, `download_attachment` |
 | Contacts | `list_contacts`, `get_contact`, `search_contacts`, `create_contact`, `update_contact`, `delete_contact` |

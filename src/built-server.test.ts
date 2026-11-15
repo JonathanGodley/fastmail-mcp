@@ -459,7 +459,7 @@ describe('array-side schema drift guard (#98)', () => {
     return out;
   }
 
-  it('sees all 41 tools on the wire', () => {
+  it('sees all 42 tools on the wire', () => {
     // Checked first, so a boot/list failure caught in before() reads as this test's failure
     // rather than every test below blaming an empty tool set on the wrong thing.
     assert.equal(
@@ -475,8 +475,8 @@ describe('array-side schema drift guard (#98)', () => {
     // added tool, so raise this floor in the same change that adds one, or it loses
     // single-removal sensitivity.
     assert.ok(
-      tools.length >= 41,
-      `found only ${tools.length} tools (expected 41); either tools/list stopped returning the ` +
+      tools.length >= 42,
+      `found only ${tools.length} tools (expected 42); either tools/list stopped returning the ` +
         'real surface, or a tool was removed with this floor not yet lowered to match',
     );
   });
@@ -1192,7 +1192,7 @@ describe('experimental snooze flag', () => {
   it('hides the snooze tools when the flag is unset or not "1"', async () => {
     for (const flag of [undefined, 'true']) {
       const names: string[] = await withServer(flag, listed);
-      assert.ok(names.length >= 41, `tools/list returned only ${names.length} tools`);
+      assert.ok(names.length >= 42, `tools/list returned only ${names.length} tools`);
       assert.deepEqual(names.filter((n) => SNOOZE_NAMES.includes(n)), [], `flag ${flag}`);
     }
   });
