@@ -97,7 +97,7 @@ export function describeUntrusted(value: unknown): string {
   return describeUntrustedAt(value, DESCRIBE_PART_MAX);
 }
 
-// How many items a refusal lists before it counts the rest.
+// The default for how many items a refusal lists before it counts the rest.
 const LIST_ECHO_CAP = 30;
 
 /**
