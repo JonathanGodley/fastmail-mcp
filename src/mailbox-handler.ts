@@ -1,6 +1,6 @@
-import { buildMailboxPathMap, filterMailboxesByParent } from './jmap-client.js';
+import { buildMailboxPathMap, filterMailboxesByParent, filterTopLevelMailboxes } from './jmap-client.js';
 import { simplifyMailbox, buildUnpathableMailboxNote } from './response-formatters.js';
-import { coerceBool, toolJson } from './coerce.js';
+import { coerceBool, InvalidInputError, toolJson } from './coerce.js';
 
 /**
  * The slice of the JMAP client the mailbox tools need, so both handlers can be exercised
@@ -20,12 +20,21 @@ export type ToolContent = Array<{ type: 'text'; text: string }>;
 export async function listMailboxes(args: any, client: MailboxClient): Promise<ToolContent> {
   const raw = coerceBool(args?.raw, 'raw') ?? false;
   const verbose = coerceBool(args?.verbose, 'verbose') ?? false;
+  const topLevelOnly = coerceBool(args?.topLevelOnly, 'topLevelOnly') ?? false;
+  // Before the fetch, so it costs no round trip. "Present" is filterMailboxesByParent's test,
+  // so a blank parent gets this refusal rather than the blank-parent one.
+  if (topLevelOnly && args?.parent !== undefined && args?.parent !== null) {
+    throw new InvalidInputError(
+      'topLevelOnly cannot be combined with parent: topLevelOnly lists the mailboxes that have no parent, ' +
+        "parent lists one mailbox's direct children. Pass one of them.",
+    );
+  }
 
   // `path` is root-anchored, so it needs the WHOLE tree even when the listing is narrowed
   // to one parent's children: fetch unnarrowed, then filter the list already in hand.
   const mailboxes = await client.getMailboxes();
   const { paths } = buildMailboxPathMap(mailboxes);
-  const shown = filterMailboxesByParent(mailboxes, args?.parent);
+  const shown = topLevelOnly ? filterTopLevelMailboxes(mailboxes) : filterMailboxesByParent(mailboxes, args?.parent);
 
   // raw promises no path, so it gets no note about one.
   if (raw) return [{ type: 'text', text: toolJson(shown) }];
