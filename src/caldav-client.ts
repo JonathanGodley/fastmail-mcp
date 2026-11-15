@@ -457,25 +457,64 @@ export function extractTzidParam(line: string): string | undefined {
 }
 
 /**
+ * Why a stored property line's parameters cannot be trusted to locate its value, or `undefined`.
+ * RFC 5545 §3.1: a parameter value is unquoted text with no `"`, or one quoted string, and values
+ * are comma-separated. So a `"` must open a value (straight after `=` or `,`) and its partner must
+ * close one (straight before `;`, `:` or `,`). A misplaced one, in any number, lets the quote-aware
+ * scans in `findValueBoundary` and `extractTzidParam` read parameters as value or the reverse.
+ */
+function storedParamFault(line: string): 'quote' | 'no-value' | undefined {
+  let atValueStart = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (!atValueStart) return 'quote';
+      const close = line.indexOf('"', i + 1);
+      if (close === -1) return 'quote';
+      const next = line[close + 1];
+      if (next === undefined) return 'no-value';
+      if (next !== ';' && next !== ':' && next !== ',') return 'quote';
+      i = close;
+      atValueStart = false;
+      continue;
+    }
+    if (ch === ':') return undefined;
+    atValueStart = ch === '=' || ch === ',';
+  }
+  return 'no-value';
+}
+
+/**
  * The TZID an update inherits from a stored DTSTART/DTEND line, or a refusal when that line
- * cannot be read (#234): unbalanced quoting in its parameters hides the value boundary, so what
- * `extractTzidParam` returns is wrong or missing, and a control character in the TZID (a lone CR
- * included) would be written into the new line.
+ * cannot be read (#234): a misplaced quote or a missing value means what `extractTzidParam`
+ * returns is wrong or missing, and a control character in the TZID (a lone CR included) would be
+ * written into the new line.
  *
  * Deliberately not RFC 5545 §3.2's grammar: an unquoted comma (`TZID=Eastern Time (US & Canada),
  * Bogota`) or an empty `TZID=` breaks it but round-trips, so it inherits as before.
  */
 function inheritableStoredTzid(storedProp: string, line: string): string | undefined {
-  const tzid = extractTzidParam(line);
-  let fault: string | undefined;
-  if (findValueBoundary(line) === -1) fault = 'its parameters have unbalanced quotes';
-  else if (tzid !== undefined && /[\x00-\x08\x0A-\x1F\x7F]/.test(tzid)) fault = 'its TZID contains a control character';
-  if (fault === undefined) return tzid;
-  const echoed = tzid === undefined ? '' : ` (TZID "${describeUntrustedAt(tzid, ZONE_ECHO_LIMIT)}")`;
+  const paramFault = storedParamFault(line);
+  const tzid = paramFault === undefined ? extractTzidParam(line) : undefined;
+  let reason: string;
+  let echoed = '';
+  if (paramFault !== undefined) {
+    // What was parsed is not the TZID, so the raw parameter text is shown instead.
+    const firstSemicolon = line.indexOf(';');
+    const firstColon = line.indexOf(':');
+    const params = firstSemicolon === -1 ? '' : line.slice(firstSemicolon + 1, firstColon === -1 ? undefined : firstColon);
+    reason = paramFault === 'quote' ? 'a quote in its parameters is misplaced' : 'it has no value';
+    if (params !== '') echoed = ` (parameters "${describeUntrustedAt(params, ZONE_ECHO_LIMIT)}")`;
+  } else if (tzid !== undefined && /[\x00-\x08\x0A-\x1F\x7F]/.test(tzid)) {
+    reason = 'its TZID contains a control character';
+    echoed = ` (TZID "${describeUntrustedAt(tzid, ZONE_ECHO_LIMIT)}")`;
+  } else {
+    return tzid;
+  }
   throw new InvalidInputError(
-    `The stored ${storedProp}${echoed} is malformed: ${fault}, so its time zone cannot be carried over ` +
-    `to the new value. Pass both start and end with timeZone, both with Z or a UTC offset, or both as ` +
-    `date-only values.`
+    `The stored ${storedProp} is malformed: ${reason}${echoed}, so its time zone cannot be carried ` +
+    `over to the new value. Pass both start and end with timeZone, both with Z or a UTC offset, or ` +
+    `both as date-only values.`
   );
 }
 

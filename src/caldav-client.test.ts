@@ -7375,11 +7375,13 @@ describe('inheriting a zone from a malformed stored line (#234)', () => {
   it('refuses a start-only update that would inherit a TZID spilled into the stored value', async () => {
     const err = await refusalFor(SPILLED, { start: '2026-04-02T10:00:00' });
     assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTSTART is malformed/);
   });
 
   it('refuses a start-only update that would inherit from a line whose TZID the quoting hides', async () => {
     const err = await refusalFor(HIDDEN, { start: '2026-04-01T10:30:00' });
     assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTSTART is malformed/);
   });
 
   it('refuses an end-only update that would inherit from a malformed stored DTEND', async () => {
@@ -7388,11 +7390,13 @@ describe('inheriting a zone from a malformed stored line (#234)', () => {
       { end: '2026-04-01T11:30:00' },
     );
     assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTEND is malformed/);
   });
 
   it('refuses an end-only update on a DURATION event that would inherit from a malformed DTSTART', async () => {
     const err = await refusalFor(HIDDEN, { end: '2026-04-01T11:30:00' });
     assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTSTART is malformed/);
   });
 
   it('refuses to inherit a TZID carrying a lone CR', async () => {
@@ -7401,6 +7405,7 @@ describe('inheriting a zone from a malformed stored line (#234)', () => {
       { start: '2026-04-01T10:30:00' },
     );
     assert.ok(err instanceof InvalidInputError, err.message);
+    assert.match(err.message, /^The stored DTSTART is malformed/);
   });
 
   it('names the stored property it could not read, which on the DURATION fallback is DTSTART', async () => {
@@ -7412,6 +7417,85 @@ describe('inheriting a zone from a malformed stored line (#234)', () => {
     const fromDtstart = await refusalFor(HIDDEN, { end: '2026-04-01T11:30:00' });
     assert.match(fromDtstart.message, /stored DTSTART/);
     assert.doesNotMatch(fromDtstart.message, /DTEND/);
+  });
+
+  it('refuses stray quotes in an even number, which leave a value boundary to find', async () => {
+    for (const line of [
+      'DTSTART;X-A="a"b";TZID=Europe/Paris;X-B="c:20260401T100000',
+      'DTSTART;X-A=a"b;TZID=Europe/Paris;X-C=d"e:20260401T100000',
+    ]) {
+      const err = await refusalFor(storedEvent(line, 'DURATION:PT1H'), { start: '2026-04-01T10:30:00' });
+      assert.match(err.message, /^The stored DTSTART is malformed: a quote in its parameters is misplaced/, line);
+    }
+  });
+
+  it('refuses a quote that does not open a value', async () => {
+    const err = await refusalFor(
+      storedEvent('DTSTART;X-A=a"b";TZID=Europe/Paris:20260401T100000', 'DURATION:PT1H'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.match(err.message, /a quote in its parameters is misplaced/);
+  });
+
+  it('refuses a quote that does not close a value', async () => {
+    const err = await refusalFor(
+      storedEvent('DTSTART;X-A="a"b;TZID=Europe/Paris:20260401T100000', 'DURATION:PT1H'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.match(err.message, /a quote in its parameters is misplaced/);
+  });
+
+  it('gives a line with no value its own reason', async () => {
+    const err = await refusalFor(
+      storedEvent('DTSTART;TZID=Europe/Paris', 'DTEND;TZID=Europe/Paris:20260401T110000'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.match(err.message, /^The stored DTSTART is malformed: it has no value/);
+  });
+
+  it('echoes the parameters of a line with a misplaced quote neutralised, quote-swapped and cut', async () => {
+    const NEL = String.fromCharCode(0x85);
+    const RLO = String.fromCharCode(0x202e);
+    const LS = String.fromCharCode(0x2028);
+    const tzid = `Fake/Zone${NEL}A\rB${RLO}C${LS}D"E"F ${'x'.repeat(60)}`;
+    const err = await refusalFor(
+      storedEvent(`DTSTART;TZID=${tzid}:20260401T100000`, 'DTEND;TZID=Europe/Paris:20260401T110000'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    for (const ch of [NEL, '\r', RLO, LS]) assert.ok(!err.message.includes(ch), JSON.stringify(err.message));
+    // ZONE_ECHO_LIMIT is 40 code points; the server's own sentence carries the only two quotes.
+    assert.ok(err.message.includes(`(parameters "TZID=Fake/ZoneABCD'E'F ${'x'.repeat(17)}…")`), err.message);
+    assert.equal(err.message.split('"').length - 1, 2, err.message);
+  });
+
+  it('echoes a TZID carrying a control character neutralised and cut', async () => {
+    const NEL = String.fromCharCode(0x85);
+    const tzid = `Fake/Zone${NEL}A\rB ${'x'.repeat(60)}`;
+    const err = await refusalFor(
+      storedEvent(`DTSTART;TZID=${tzid}:20260401T100000`, 'DTEND;TZID=Europe/Paris:20260401T110000'),
+      { start: '2026-04-01T10:30:00' },
+    );
+    assert.match(err.message, /^The stored DTSTART is malformed: its TZID contains a control character/);
+    assert.ok(err.message.includes(`(TZID "Fake/ZoneAB ${'x'.repeat(28)}…")`), err.message);
+  });
+
+  it('still inherits around a quoted parameter value holding a colon and a semicolon', async () => {
+    const { client, mockDAVClient } = updateClient(storedEvent(
+      'DTSTART;X-NOTE="a:b;c";TZID=Europe/Paris:20260401T100000', 'DTEND;TZID=Europe/Paris:20260401T110000',
+    ));
+    await client.updateCalendarEvent(UID, { start: '2026-04-01T10:30:00' });
+    assert.ok(writtenBy(mockDAVClient).includes('DTSTART;TZID=Europe/Paris:20260401T103000\r\n'));
+  });
+
+  it('still writes an empty TZID= and TZID="" as before', async () => {
+    for (const [stored, expected] of [
+      ['DTSTART;TZID=:20260401T100000', 'DTSTART:20260401T103000\r\n'],
+      ['DTSTART;TZID="":20260401T100000', 'DTSTART;TZID="":20260401T103000\r\n'],
+    ]) {
+      const { client, mockDAVClient } = updateClient(storedEvent(stored, 'DURATION:PT1H'));
+      await client.updateCalendarEvent(UID, { start: '2026-04-01T10:30:00' });
+      assert.ok(writtenBy(mockDAVClient).includes(expected), stored);
+    }
   });
 
   it('still inherits a balanced quoted Outlook-style TZID', async () => {
@@ -12492,8 +12576,10 @@ describe('a stored TZID printed in a sentence (#182)', () => {
 
   it('neutralises and bounds an inherited TZID in the update success sentence', async () => {
     // No timeZone: the new start inherits the stored zone, which is what the sentence reports.
-    // Without the lone CR: a TZID carrying one is refused rather than inherited (#234).
-    const inheritable = HOSTILE_TZID.replace('\r', '');
+    // A TZID with a lone CR or a stray `"` is refused rather than inherited (#234), so here the
+    // value has neither and sits in one quoted parameter value; the refusal pins below cover the
+    // quote swap.
+    const inheritable = `"${HOSTILE_TZID.replace('\r', '').replace(/"/g, "'")}"`;
     const { client, mockDAVClient } = updateClient(storedEvent(
       `DTSTART;TZID=${inheritable}:20260320T090000`,
       `DTEND;TZID=${inheritable}:20260320T100000`,
