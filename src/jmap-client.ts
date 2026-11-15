@@ -1336,6 +1336,12 @@ export function filterMailboxesByParent(mailboxes: any[], parent?: string): any[
   return list.filter(mb => mb && mb.parentId === parentId);
 }
 
+// The mailboxes at the root, by the same falsy-parentId test buildMailboxPathMap uses, so an
+// orphan (its parent missing from the account) is not top-level and the path column agrees.
+export function filterTopLevelMailboxes(mailboxes: any[]): any[] {
+  return (mailboxes || []).filter(mb => mb && !mb.parentId);
+}
+
 // A mailbox name is a LEAF name: a "/" would be permanently ambiguous against the path form,
 // and is far more likely a caller expressing nesting inline.
 export function assertLeafMailboxName(name: string): void {

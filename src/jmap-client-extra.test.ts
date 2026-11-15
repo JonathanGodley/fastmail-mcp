@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, computeExclusion, readSourceReferences, fillUrlTemplate, decideArchiveBranch } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, filterTopLevelMailboxes, computeExclusion, readSourceReferences, fillUrlTemplate, decideArchiveBranch } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
@@ -4942,6 +4942,31 @@ describe('filterMailboxesByParent', () => {
 
   it('rejects an unknown parent rather than listing everything', () => {
     assert.throws(() => filterMailboxesByParent(TREE, 'nope'), InvalidInputError);
+  });
+});
+
+// ---------- filterTopLevelMailboxes ----------
+
+describe('filterTopLevelMailboxes', () => {
+  const TREE = [
+    { id: 'mb-projects', name: 'Projects', parentId: null },
+    { id: 'mb-alpha', name: 'Alpha', parentId: 'mb-projects' },
+    { id: 'mb-inbox', name: 'Inbox', role: 'inbox' },
+    { id: 'mb-receipts', name: 'Receipts', parentId: 'mb-inbox' },
+    { id: 'mb-orphan', name: 'Orphan', parentId: 'mb-gone' },
+  ];
+  const ids = () => filterTopLevelMailboxes(TREE).map(mb => mb.id);
+
+  it('keeps every mailbox whose parentId is null or absent', () => {
+    for (const id of ['mb-projects', 'mb-inbox']) assert.ok(ids().includes(id), id);
+  });
+
+  it('drops an orphan, whose parent the account did not return', () => {
+    assert.ok(!ids().includes('mb-orphan'), ids().join(', '));
+  });
+
+  it('drops a child of the Inbox', () => {
+    assert.ok(!ids().includes('mb-receipts'), ids().join(', '));
   });
 });
 
