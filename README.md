@@ -113,6 +113,10 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
    # If set, it must be a full IANA name (a region-qualifying slash, or UTC in any case);
    # a bare abbreviation, an alias or an unrecognised name stops the server from starting.
    export FASTMAIL_TIMEZONE="America/New_York"
+   # Optional (opt-in, experimental): the snooze tools. They need a second setting,
+   # FASTMAIL_WEB_COOKIE, which is a whole Fastmail web login rather than a scoped
+   # token: read "Experimental: snooze" below before setting either.
+   export FASTMAIL_EXPERIMENTAL_SNOOZE="1"
    ```
 
 3. Or put the same variables in a file. See [The settings file](#the-settings-file).
@@ -254,7 +258,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
    | CalDAV Username / CalDAV App Password | `FASTMAIL_CALDAV_USERNAME` / `FASTMAIL_CALDAV_PASSWORD` | Both needed for the calendar tools; without them those tools report themselves unavailable and the rest are unaffected. |
    | Calendar Organizer Display Name | `FASTMAIL_CALDAV_DISPLAY_NAME` | Blank falls back to the CalDAV username. |
 
-   `FASTMAIL_ALLOW_UNSAFE_BASE_URL` is deliberately not offered here — it decides where your API token may be sent, so it stays an environment variable you set on purpose.
+   `FASTMAIL_ALLOW_UNSAFE_BASE_URL` is deliberately not offered here — it decides where your API token may be sent, so it stays an environment variable you set on purpose. The [snooze](#experimental-snooze) settings, `FASTMAIL_EXPERIMENTAL_SNOOZE` and `FASTMAIL_WEB_COOKIE`, are not offered either: the cookie is a whole Fastmail web login, so it goes in the environment or `~/.fastmail-mcp/.env`.
 
 3. Use any of the tools (e.g. `list_emails`).
 
@@ -1100,8 +1104,8 @@ FASTMAIL_WEB_COOKIE="__Http-s_xxxxxxxx=<value>"
 
 The server exchanges the cookie for the web client's bearer token itself, as the web client does, and fetches a new one when it is refused.
 
-- **list_snoozed_emails**: List the messages in the Snoozed mailbox, soonest wake time first. Each item carries `wakeAt` (UTC) and `wakeInto`, the mailbox it returns to, normally the Inbox. Returns `{ total, emails }`.
-  - Parameters: `limit` (default: 50, max: 100)
+- **list_snoozed_emails**: List the messages in the Snoozed mailbox, soonest wake time first. Returns `{ total, emails }`. Each email is the [simplified shape](#response-simplification) `list_emails` returns, plus `wakeAt` (UTC) and `wakeInto`, the mailbox it returns to, normally the Inbox. With `raw: true` the emails are the JMAP objects as fetched, whose `snoozed` property carries the wake time.
+  - Parameters: `limit` (default: 50, max: 100), `raw` (default: false)
 - **snooze_email**: Snooze an Inbox message until a time. It leaves the Inbox for Snoozed, keeping its other labels, and at that time Fastmail returns it to the Inbox marked unread, which is what the Fastmail app writes. On a message already snoozed it changes the wake time only. A message outside the Inbox is refused. Returns `{ emailId, wakeAt, wakeInto }`, plus `previousWakeAt` on a message that was already in Snoozed (null when it had no wake time).
   - Parameters: `emailId` (required), `until` (required: a datetime in the future; one with no offset is local time in `FASTMAIL_TIMEZONE` or the host's zone, as for `search_emails`' `after`)
 - **unsnooze_email**: Return a snoozed message to the Inbox now and clear its snooze. Its read state is left as it is. Returns `{ emailId, movedTo, wasWakeAt }`.

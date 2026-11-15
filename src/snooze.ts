@@ -6,8 +6,9 @@
 // login's session cookie, and the bearer token is fetched from it the way the web client does.
 // Measured by scripts/probes/snooze-read.probe.mjs and snooze-write.probe.mjs.
 
-import { coerceUtcDate, describeUntrusted, InvalidInputError, redactedJson, registerSecret } from './coerce.js';
-import { getDefaultTimezone } from './email-formatter.js';
+import { coerceBool, coerceUtcDate, describeUntrusted, InvalidInputError, redactedJson, registerSecret } from './coerce.js';
+import { getDefaultTimezone, simplifyEmail } from './email-formatter.js';
+import { EMAIL_PROPERTIES_COMPACT, attachMailboxInfo, buildMailboxInfoMap } from './jmap-client.js';
 import type { ToolContent } from './mailbox-handler.js';
 
 export const SNOOZE_CAPABILITY = 'https://www.fastmail.com/dev/mail';
@@ -152,29 +153,33 @@ export function parseWakeTime(value: unknown, now: Date = new Date(), zone: stri
   return until;
 }
 
-/** list_snoozed_emails: the Snoozed mailbox, soonest wake first. */
+/**
+ * list_snoozed_emails: the Snoozed mailbox, soonest wake first. Each item is the list shape
+ * list_emails returns, from the same property set, plus wakeAt and wakeInto; raw:true returns
+ * the JMAP objects as fetched, `snoozed` included.
+ */
 export async function listSnoozedEmails(args: any, t: SnoozeTransport, limit: number): Promise<ToolContent> {
+  const raw = coerceBool(args?.raw, 'raw') ?? false;
   const accountId = await t.accountId();
   const mb = await mailboxes(t, accountId);
   const responses = await t.call([
     ['Email/query', { accountId, filter: { inMailbox: mb.snoozed.id }, sort: [{ property: 'snoozedUntil', mailboxId: mb.snoozed.id, isAscending: true }], limit, calculateTotal: true }, 'q'],
-    ['Email/get', { accountId, '#ids': { resultOf: 'q', name: 'Email/query', path: '/ids' }, properties: ['id', 'threadId', 'subject', 'from', 'receivedAt', 'snoozed'] }, 'g'],
+    ['Email/get', { accountId, '#ids': { resultOf: 'q', name: 'Email/query', path: '/ids' }, properties: [...EMAIL_PROPERTIES_COMPACT, 'snoozed'] }, 'g'],
   ]);
   const query = result(responses, 0, 'Email/query');
   const list = result(responses, 1, 'Email/get').list ?? [];
+  const total = query.total ?? list.length;
+  if (raw) return [{ type: 'text', text: redactedJson({ total, emails: list }) }];
+  attachMailboxInfo(list, buildMailboxInfoMap([...mb.byId.values()]));
   const items = list.map((e: any) => {
     const dest = e.snoozed?.moveToMailboxId;
     return {
-      id: e.id,
-      threadId: e.threadId,
-      subject: e.subject,
-      from: e.from?.[0]?.email,
-      receivedAt: e.receivedAt,
+      ...simplifyEmail(e),
       wakeAt: e.snoozed?.until ?? null,
       wakeInto: dest ? (mb.byId.get(dest)?.name ?? dest) : mb.inbox.name,
     };
   });
-  return [{ type: 'text', text: redactedJson({ total: query.total ?? items.length, emails: items }) }];
+  return [{ type: 'text', text: redactedJson({ total, emails: items }) }];
 }
 
 /**
@@ -228,11 +233,12 @@ const EXPERIMENTAL_NOTE =
 export const SNOOZE_TOOLS = [
   {
     name: 'list_snoozed_emails',
-    description: 'List the messages in the Snoozed mailbox, soonest wake time first. Each item carries wakeAt (UTC, when Fastmail returns it to wakeInto, normally the Inbox, marked unread). Returns { total, emails }.' + EXPERIMENTAL_NOTE,
+    description: 'List the messages in the Snoozed mailbox, soonest wake time first. Returns { total, emails }: each email is the simplified shape list_emails returns (metadata + preview, no bodies; date in local time with a UTC offset), plus wakeAt (UTC, when Fastmail returns it to wakeInto, normally the Inbox, marked unread). Use raw=true for the original JMAP objects, whose `snoozed` property carries the wake time.' + EXPERIMENTAL_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
         limit: { type: ['number', 'string'], description: 'Maximum messages to return (default 50, max 100)', default: 50 },
+        raw: { type: ['boolean', 'string'], description: 'Return original JMAP response instead of simplified format. Also accepts "true"/"false" in any case and 1/0 (as a number or a string); any other value is rejected, naming the parameter.' },
       },
     },
   },

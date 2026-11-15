@@ -10,6 +10,8 @@ import {
   listSnoozedEmails, parseWakeTime, snoozeEmail, unsnoozeEmail,
 } from './snooze.js';
 import type { SnoozeTransport } from './snooze.js';
+import { simplifyEmail } from './email-formatter.js';
+import { EMAIL_PROPERTIES_COMPACT } from './jmap-client.js';
 
 const NOW = new Date('2026-11-02T09:00:00Z');
 const MAILBOXES = [
@@ -153,6 +155,48 @@ describe('list_snoozed_emails', () => {
       ['a', '2026-11-03T00:00:00Z', 'Inbox'],
       ['b', '2026-11-04T00:00:00Z', 'Receipts'],
     ]);
+  });
+
+  const LISTED = {
+    a: {
+      subject: 'A', from: [{ name: 'Ann Example', email: 'a@example.invalid' }], receivedAt: '2026-11-01T00:00:00Z',
+      keywords: { $seen: true }, mailboxIds: { 'mb-snoozed': true, 'mb-label': true }, snoozed: { until: '2026-11-03T00:00:00Z' },
+    },
+  };
+
+  it('fetches the list property set plus snoozed, and returns each item in the simplified email shape', async () => {
+    const { t, calls } = fakeAccount(LISTED);
+    const [email] = out(await listSnoozedEmails({}, t, 50)).emails;
+    const get = calls.flat().find(([m]) => m === 'Email/get')[1];
+    assert.deepEqual(get.properties, [...EMAIL_PROPERTIES_COMPACT, 'snoozed']);
+    assert.deepEqual(email, {
+      ...simplifyEmail({ id: 'a', ...LISTED.a }),
+      mailboxes: ['Snoozed', 'Receipts'],
+      roles: ['snoozed'],
+      wakeAt: '2026-11-03T00:00:00Z',
+      wakeInto: 'Inbox',
+    });
+    assert.equal(email.from, 'Ann Example <a@example.invalid>');
+    assert.equal('snoozed' in email, false);
+  });
+
+  it('returns the JMAP objects as fetched under raw:true', async () => {
+    const { t } = fakeAccount(LISTED);
+    const result = out(await listSnoozedEmails({ raw: 'true' }, t, 50));
+    assert.deepEqual(result, { total: 1, emails: [{ id: 'a', ...LISTED.a }] });
+  });
+
+  it('refuses a raw value that is not a boolean', async () => {
+    const { t, calls } = fakeAccount(LISTED);
+    await assert.rejects(() => listSnoozedEmails({ raw: 'maybe' }, t, 50), InvalidInputError);
+    assert.equal(calls.length, 0);
+  });
+
+  it('declares raw with the wording the other email tools use', () => {
+    const list = SNOOZE_TOOLS.find(tool => tool.name === 'list_snoozed_emails')!;
+    const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
+    const lenient = /const LENIENT_BOOL_DESC =\s*'([^']*)'/.exec(source)![1];
+    assert.equal((list.inputSchema.properties as any).raw.description, 'Return original JMAP response instead of simplified format.' + lenient);
   });
 });
 
