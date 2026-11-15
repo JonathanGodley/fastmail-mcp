@@ -822,13 +822,11 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
       const list = Object.values(raw.addresses).filter(Boolean);
       if (list.length) result.addresses = list;
     }
-    if (raw.titles && typeof raw.titles === 'object') {
-      const list = Object.values(raw.titles).map((t: any) => t.name).filter(Boolean);
-      if (list.length) result.titles = list;
-    }
-    if (raw.online && typeof raw.online === 'object') {
-      const list = Object.values(raw.online).map((o: any) => o.uri).filter(Boolean);
-      if (list.length) result.online = list;
+    // Copied whole with their keys: a title's organizationId and a localizations path name a key
+    // (RFC 9553 sections 2.2.5 and 2.7.1). A legacy string `notes` keeps the default view's value.
+    for (const key of ['organizations', 'titles', 'notes', 'online']) {
+      const value = raw[key];
+      if (value && typeof value === 'object' && Object.keys(value).length) result[key] = value;
     }
     if (raw.photos && typeof raw.photos === 'object') {
       result.photos = raw.photos;
