@@ -179,7 +179,7 @@ Pin to a tagged release:
 
 ```bash
 FASTMAIL_API_TOKEN="your_token" \
-  npx --yes github:JonathanGodley/fastmail-mcp@v1.13.4-fork.8 fastmail-mcp
+  npx --yes github:JonathanGodley/fastmail-mcp@v1.13.4-fork.9 fastmail-mcp
 ```
 
 ## Embedding this server as a spawned child
