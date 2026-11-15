@@ -144,8 +144,8 @@ export const DESCRIBE_PART_MAX = 64;
  * the value's own `'` closes the span.
  *
  * So A CALLER QUOTES WITH `"…"`. Rendered bare, a value can supply a `)` or a full stop and
- * write the server's next words; this file's renders are quoted, and the calendar messages
- * always quote (docs/conventions.md, #182). The mechanical half is a drift guard in
+ * write the server's next words; this file's renders are quoted, and in a calendar message a
+ * value an invitation or a remote server controls is always quoted (docs/conventions.md, #182). The mechanical half is a drift guard in
  * coerce.test.ts.
  *
  * Truncation is marked, so two values differing past the cap never print identically. An
