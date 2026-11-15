@@ -13363,8 +13363,6 @@ describe('a wholly lower-cased stored event is updated in place', () => {
 });
 
 // A tsdav call's rejection reaches the caller as one redacted, neutralised, bounded line (#235).
-// tsdav builds `Collection query failed: <status> <statusText>. Raw response: <body>` out of the
-// server's answer, so the text is remote-authored, like the login refusal's.
 describe('a tsdav rejection is rendered as an untrusted value at every call site (#235)', () => {
   const CAL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
   const STORED_URL = CAL + 'e.ics';
