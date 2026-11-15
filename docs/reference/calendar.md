@@ -10,7 +10,7 @@ Naming attendees on an event is not a local write. When the event is created the
 
 This is the one hole in the draft-first posture, and it matters most if you are relying on tool names for permissions: gating `send_draft` gates every message you *compose*, and gates none of this. If a caller can reach `create_calendar_event`, it can cause mail to be sent to an address of its choosing.
 
-Omit `participants` on create to write an event without notifying anyone. On update, omitting it keeps the existing attendees, and a change that affects them still mails them. The behaviour is the server's, not this server's — attendee scheduling is what CalDAV does — so there is no flag here that turns it off. An operator who needs the guarantee that nothing leaves the account has to deny `create_calendar_event`, `update_calendar_event` **and `delete_calendar_event`** alongside `send_draft`. Delete belongs on that list for a reason that is easy to miss: it takes no `participants` of its own, so it reads like a purely local removal, but deleting an event someone else is already on mails all of them.
+Omit `participants` on create to write an event without notifying anyone. On update, omitting it keeps the existing attendees, and a change that affects them still mails them. The behaviour is the server's, not this server's — attendee scheduling is what CalDAV does — so there is no flag here that turns it off. An operator who needs the guarantee that nothing leaves the account has to deny `create_calendar_event`, `update_calendar_event` **and `delete_calendar_event`** alongside `send_draft`. Delete belongs on that list for a reason that is easy to miss: it takes no `participants` of its own, so it reads like a purely local removal, but deleting an event someone else is already on mails all of them. Deleting one occurrence of a repeating event (`occurrence`) never sends mail, because a series with attendees or an organizer is refused.
 
 ## What an `eventId` resolves to
 
@@ -141,20 +141,39 @@ A `UID` is unique inside **one calendar**, not across the account, so two calend
 
 The ambiguity refusal is raised **before** the repeating-event refusal below.
 
-## Repeating events cannot be changed or deleted here
+## Repeating events: only one occurrence can be deleted
 
-`update_calendar_event` and `delete_calendar_event` **refuse** any `eventId` that resolves to a repeating event. There is no flag, parameter or confirmation that overrides this, and the error message says so - if you are looking for one, there isn't one. `get_calendar_event` is read-only and still works on the same id.
+`update_calendar_event` **refuses** any `eventId` that resolves to a repeating event, and `delete_calendar_event` refuses to delete the whole series. There is no flag, parameter or confirmation that overrides either, and the error message says so. `get_calendar_event` is read-only and still works on the same id.
 
 **What counts as repeating** is read off the stored record, not off the row you passed, and any one of four markers is enough: an `RRULE`; an `RDATE`, which is how a series **lists** its occurrences instead of stating a rule ([#162](https://github.com/JonathanGodley/fastmail-mcp/issues/162)); more than one `VEVENT` in the record, since one CalDAV resource is one UID; or a `RECURRENCE-ID` on any block, which makes that block an edited occurrence. The test fails **closed**.
 
-`create_calendar_event` cannot make a repeating event, so this server will not rewrite or destroy one it could not put back.
+`create_calendar_event` cannot make a repeating event, so this server will not rewrite or destroy a series it could not put back.
 
-What to do instead: use the Fastmail web interface, which offers "this event", "this and following", and "all events" properly. Restoring per-occurrence delete, whole-series delete with a recovery artifact, and a recurrence-rule parameter on create is tracked as [#146](https://github.com/JonathanGodley/fastmail-mcp/issues/146).
+### Deleting one occurrence
+
+`delete_calendar_event` with `occurrence` deletes **one** occurrence ([#146](https://github.com/JonathanGodley/fastmail-mcp/issues/146)). Pass the series id (or the row's `url`) as `eventId`, and as `occurrence` the row's `recurrenceId`, or its `start` when the row has no `recurrenceId` (the series' first occurrence has none). The value takes the spellings `create_calendar_event`'s `start` takes: a date-only value for an all-day series and only for one, a `Z` or offset instant, or a time with no `Z`/offset, read in the series' own zone.
+
+The series gains one `EXDATE`, in the form the Fastmail client writes when you delete one occurrence there ([measured](../fastmail-action-availability.md#editing-one-occurrence-of-a-series)): the master's own zone and wall clock for a zoned series, `VALUE=DATE` for an all-day one, a `Z` instant for a UTC one. Nothing else in the record changes except its `DTSTAMP` and `LAST-MODIFIED`: other exclusions, alarms, time zone definitions, edited occurrences and properties this server does not know all stay as they were.
+
+The calendar server confirms the occurrence twice, by expanding the series around it: before the write, that it exists, and after, that it is gone. This server never expands the rule itself. If the write lands but the occurrence is still listed, or the read after the write fails, the call fails with an error quoting the `EXDATE` written. The write is conditional on the record being unchanged since it was read.
+
+The response carries the whole record as it was before the write, raw, as `previousICalendar`. That keeps visible what the write took away, and the excluded start is enough to make the occurrence again as a single event with `create_calendar_event`. It does not make the delete undoable: no tool here removes an exclusion, so the occurrence cannot be put back *into* the series.
+
+Refused, with nothing deleted:
+
+- `occurrence` on an event that does not repeat. It never falls back to deleting the whole event.
+- A series with attendees or an organizer on any block, an alarm's attendee included. Whether a series write may mail attendees is undecided, so this path sends no mail at all.
+- A series that is not one master carrying one `RRULE` (plus edited occurrences), or that has an `RDATE` or an `EXRULE`, a start with no time zone, a time zone this server cannot resolve, or an edited occurrence whose `RECURRENCE-ID` cannot be read or carries `RANGE`.
+- An occurrence that has been edited on its own. Its content is not the series', and what to do with its block is undecided.
+- A value that is not an occurrence the calendar server lists for the series, which includes one already deleted; a value away from the series' time of day; a date-only value against a timed series, or a timed one against an all-day series; and a time in the second pass through an hour the clocks repeat.
+- In a series with a fixed number of occurrences or an end date: its first occurrence, and any occurrence once the first is gone. A surviving first occurrence is how the server proves such a series is not left empty.
+
+What to do instead, for everything refused: use the Fastmail web interface, whose occurrence picker offers "This event only" and "All occurrences" ([measured](../fastmail-action-availability.md#editing-a-whole-series)). Whole-series delete with a recovery artifact, a recurrence-rule parameter on create and series-aware update are still open on [#146](https://github.com/JonathanGodley/fastmail-mcp/issues/146).
 
 Single (non-repeating) events are unaffected.
 
 ## Calendar known limitations
 
 - **Recurring events, on read**: `list_calendar_events` always expands recurrences, while `get_calendar_event` returns the series master at its original date. How rows are windowed, and the cases that put a row outside the window or keep one out of it, are in the `list_calendar_events` and `get_calendar_event` entries in [tools.md](tools.md#calendar-tools).
-- **Recurring events, on write**: not supported at all — see [Repeating events cannot be changed or deleted here](#repeating-events-cannot-be-changed-or-deleted-here) above.
+- **Recurring events, on write**: only deleting one occurrence is supported — see [Repeating events: only one occurrence can be deleted](#repeating-events-only-one-occurrence-can-be-deleted) above.
 - **Attendee parameters**: RSVP, ROLE, CUTYPE and other attendee parameters are parsed on read but not settable on create/update — only `email` and `name` are accepted.

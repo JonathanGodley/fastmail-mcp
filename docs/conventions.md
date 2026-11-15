@@ -854,11 +854,15 @@ One nearby throw is a plain `Error`. The ORGANIZER address check validates the o
 configured CalDAV username through the participant validator — a configuration fault no
 argument can fix, so it is re-thrown in the plain class with its own wording.
 
-**The repeating-event refusal is `InvalidInputError` even though no argument fixes it.**
-`InvalidParams` means "re-form the call", not "add a parameter":
-the caller resolves this by not making the call — pointing a different id at it, or doing the
-edit in the web client — which is a caller-side change. `InternalError` would say a bare retry
-might work, and it never will: the event repeats, and it will still repeat next time.
+**The repeating-event refusal is `InvalidInputError`.** On update no argument fixes it, and on
+delete only `occurrence` does, and only for one occurrence of a series that qualifies (#146).
+`InvalidParams` means "re-form the call", not "add a parameter": the caller resolves this by
+pointing a different id at it, passing `occurrence`, or doing the edit in the web client, all
+caller-side changes. `InternalError` would say a bare retry might work, and it never will: the
+event repeats, and it will still repeat next time. The delete-occurrence refusals that come before
+the write are `InvalidInputError` for the same reason; the two failures after it, an occurrence
+still listed and a confirmation read that failed, are plain `Error`s, since the write has happened
+and no change to the arguments undoes it.
 
 `assertICalTextLimits` (`src/ical-limits.ts`) follows the same rule from the other end of
 the call chain: it runs in the `create_calendar_event` / `update_calendar_event` handlers,

@@ -814,13 +814,16 @@ describe('update_calendar_event echoes the resolved event id', () => {
     );
   });
 
-  it('and delete_calendar_event reports its deleted.eventId the same way', () => {
+  // The sentences live in deleteCalendarEventContent, whose echo of deleted.eventId and the url
+  // is pinned in caldav-client.test.ts; this pins that the case hands it the client's result.
+  it('and delete_calendar_event reports its result through deleteCalendarEventContent', () => {
     const body = collectCaseBodies().get('delete_calendar_event');
     assert.ok(body, 'could not find the delete_calendar_event case in src/index.ts');
     const code = body.join('\n');
+    assert.match(code, /const deleted = await davClient\.deleteCalendarEvent\(eventId, occurrence\);/);
     assert.match(
       code,
-      /Calendar event deleted\. Event ID: "\$\{describeUntrustedAt\(deleted\.eventId, CALENDAR_UID_ECHO_LIMIT\)\}", resource url: "\$\{describeUntrustedAt\(deleted\.url, CALENDAR_URL_ECHO_LIMIT\)\}"/,
+      /return \{ content: deleteCalendarEventContent\(deleted, buildBrokenCollectionNote\(deleted\.brokenCollections, 'write'\)\) \};/,
     );
   });
 });
