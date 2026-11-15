@@ -4897,7 +4897,7 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     };
     const SHAPE = /cannot be deleted here: .*Nothing was deleted\. Use the Fastmail web interface/;
 
-    // D4: a refusal no value of occurrence could fix, so it comes before the value is read.
+    // A refusal no value of occurrence could fix, so it comes before the value is read.
     for (const [label, stored, reason] of [
       ['a master with overrides but no rule', mutate('RRULE:FREQ=WEEKLY;COUNT=4\r\n', ''), /not one series with a single repeat rule/],
       ['two blocks with no RECURRENCE-ID', mutate('RECURRENCE-ID;TZID=Australia/Sydney:20260829T090000\r\n', ''), /not one series with a single repeat rule/],

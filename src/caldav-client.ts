@@ -479,8 +479,7 @@ interface OccurrenceSeries {
  * Whether one occurrence of this stored series can be excluded here, or why not.
  *
  * Accepted: exactly one master (no RECURRENCE-ID) carrying exactly one RRULE of its own, plus
- * override blocks. Each refusal fails closed on a shape the Fastmail client does not author or
- * that this path cannot verify. The scans are VEVENT-wide, like `isRecurringSeriesResource`, so
+ * override blocks. The scans are VEVENT-wide, like `isRecurringSeriesResource`, so
  * an email VALARM's ATTENDEE refuses too. Any ATTENDEE or ORGANIZER refuses because whether a
  * series write may mail attendees is undecided (#114).
  *
@@ -563,7 +562,7 @@ interface ResolvedOccurrence {
 }
 
 /**
- * Read the caller's `occurrence` against the series' own frame (D2, D5): a date-only value only
+ * Read the caller's `occurrence` against the series' own frame: a date-only value only
  * against an all-day series, a timed one only against a timed series, a designator-less wall
  * clock in the master's zone. A timed occurrence must fall at the master's time of day and its
  * written wall clock must read back to the same instant, which refuses DST-shifted instances and
@@ -2773,7 +2772,6 @@ function uidEqualsFilter(uid: string): CalendarQueryFilters {
 interface CalendarObjectMatch {
   object: DAVCalendarObject;
   calendarLabel: string;
-  /** The collection it was found in, which a delete-occurrence verification queries (#146). */
   calendar: DAVCalendar;
 }
 
@@ -4439,13 +4437,12 @@ export class CalDAVCalendarClient {
   }
 
   /**
-   * Delete an event, or with `occurrence` one occurrence of a repeating one (#146).
+   * Delete an event, or with `occurrence` one occurrence of a repeating one by adding one EXDATE
+   * to the master, as the Fastmail client does (docs/fastmail-action-availability.md, #146).
    *
-   * An occurrence is removed by adding one EXDATE to the master, as the Fastmail client does
-   * (docs/fastmail-action-availability.md); nothing else in the resource changes but DTSTAMP and
-   * LAST-MODIFIED. The occurrence is proved to exist by asking the server to expand the series,
-   * never by expanding the rule here: an EXDATE matching no instance is a silent no-op, and a
-   * hostile rule expanded locally is a denial of service.
+   * The occurrence is proved to exist by asking the server to expand the series, never by
+   * expanding the rule here: an EXDATE matching no instance is a silent no-op, and a hostile rule
+   * expanded locally is a denial of service.
    */
   async deleteCalendarEvent(eventId: string, occurrence?: unknown): Promise<DeleteCalendarEventResult> {
     const client = await this.getClient();
@@ -4508,7 +4505,7 @@ export class CalDAVCalendarClient {
     const quotedOccurrence = `occurrence "${echoCallerText(occurrence)}"`;
 
     // An overridden occurrence's content is not the master's, and what to do with its block is
-    // undecided, so it is refused (D6).
+    // undecided.
     if (series.overrides.some(key => sameOccurrence(key, resolved.target))) {
       throw new InvalidInputError(
         `${quotedOccurrence} of "${echoCallerText(title)}" has been edited on its own, and this server does not delete an edited occurrence. `
@@ -4549,7 +4546,7 @@ export class CalDAVCalendarClient {
     }
 
     // A bounded series must keep an occurrence: a surviving first instance that is not the
-    // target proves the set stays non-empty, whether COUNT or UNTIL bounds it (D11).
+    // target proves the set stays non-empty, whether COUNT or UNTIL bounds it.
     if (series.bounded && (sameOccurrence(series.start, resolved.target)
       || !expandedHoldsOccurrence(await expanded(series.start), series.start))) {
       throw new InvalidInputError(
