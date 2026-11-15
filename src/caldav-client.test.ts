@@ -7445,6 +7445,33 @@ describe('inheriting a zone from a malformed stored line (#234)', () => {
     assert.match(err.message, /a quote in its parameters is misplaced/);
   });
 
+  // Whitespace beside a parameter's name hides the parameter, so the zone was read as missing and
+  // the new start written floating.
+  for (const [shape, line] of [
+    ['a space before the =', 'DTSTART;TZID =Europe/Paris:20260401T100000'],
+    ['a space after the ;', 'DTSTART; TZID=Europe/Paris:20260401T100000'],
+    ['a tab before the =', 'DTSTART;TZID\t=Europe/Paris:20260401T100000'],
+    ['a tab after the ;', 'DTSTART;\tTZID=Europe/Paris:20260401T100000'],
+  ]) {
+    it(`refuses a parameter name with ${shape}`, async () => {
+      const err = await refusalFor(storedEvent(line, 'DURATION:PT1H'), { start: '2026-04-01T10:30:00' });
+      assert.match(err.message, /^The stored DTSTART is malformed: a parameter name has whitespace beside it/);
+    });
+  }
+
+  // Whitespace on the value side round-trips: the stored spelling is written back as it was.
+  for (const [shape, stored, written] of [
+    ['a space after the =', 'DTSTART;TZID= Europe/Paris:20260401T100000', 'DTSTART;TZID= Europe/Paris:20260401T103000'],
+    ['a tab after the =', 'DTSTART;TZID=\tEurope/Paris:20260401T100000', 'DTSTART;TZID=\tEurope/Paris:20260401T103000'],
+    ['a space ending the previous value', 'DTSTART;X-A=b ;TZID=Europe/Paris:20260401T100000', 'DTSTART;TZID=Europe/Paris:20260401T103000'],
+  ]) {
+    it(`still inherits with ${shape}`, async () => {
+      const { client, mockDAVClient } = updateClient(storedEvent(stored, 'DURATION:PT1H'));
+      await client.updateCalendarEvent(UID, { start: '2026-04-01T10:30:00' });
+      assert.ok(writtenBy(mockDAVClient).includes(`${written}\r\n`), shape);
+    });
+  }
+
   it('gives a line with no value its own reason', async () => {
     const err = await refusalFor(
       storedEvent('DTSTART;TZID=Europe/Paris', 'DTEND;TZID=Europe/Paris:20260401T110000'),

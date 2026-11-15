@@ -463,10 +463,14 @@ export function extractTzidParam(line: string): string | undefined {
  * close one (straight before `;`, `:` or `,`). A misplaced one, in any number, lets the quote-aware
  * scans in `findValueBoundary` and `extractTzidParam` read parameters as value or the reverse.
  */
-function storedParamFault(line: string): 'quote' | 'no-value' | undefined {
+function storedParamFault(line: string): 'quote' | 'no-value' | 'name-space' | undefined {
   let atValueStart = false;
+  // Between a `;` and its `=`. §3.1's grammar allows no whitespace there, and a name with any
+  // beside it is not recognised, so its value (a TZID, say) is silently not read.
+  let inName = false;
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
+    if (inName && (ch === ' ' || ch === '\t')) return 'name-space';
     if (ch === '"') {
       if (!atValueStart) return 'quote';
       const close = line.indexOf('"', i + 1);
@@ -479,6 +483,8 @@ function storedParamFault(line: string): 'quote' | 'no-value' | undefined {
       continue;
     }
     if (ch === ':') return undefined;
+    if (ch === ';') inName = true;
+    else if (ch === '=') inName = false;
     atValueStart = ch === '=' || ch === ',';
   }
   return 'no-value';
@@ -503,7 +509,8 @@ function inheritableStoredTzid(storedProp: string, line: string): string | undef
     const firstSemicolon = line.indexOf(';');
     const firstColon = line.indexOf(':');
     const params = firstSemicolon === -1 ? '' : line.slice(firstSemicolon + 1, firstColon === -1 ? undefined : firstColon);
-    reason = paramFault === 'quote' ? 'a quote in its parameters is misplaced' : 'it has no value';
+    reason = paramFault === 'quote' ? 'a quote in its parameters is misplaced'
+      : paramFault === 'name-space' ? 'a parameter name has whitespace beside it' : 'it has no value';
     if (params !== '') echoed = ` (parameters "${describeUntrustedAt(params, ZONE_ECHO_LIMIT)}")`;
   } else if (tzid !== undefined && /[\x00-\x08\x0A-\x1F\x7F]/.test(tzid)) {
     reason = 'its TZID contains a control character';
