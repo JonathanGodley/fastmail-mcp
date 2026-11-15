@@ -21,7 +21,7 @@ import { editDraft } from './edit-draft-handler.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
 import { runBulkReadTest } from './bulk-test-handler.js';
-import { listMailboxes, createMailbox } from './mailbox-handler.js';
+import { listMailboxes, createMailbox, deleteMailbox } from './mailbox-handler.js';
 import { createContactTool, getContactTool, updateContactTool, deleteContactTool, listContactsTool, searchContactsTool } from './contacts-handler.js';
 import { listCalendarEventsTool } from './calendar-list-handler.js';
 import { listEmailsTool, searchEmailsTool } from './email-list-handler.js';
@@ -530,6 +530,10 @@ const LIST_PARENT_PARAM_DESC =
 const CREATE_PARENT_PARAM_DESC =
   'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
 
+const DELETE_MAILBOX_PARAM_DESC =
+  'The mailbox to delete. ' + MAILBOX_REF_FORMS +
+  ' A role matches before a folder name, so a folder you named after a role (e.g. "Archive") is reached by its id or path, not that name. A blank value is rejected.';
+
 // The string forms a lenient list parameter accepts, appended to its description: the
 // widened type says a string is accepted but not WHICH strings (#98). The OBJECT-item lists
 // (attachments, the contact entry lists) read a whole-value string ONLY as a JSON array, so
@@ -814,6 +818,25 @@ const TOOLS = [
             },
           },
           required: ['name'],
+        },
+      },
+      {
+        name: 'delete_mailbox',
+        description:
+          'Delete one mailbox (a Fastmail folder or label). Returns {deleted, deletedMailbox}: the id of the mailbox deleted, and the original JMAP mailbox object as it stood when it was destroyed. ' +
+          'Only an ordinary, empty mailbox with no children is deleted, and mail is NEVER deleted. REFUSED: a mailbox with any role (inbox, archive, sent, drafts, trash, junk and the rest), since create_mailbox cannot make one, so delete it in the Fastmail web interface; ' +
+          'a mailbox the account is not permitted to delete; a mailbox that still holds mail (the refusal gives the count; move the mail out with move_email/bulk_move or take the label off with remove_labels/bulk_remove_labels, then retry); and a mailbox with child mailboxes (the refusal gives the count; list_mailboxes with parent shows them). ' +
+          'Because the mailbox holds no mail and has no children, no message is lost. create_mailbox with the echo\'s name, and its parentId as parent, rebuilds the name and placement and nothing else: the mailbox gets a new id, and its sortOrder, isSubscribed, Fastmail\'s per-folder settings and anything referring to it by id are not restored. A name containing "/" cannot be recreated, since create_mailbox refuses one. ' +
+          'The delete is refused with "changed since they were read", and nothing is deleted, if the mailboxes changed since the tool read them. That may include unrelated changes such as new mail arriving; retry the same call. If the server reports the mailbox destroyed while its echo shows mail in it or a role, a WARNING says so, since its mail may have gone with it. There is deliberately no confirmation parameter.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mailbox: {
+              type: 'string',
+              description: DELETE_MAILBOX_PARAM_DESC,
+            },
+          },
+          required: ['mailbox'],
         },
       },
       {
@@ -2068,12 +2091,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const client = initializeClient();
 
     switch (name) {
-      // Orchestration for both mailbox tools lives in src/mailbox-handler.ts.
+      // Orchestration for the mailbox tools lives in src/mailbox-handler.ts.
       case 'list_mailboxes':
         return { content: await listMailboxes(args, client) };
 
       case 'create_mailbox':
         return { content: await createMailbox(args, client) };
+
+      case 'delete_mailbox':
+        return { content: await deleteMailbox(args, client) };
 
       case 'list_emails':
         return { content: await listEmailsTool(args, clampLimit((args as any).limit, 20, 100), client) };
@@ -2642,7 +2668,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           email: {
             available: true,
             functions: [
-              'list_mailboxes', 'create_mailbox', 'list_emails', 'get_email', 'draft_email', 'edit_draft', 'send_draft', 'search_emails',
+              'list_mailboxes', 'create_mailbox', 'delete_mailbox', 'list_emails', 'get_email', 'draft_email', 'edit_draft', 'send_draft', 'search_emails',
               'mark_email_read', 'pin_email', 'delete_email', 'move_email', 'archive_email',
               'get_email_attachments', 'download_attachment', 'get_thread',
               'get_mailbox_stats', 'get_account_summary', 'bulk_mark_read', 'bulk_pin', 'bulk_move', 'bulk_delete',
