@@ -2806,8 +2806,6 @@ describe('searchEmails exclusion + count', () => {
     assert.ok(filter.conditions.some((c: any) => c.hasKeyword === '$flagged'));
   });
 
-  // #222. Each flag must send exactly one condition on its own keyword, of the right
-  // polarity, and nothing when omitted.
   for (const [flag, keyword] of [['isAnswered', '$answered'], ['isForwarded', '$forwarded']] as const) {
     const onKeyword = async (value: boolean | undefined) => {
       const makeReq = stubRequests(client, async () =>
