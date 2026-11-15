@@ -1363,8 +1363,8 @@ is defined.
 **A tsdav call's rejection is the same class of text**
 ([#235](https://github.com/JonathanGodley/fastmail-mcp/issues/235)): `Collection query failed:
 <status> <statusText>. Raw response: <body>` is the server's answer, and it would otherwise reach
-the caller whole, line breaks and all. Every tsdav call in `caldav-client.ts` whose rejection can
-reach the caller is rendered through `describeUntrustedAt` at `DAV_REJECTION_ECHO_LIMIT`, quoted
+the caller whole, line breaks and all. Every tsdav call awaited through `davCall`, and the
+addressed fetch's rethrow, is rendered through `describeUntrustedAt` at `DAV_REJECTION_ECHO_LIMIT`, quoted
 inside a frame of this server's own, `CalDAV request failed: "…"`: the reason phrase sits
 mid-sentence in tsdav's text, and once line breaks are stripped a forged sentence joins straight
 on. Most are awaited through `davCall`, which encloses the call expression and nothing else,

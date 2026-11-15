@@ -2368,9 +2368,10 @@ export const CALENDAR_UID_ECHO_LIMIT = 320;
 export const LOGIN_FAILURE_ECHO_LIMIT = 200;
 
 /**
- * The bound on a tsdav call's rejection (#235). Its longest fixed part,
- * `Collection query failed: 511 Network Authentication Required. Raw response: `, is 76
- * characters, which leaves 124 for the start of the server's body.
+ * The bound on a tsdav call's rejection (#235). With the longest standard reason phrase, tsdav's
+ * text up to the body, `Collection query failed: 511 Network Authentication Required. Raw response: `,
+ * is 76 characters, so a standard phrase leaves 124 for the start of the body. The phrase is
+ * the server's choice; a longer one leaves less.
  */
 export const DAV_REJECTION_ECHO_LIMIT = 200;
 
