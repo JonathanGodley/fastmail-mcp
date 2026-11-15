@@ -13,18 +13,21 @@ if (!process.env.FASTMAIL_WEB_COOKIE) { console.error('FASTMAIL_WEB_COOKIE is no
 
 const c = createClient({ env: { ...process.env, FASTMAIL_EXPERIMENTAL_SNOOZE: '1' } });
 await c.init();
+// A failed call check ends the run: the checks after it would read a result that is not there.
+const listCall = async (label, args) => {
+  const r = await c.call('list_snoozed_emails', args);
+  check(`${label}: the call succeeds`, !r.isError, r.isError ? text(r).slice(0, 200) : '');
+  return r.isError ? null : jsonOf(text(r));
+};
 try {
-  let r = await c.call('list_snoozed_emails', { limit: 5 });
-  check('simplified: the call succeeds', !r.isError, r.isError ? text(r).slice(0, 200) : '');
-  const simplified = jsonOf(text(r));
-  console.log(`snoozed messages: ${simplified.total}, returned ${simplified.emails.length}`);
-
-  r = await c.call('list_snoozed_emails', { limit: 5, raw: true });
-  check('raw: the call succeeds', !r.isError, r.isError ? text(r).slice(0, 200) : '');
-  const raw = jsonOf(text(r));
-  check('raw: same messages as the simplified call', raw.emails.length === simplified.emails.length);
-
-  if (simplified.emails.length === 0) {
+  const simplified = await listCall('simplified', { limit: 5 });
+  if (simplified) console.log(`snoozed messages: ${simplified.total ?? 'not returned'}, returned ${simplified.emails.length}`);
+  const raw = simplified && await listCall('raw', { limit: 5, raw: true });
+  const sameCount = raw && raw.emails.length === simplified.emails.length;
+  if (raw) check('raw: same messages as the simplified call', sameCount);
+  if (!sameCount) {
+    // nothing further can be compared; the summary below reports the failure
+  } else if (simplified.emails.length === 0) {
     console.log('NOTE: nothing is snoozed, so the item shape was not exercised. Snooze a message and re-run.');
   } else {
     const item = simplified.emails[0];

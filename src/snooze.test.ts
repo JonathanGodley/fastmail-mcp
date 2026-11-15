@@ -12,6 +12,7 @@ import {
 import type { SnoozeTransport } from './snooze.js';
 import { simplifyEmail } from './email-formatter.js';
 import { EMAIL_PROPERTIES_COMPACT } from './jmap-client.js';
+import { projectListEmail } from './field-projection.js';
 
 const NOW = new Date('2026-11-02T09:00:00Z');
 const MAILBOXES = [
@@ -160,7 +161,7 @@ describe('list_snoozed_emails', () => {
   const LISTED = {
     a: {
       subject: 'A', from: [{ name: 'Ann Example', email: 'a@example.invalid' }], receivedAt: '2026-11-01T00:00:00Z',
-      keywords: { $seen: true }, mailboxIds: { 'mb-snoozed': true, 'mb-label': true }, snoozed: { until: '2026-11-03T00:00:00Z' },
+      sentAt: '2026-10-31T23:59:00Z', keywords: { $seen: true }, mailboxIds: { 'mb-snoozed': true, 'mb-label': true }, snoozed: { until: '2026-11-03T00:00:00Z' },
     },
   };
 
@@ -170,7 +171,7 @@ describe('list_snoozed_emails', () => {
     const get = calls.flat().find(([m]) => m === 'Email/get')[1];
     assert.deepEqual(get.properties, [...EMAIL_PROPERTIES_COMPACT, 'snoozed']);
     assert.deepEqual(email, {
-      ...simplifyEmail({ id: 'a', ...LISTED.a }),
+      ...projectListEmail(simplifyEmail({ id: 'a', ...LISTED.a }), undefined),
       mailboxes: ['Snoozed', 'Receipts'],
       roles: ['snoozed'],
       wakeAt: '2026-11-03T00:00:00Z',
@@ -178,12 +179,31 @@ describe('list_snoozed_emails', () => {
     });
     assert.equal(email.from, 'Ann Example <a@example.invalid>');
     assert.equal('snoozed' in email, false);
+    assert.equal('sentAt' in email, false);
   });
 
   it('returns the JMAP objects as fetched under raw:true', async () => {
     const { t } = fakeAccount(LISTED);
     const result = out(await listSnoozedEmails({ raw: 'true' }, t, 50));
     assert.deepEqual(result, { total: 1, emails: [{ id: 'a', ...LISTED.a }] });
+    assert.equal(result.emails[0].sentAt, '2026-10-31T23:59:00Z');
+  });
+
+  it('leaves total out, simplified and raw, when Fastmail returns none', async () => {
+    const { t } = fakeAccount(LISTED);
+    const noTotal: SnoozeTransport = {
+      accountId: t.accountId,
+      call: async (methodCalls) => (await t.call(methodCalls)).map(([method, a, tag]: any) => {
+        if (method !== 'Email/query') return [method, a, tag];
+        const { total: _omitted, ...rest } = a;
+        return [method, rest, tag];
+      }),
+    };
+    for (const raw of [false, true]) {
+      const result = out(await listSnoozedEmails({ raw }, noTotal, 50));
+      assert.equal('total' in result, false, `raw: ${raw}`);
+      assert.equal(result.emails.length, 1);
+    }
   });
 
   it('refuses a raw value that is not a boolean', async () => {

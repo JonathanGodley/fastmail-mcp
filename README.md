@@ -115,8 +115,9 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
    export FASTMAIL_TIMEZONE="America/New_York"
    # Optional (opt-in, experimental): the snooze tools. They need a second setting,
    # FASTMAIL_WEB_COOKIE, which is a whole Fastmail web login rather than a scoped
-   # token: read "Experimental: snooze" below before setting either.
-   export FASTMAIL_EXPERIMENTAL_SNOOZE="1"
+   # token: read "Experimental: snooze" below before setting either. Left commented out
+   # so that copying this block does not turn the tools on without their cookie.
+   # export FASTMAIL_EXPERIMENTAL_SNOOZE="1"
    ```
 
 3. Or put the same variables in a file. See [The settings file](#the-settings-file).
@@ -284,6 +285,7 @@ See [Result serialisation in `docs/conventions.md`](docs/conventions.md) for the
 | `get_email` | ✅ | ✅ | ✅ |
 | `list_emails`, `search_emails` | — | ✅ | ✅ |
 | `get_thread` | — | ✅ | ✅ |
+| `list_snoozed_emails` (experimental) | — | ✅ | — |
 | `get_email_attachments` | — | ✅ (a set escape; see its entry) | — |
 | `list_mailboxes`, `create_mailbox` | ✅ | ✅ | — |
 | `list_identities` | ✅ | ✅ | — |
@@ -1104,7 +1106,7 @@ FASTMAIL_WEB_COOKIE="__Http-s_xxxxxxxx=<value>"
 
 The server exchanges the cookie for the web client's bearer token itself, as the web client does, and fetches a new one when it is refused.
 
-- **list_snoozed_emails**: List the messages in the Snoozed mailbox, soonest wake time first. Returns `{ total, emails }`. Each email is the [simplified shape](#response-simplification) `list_emails` returns, plus `wakeAt` (UTC) and `wakeInto`, the mailbox it returns to, normally the Inbox. With `raw: true` the emails are the JMAP objects as fetched, whose `snoozed` property carries the wake time.
+- **list_snoozed_emails**: List the messages in the Snoozed mailbox, soonest wake time first. Returns `{ total, emails }`; `total` is omitted when Fastmail does not return it. Each email is the [simplified shape](#response-simplification) `list_emails` returns, plus `wakeAt` (UTC) and `wakeInto`, the mailbox it returns to, normally the Inbox. With `raw: true` the emails are the JMAP objects as fetched, whose `snoozed` property carries the wake time.
   - Parameters: `limit` (default: 50, max: 100), `raw` (default: false)
 - **snooze_email**: Snooze an Inbox message until a time. It leaves the Inbox for Snoozed, keeping its other labels, and at that time Fastmail returns it to the Inbox marked unread, which is what the Fastmail app writes. On a message already snoozed it changes the wake time only. A message outside the Inbox is refused. Returns `{ emailId, wakeAt, wakeInto }`, plus `previousWakeAt` on a message that was already in Snoozed (null when it had no wake time).
   - Parameters: `emailId` (required), `until` (required: a datetime in the future; one with no offset is local time in `FASTMAIL_TIMEZONE` or the host's zone, as for `search_emails`' `after`)

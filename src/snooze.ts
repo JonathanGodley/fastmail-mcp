@@ -4,11 +4,13 @@
 // it under https://www.fastmail.com/dev/mail to its own web client's session. So these tools
 // talk JMAP on that session, not on JmapClient's API token: the caller supplies the web
 // login's session cookie, and the bearer token is fetched from it the way the web client does.
-// Measured by scripts/probes/snooze-read.probe.mjs and snooze-write.probe.mjs.
+// Measured by scripts/probes/snooze-read.probe.mjs, snooze-write.probe.mjs and
+// snooze-list.smoke.mjs.
 
 import { coerceBool, coerceUtcDate, describeUntrusted, InvalidInputError, redactedJson, registerSecret } from './coerce.js';
 import { getDefaultTimezone, simplifyEmail } from './email-formatter.js';
 import { EMAIL_PROPERTIES_COMPACT, attachMailboxInfo, buildMailboxInfoMap } from './jmap-client.js';
+import { projectListEmail } from './field-projection.js';
 import type { ToolContent } from './mailbox-handler.js';
 
 export const SNOOZE_CAPABILITY = 'https://www.fastmail.com/dev/mail';
@@ -168,18 +170,19 @@ export async function listSnoozedEmails(args: any, t: SnoozeTransport, limit: nu
   ]);
   const query = result(responses, 0, 'Email/query');
   const list = result(responses, 1, 'Email/get').list ?? [];
-  const total = query.total ?? list.length;
-  if (raw) return [{ type: 'text', text: redactedJson({ total, emails: list }) }];
+  // calculateTotal is server-discretionary: with no total, say nothing rather than pass off the page size.
+  const total = typeof query.total === 'number' ? { total: query.total } : {};
+  if (raw) return [{ type: 'text', text: redactedJson({ ...total, emails: list }) }];
   attachMailboxInfo(list, buildMailboxInfoMap([...mb.byId.values()]));
   const items = list.map((e: any) => {
     const dest = e.snoozed?.moveToMailboxId;
     return {
-      ...simplifyEmail(e),
+      ...projectListEmail(simplifyEmail(e), undefined),
       wakeAt: e.snoozed?.until ?? null,
       wakeInto: dest ? (mb.byId.get(dest)?.name ?? dest) : mb.inbox.name,
     };
   });
-  return [{ type: 'text', text: redactedJson({ total, emails: items }) }];
+  return [{ type: 'text', text: redactedJson({ ...total, emails: items }) }];
 }
 
 /**
@@ -233,7 +236,7 @@ const EXPERIMENTAL_NOTE =
 export const SNOOZE_TOOLS = [
   {
     name: 'list_snoozed_emails',
-    description: 'List the messages in the Snoozed mailbox, soonest wake time first. Returns { total, emails }: each email is the simplified shape list_emails returns (metadata + preview, no bodies; date in local time with a UTC offset), plus wakeAt (UTC, when Fastmail returns it to wakeInto, normally the Inbox, marked unread). Use raw=true for the original JMAP objects, whose `snoozed` property carries the wake time.' + EXPERIMENTAL_NOTE,
+    description: 'List the messages in the Snoozed mailbox, soonest wake time first. Returns { total, emails }; total is omitted when Fastmail does not return it. Each email is the simplified shape list_emails returns (metadata + preview, no bodies; date in local time with a UTC offset), plus wakeAt (UTC, when Fastmail returns it to wakeInto, normally the Inbox, marked unread). Use raw=true for the original JMAP objects, whose `snoozed` property carries the wake time.' + EXPERIMENTAL_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
