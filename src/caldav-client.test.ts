@@ -7366,11 +7366,10 @@ describe('inheriting a zone from a malformed stored line (#234)', () => {
     return assert.fail('expected the update to be refused');
   }
 
-  // The unmatched quote hides the value boundary, so the old value is read as part of the TZID
-  // and the update wrote `DTSTART;TZID=A"B:20260401T100000:<new value>`.
+  // The unmatched quote hides the value boundary, so the old value reads as part of the TZID.
   const SPILLED = storedEvent('DTSTART;TZID=A"B:20260401T100000', 'DTEND;TZID=Europe/Paris:20260401T110000');
-  // The quote opened by X-A swallows the real TZID, so none is found and the update wrote a
-  // floating DTSTART, moving the event out of its zone.
+  // The quote opened by X-A swallows the real TZID, so none is found and the new start would be
+  // written floating.
   const HIDDEN = storedEvent('DTSTART;X-A="x;TZID=Europe/Paris:20260401T100000', 'DURATION:PT1H');
 
   it('refuses a start-only update that would inherit a TZID spilled into the stored value', async () => {
