@@ -1,57 +1,26 @@
 # Fastmail MCP Server (Unofficial Fork)
 
+> **Vibe coded. Run it at your own risk.**
+> I made this primarily as a tool for myself, and I use it almost every day. I'm happy to share it, but I'll fully admit it is into the realms of a vibe-coded product, and I have relied heavily on autonomous AI coding and review for significant chunks of it. I am a software engineer and believe I am steering it competently. I take pains to use existing libraries, match good practices, and not blindly trust the first thing Claude says, but I have most certainly not reviewed this in as much depth as I would give code in my day job. It acts on your real mailbox, and it can send mail. I'm reasonably confident there are no significant issues, but I make no warranty or claims about its quality or adherence to standards; see [LICENSE](LICENSE).
+
 > **Not a Fastmail product.** This is a community project. It is **not affiliated with, endorsed by, or supported by Fastmail**, and nothing here comes from them. "Fastmail" is a trademark of Fastmail Pty Ltd, used only to say which APIs this server talks to. Run it at your own risk, under the terms of the [license](#license).
 
 A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) — an MCP server for Fastmail's JMAP and CalDAV APIs.
 
 ## What this fork adds over upstream
 
-- **Response simplification** — all data-returning tools return a token-lean shape by default (`verbose`/`raw` to opt out). See [Response Simplification](docs/reference/responses.md#response-simplification).
-- **Draft-first compose**: every compose tool saves a draft, and **`send_draft` is the only tool that transmits a composed message** (upstream's `send_email` is not offered here), so every outgoing message exists as stored, inspectable bytes before it is sent ([#32](https://github.com/JonathanGodley/fastmail-mcp/issues/32), [#66](https://github.com/JonathanGodley/fastmail-mcp/issues/66)). **Calendar invitations still send mail**: naming attendees on an event emails them an invitation, and a later delete emails a cancellation. See [Calendar invitations send mail](docs/reference/calendar.md#calendar-invitations-send-mail) before gating on `send_draft` alone.
-- **Calendar**: attendee/participant support, non-destructive event updates (no silent field wipes), and RFC 5545 date/TZID handling.
-- **Local-time email dates** — the `date` field renders in your timezone with a UTC offset instead of raw UTC; `FASTMAIL_TIMEZONE` overrides the host zone. The same setting governs [calendar window dates](docs/reference/calendar.md#calendar-window-dates), where `create_calendar_event` defaults a designator-less time (see [Writing calendar times](docs/reference/calendar.md#writing-calendar-times)), and calendar sort order.
-- **Readable text/plain fallback** — when you supply only `htmlBody`, a plain-text alternative is generated automatically whenever one can be derived from the HTML (accessibility + deliverability). A body with no derivable text ships HTML-only; only a genuinely no-body message is rejected. See [Message bodies](docs/reference/email.md#message-bodies) for what the derivation makes of an image.
-- **Faithful, reversible draft edits** — `edit_draft` preserves the draft's threading headers (In-Reply-To/References), attachments, and keywords across the immutable-email recreate, instead of silently dropping them. The draft it replaces goes to **Trash rather than being destroyed**, and the result echoes back what that draft contained, so an edit made from an out-of-date copy is both visible and undoable ([#65](https://github.com/JonathanGodley/fastmail-mcp/issues/65)).
-- **Compose ergonomics** — drafts carry a display name alongside the From address: state it yourself by passing `from` as `"Name <email>"`, or leave it to the name an edited draft already carries, and then the sending identity's; recipient strings like `"Name <email>"` are parsed across every compose tool.
-- **Outgoing attachments, including embedded images** — attach a local file, a `blobId`, or one part of an existing message to a draft, reply, forward, or edited draft (append / remove-by-ref / clear-all), and give an item a `cid` to show it *inside* the message body instead of hanging it off the end ([#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)). Each source is opt-in: local files need `FASTMAIL_ATTACH_DIR` and are confined to it, and the two in-account sources need `FASTMAIL_ALLOW_BLOB_ATTACH`. See [Sending attachments](docs/reference/email.md#sending-attachments).
-- **Forwarding** — `draft_email`'s `forward` mode reproduces the original under the Fastmail-native forwarded-message block and **carries its attachments** (the official server-side forward carries none), with an `asAttachment` mode that attaches the whole original as a lossless `.eml`.
-- **Quotes and forwards keep their pictures** — a reply's quote and an inline forward's block carry the images the original displayed, instead of leaving broken references or silently blank space ([#13](https://github.com/JonathanGodley/fastmail-mcp/issues/13)). This re-sends image data outward that you never attached and no `FASTMAIL_ATTACH_DIR` governs; leaving `{{quote}}` out of the body is the way to send none of it. See [Replying and forwarding with images](docs/reference/email.md#replying-and-forwarding-with-images).
-- **Attachment paths** — relative `download_attachment` paths resolve inside the configured download dir, so a bare filename lands there in one step.
-- **Path-aware mailbox naming** - every mailbox parameter accepts a root-anchored path (`Archive/2026/Receipts`) alongside an id, role, or name, `list_mailboxes` returns the path it accepts, and `create_mailbox` makes the folder you want to file into ([#27](https://github.com/JonathanGodley/fastmail-mcp/issues/27), [#48](https://github.com/JonathanGodley/fastmail-mcp/issues/48)). A duplicated folder name is reported as ambiguous with its candidate paths instead of resolving to whichever one came back first. See [Naming a mailbox](docs/reference/email.md#naming-a-mailbox).
-
-## Features
-
-### Core Email Operations
-- List mailboxes (each with its full path) and get mailbox statistics; create new mailboxes
-- List, search, and filter emails with advanced criteria
-- Get specific emails by ID
-- Compose emails (text and HTML) as drafts, sent with `send_draft`
-- Reply to emails with proper threading (In-Reply-To, References headers), carrying the images the original displayed into the quote
-- Forward emails with attachment carry and a lossless `.eml` (`asAttachment`) mode; an inline forward carries the original's body images too
-- Create, edit, and send email drafts (with or without threading)
-- Email management: mark read/unread, pin/unpin, delete, move between folders, archive
-
-### Advanced Email Features
-- **Attachment Handling**: List and download email attachments; attach local files or content already in the account to outgoing mail, including images embedded in the body (see [Sending attachments](docs/reference/email.md#sending-attachments)); replies and forwards carry the images the original displayed
-- **Threading Support**: Get complete conversation threads
-- **Advanced Search**: Multi-criteria filtering (sender, date range, attachments, read status)
-- **Bulk Operations**: Process multiple emails simultaneously
-- **Statistics & Analytics**: Account summaries and mailbox statistics
-
-### Contacts Operations
-- List all contacts
-- Get specific contacts by ID
-- Search contacts by name or email
-- Create, update and delete contacts, with a per-entry merge that keeps the card fields the simplified output doesn't show, and a full echo of the card as it stood before every write
-
-### Calendar Operations
-- List all calendars and calendar events
-- Get specific calendar events by ID
-- Create, update, and delete calendar events
-
-### Identity & Account Management
-- List available sending identities
-- Account summary with comprehensive statistics
+- **Response simplification**: a token-lean shape by default, with `verbose`/`raw` to opt out. See [Response Simplification](docs/reference/responses.md#response-simplification).
+- **Draft-first compose**: `send_draft` is the only tool that transmits a composed message, but calendar invitations still send mail. See [Calendar invitations send mail](docs/reference/calendar.md#calendar-invitations-send-mail).
+- **Calendar**: attendees, non-destructive event updates, and RFC 5545 date/TZID handling. See [docs/reference/calendar.md](docs/reference/calendar.md).
+- **Local-time email dates**: `date` is in your timezone with a UTC offset, set by `FASTMAIL_TIMEZONE`. See [Email fields](docs/reference/responses.md#email-fields).
+- **Readable text/plain fallback**: an `htmlBody` on its own gets a plain-text part derived from it. See [Message bodies](docs/reference/email.md#message-bodies).
+- **Faithful draft edits**: `edit_draft` keeps threading headers, attachments and keywords across the recreate. See [Email Tools](docs/reference/tools.md#email-tools).
+- **Compose ergonomics**: `"Name <email>"` is accepted for `from` and for every recipient field. See [Email Tools](docs/reference/tools.md#email-tools).
+- **Outgoing attachments, including embedded images**: local files, `blobId`s or parts of a message, each source opt-in. See [Sending attachments](docs/reference/email.md#sending-attachments).
+- **Forwarding**: carries the original's attachments, or attaches the whole original as a `.eml`. See [Email Tools](docs/reference/tools.md#email-tools).
+- **Quotes and forwards keep their pictures**: images the original displayed are sent on, though you never attached them. See [Replying and forwarding with images](docs/reference/email.md#replying-and-forwarding-with-images).
+- **Attachment paths**: a relative `download_attachment` path lands inside the download directory. See [Advanced Email Features](docs/reference/tools.md#advanced-email-features).
+- **Path-aware mailbox naming**: every mailbox parameter accepts a path such as `Archive/2026/Receipts`. See [Naming a mailbox](docs/reference/email.md#naming-a-mailbox).
 
 ## Setup
 
@@ -73,18 +42,11 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
    npm run build
    ```
 
-Configuration (the API token, environment variables and the settings file) is in [docs/reference/configuration.md](docs/reference/configuration.md).
-
 ### Running the Server
 
 Start the MCP server:
 ```bash
 npm start
-```
-
-For development with auto-reload:
-```bash
-npm run dev
 ```
 
 ### Run via npx (GitHub)
@@ -111,23 +73,74 @@ FASTMAIL_API_TOKEN="your_token" \
   npx --yes github:JonathanGodley/fastmail-mcp@v1.13.4-fork.9 fastmail-mcp
 ```
 
-The tool reference is in [docs/reference/tools.md](docs/reference/tools.md); response format, email, contacts, calendar, Desktop Extension install and embedding details are in [responses.md](docs/reference/responses.md), [email.md](docs/reference/email.md), [contacts.md](docs/reference/contacts.md), [calendar.md](docs/reference/calendar.md), [configuration.md](docs/reference/configuration.md#install-as-a-claude-desktop-extension-dxt) and [embedding.md](docs/reference/embedding.md).
+### Configuration
 
-## API Information
+Get your Fastmail API token:
+- Log in to Fastmail web interface
+- Go to **Settings → Privacy & Security**, and in the **Connected apps & API tokens** section click **Manage API tokens**
+- Click **New API token**
+- Copy the generated token
 
-This server uses Fastmail's JMAP (JSON Meta Application Protocol) API.
+Then set the environment variables:
 
-### Inspired by Fastmail JMAP-Samples
+| Variable | Required | Meaning |
+|---|---|---|
+| `FASTMAIL_API_TOKEN` | Required | Your Fastmail API token. |
+| `FASTMAIL_BASE_URL` | Optional | JMAP base URL. Defaults to `https://api.fastmail.com`; only Fastmail's API hosts are accepted. |
+| `FASTMAIL_ALLOW_UNSAFE_BASE_URL` | Optional | `true` or `1` widens the host allowlist for a self-hosted JMAP server. HTTPS is still required. |
+| `FASTMAIL_DOWNLOAD_DIR` | Optional | Where `download_attachment` saves, confined to this directory. Defaults to `~/Downloads/fastmail-mcp/`. |
+| `FASTMAIL_ATTACH_DIR` | Optional | Turns on attaching local files to outgoing mail, confined to this directory. Unset, it is off. |
+| `FASTMAIL_ALLOW_BLOB_ATTACH` | Optional | `true` or `1` allows attaching content already in the account (a `blobId`, or one part of a message). |
+| `FASTMAIL_TIMEZONE` | Optional | Full IANA zone name for email dates and calendar times. Defaults to the host's zone; an invalid name stops the server starting. |
+| `FASTMAIL_CALDAV_USERNAME` | For calendar tools | Your Fastmail address. See [CalDAV setup](docs/reference/configuration.md#caldav-setup). |
+| `FASTMAIL_CALDAV_PASSWORD` | For calendar tools | A Fastmail app password with CalDAV access. |
+| `FASTMAIL_CALDAV_DISPLAY_NAME` | Optional | Organizer name on events you create with participants. Defaults to the CalDAV username. |
+| `FASTMAIL_EXPERIMENTAL_SNOOZE` | Optional | `1` turns on the experimental snooze tools. |
+| `FASTMAIL_WEB_COOKIE` | For snooze tools | The session cookie of a Fastmail web login. Read [Experimental: snooze](docs/reference/tools.md#experimental-snooze) before setting it. |
 
-Many features in this MCP server are inspired by the official [Fastmail JMAP-Samples](https://github.com/fastmail/JMAP-Samples) repository, including:
-- Recent emails retrieval (based on top-ten example)
+The same variables can go in `~/.fastmail-mcp/.env` instead; see [The settings file](docs/reference/configuration.md#the-settings-file). To install as a Claude Desktop Extension instead, see [Install as a Claude Desktop Extension (DXT)](docs/reference/configuration.md#install-as-a-claude-desktop-extension-dxt).
 
-### Authentication
-The server uses bearer token authentication with Fastmail's API.
+If the calendar or contacts tools report themselves unavailable or forbidden, run `check_function_availability` for setup guidance.
 
-## CalDAV Calendar Support
+## Tools
 
-Calendar setup is in [docs/reference/configuration.md](docs/reference/configuration.md#setup); how calendar access works is in [docs/reference/calendar.md](docs/reference/calendar.md).
+The server has 41 tools, listed here by group. Each one's parameters and behaviour are in [docs/reference/tools.md](docs/reference/tools.md).
+
+| Group | Tools |
+|---|---|
+| Mail reading | `list_emails`, `search_emails`, `get_email`, `get_thread` |
+| Composing and sending | `draft_email`, `edit_draft`, `send_draft` |
+| Filing | `list_mailboxes`, `create_mailbox`, `move_email`, `archive_email`, `add_labels`, `remove_labels`, `mark_email_read`, `pin_email`, `delete_email` |
+| Bulk | `bulk_mark_read`, `bulk_pin`, `bulk_move`, `bulk_delete`, `bulk_add_labels`, `bulk_remove_labels` |
+| Attachments | `get_email_attachments`, `download_attachment` |
+| Contacts | `list_contacts`, `get_contact`, `search_contacts`, `create_contact`, `update_contact`, `delete_contact` |
+| Calendar | `list_calendars`, `list_calendar_events`, `get_calendar_event`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` |
+| Account and diagnostics | `list_identities`, `get_mailbox_stats`, `get_account_summary`, `check_function_availability`, `test_bulk_operations` |
+
+Three experimental snooze tools, `list_snoozed_emails`, `snooze_email` and `unsnooze_email`, are off by default and not counted above. See [Experimental: snooze](docs/reference/tools.md#experimental-snooze).
+
+## Safety notes
+
+- **Calendar invitations send mail.** Naming attendees on an event emails them an invitation, and a later delete emails them a cancellation, with no `send_draft` call. Gating `send_draft` does not gate all outbound mail; see [Calendar invitations send mail](docs/reference/calendar.md#calendar-invitations-send-mail).
+- **The snooze tools run on a whole web login.** `FASTMAIL_WEB_COOKIE` is the session cookie of a logged-in Fastmail web login, not a scoped token: it carries everything that login can do. See [Experimental: snooze](docs/reference/tools.md#experimental-snooze).
+
+## Reference
+
+- [tools.md](docs/reference/tools.md): every tool's parameters and behaviour.
+- [responses.md](docs/reference/responses.md): the simplified response shape, field projection, paging, errors and rate limits.
+- [email.md](docs/reference/email.md): mailboxes, identities, archiving, replies, message bodies, signatures and attachments.
+- [contacts.md](docs/reference/contacts.md): contact fields and how contact writes merge.
+- [calendar.md](docs/reference/calendar.md): invitations, event ids, dates and time zones, free/busy and repeating events.
+- [configuration.md](docs/reference/configuration.md): environment variables, the settings file, the Desktop Extension and CalDAV setup.
+- [embedding.md](docs/reference/embedding.md): spawning the server from your own program.
+
+The design rationale files for maintainers are listed in [CONTRIBUTING.md](CONTRIBUTING.md#where-design-rationale-lives).
+
+## Privacy & Security
+
+- API tokens are stored encrypted by Claude Desktop when installed via the DXT and are never logged by this server.
+- The server avoids logging raw errors and sensitive data (tokens, email addresses, identities, attachment names/blobIds) in error messages.
+- Tool responses may include your email metadata/content by design (e.g., listing emails) but internal identifiers and credentials are not disclosed beyond what Fastmail returns for the requested data.
 
 ## License
 
@@ -136,27 +149,3 @@ MIT
 ## Contributing
 
 Contributions are welcome. The development rules, including the documentation that ships with each change, are in [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Authentication Errors**: Ensure your API token is valid and has the necessary permissions
-2. **Calendar/Contacts "Forbidden" Errors**: Use `check_function_availability` to see setup guidance
-
-### Calendar/Contacts Not Working?
-
-If calendar and contacts functions return "Forbidden" errors, this is likely due to:
-
-1. **Calendar credentials**: Calendar runs over CalDAV, not the API token. Set `FASTMAIL_CALDAV_USERNAME` (your Fastmail address) and `FASTMAIL_CALDAV_PASSWORD` (a Fastmail app password with calendar (CalDAV) access)
-2. **API Token Scope (contacts)**: Your API token may need contacts permissions enabled; a contacts write that comes back forbidden needs a token with read-write contacts access
-
-**Solution**: Run `check_function_availability` for step-by-step setup guidance.
-
-For more detailed error information, check the console output when running the server.
-
-## Privacy & Security
-
-- API tokens are stored encrypted by Claude Desktop when installed via the DXT and are never logged by this server.
-- The server avoids logging raw errors and sensitive data (tokens, email addresses, identities, attachment names/blobIds) in error messages.
-- Tool responses may include your email metadata/content by design (e.g., listing emails) but internal identifiers and credentials are not disclosed beyond what Fastmail returns for the requested data.

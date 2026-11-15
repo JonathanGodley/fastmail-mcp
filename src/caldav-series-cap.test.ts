@@ -94,9 +94,8 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
         assert.match(message, /id dense@fm/);
         assert.match(message, new RegExp(`${CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1} occurrences`));
         assert.match(message, /calendar Work/);
-        // THE LIMIT ITSELF. This message is the only place a caller is ever told the number —
-        // the tool description and docs/reference/tools.md deliberately stopped carrying it — so the figure is
-        // pinned here, interpolated from the constant rather than written as a literal so a
+        // THE LIMIT ITSELF. The error names the number, as the tool description and
+        // docs/reference/tools.md do, so the figure is pinned here, interpolated from the constant rather than written as a literal so a
         // deliberate change to the cap moves the assertion with it.
         assert.match(
           message,

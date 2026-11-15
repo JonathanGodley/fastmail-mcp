@@ -155,6 +155,6 @@ Single (non-repeating) events are unaffected.
 
 ## Calendar known limitations
 
-- **Recurring events, on read**: `list_calendar_events` always expands recurrences, while `get_calendar_event` returns the series master at its original date. How rows are windowed, and the cases that put a row outside the window or keep one out of it, are in the `list_calendar_events` and `get_calendar_event` entries above.
+- **Recurring events, on read**: `list_calendar_events` always expands recurrences, while `get_calendar_event` returns the series master at its original date. How rows are windowed, and the cases that put a row outside the window or keep one out of it, are in the `list_calendar_events` and `get_calendar_event` entries in [tools.md](tools.md#calendar-tools).
 - **Recurring events, on write**: not supported at all — see [Repeating events cannot be changed or deleted here](#repeating-events-cannot-be-changed-or-deleted-here) above.
 - **Attendee parameters**: RSVP, ROLE, CUTYPE and other attendee parameters are parsed on read but not settable on create/update — only `email` and `name` are accepted.

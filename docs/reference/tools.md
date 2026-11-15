@@ -2,13 +2,6 @@
 
 ## Available Tools (41 Total)
 
-**🎯 Most Popular Tools:**
-- **check_function_availability**: Check what's available and get setup guidance  
-- **test_bulk_operations**: Test bulk operations, dry run by default
-- **send_draft**: The one tool that transmits a composed message — compose with `draft_email`, then send here
-- **search_emails**: Free-text + structured email search (from/to/cc/bcc/subject/date/mailbox, plus multi-mailbox scoping), with Trash and Spam excluded by default
-- **list_emails**: List emails across all mailboxes (or one, via `mailbox`), with Trash and Spam excluded by default — pass a small `limit` for a quick look
-
 ### Email Tools
 
 > **Draft-first compose:** `draft_email` saves a draft in every mode, and **`send_draft` is the only tool that transmits a composed message**. To compose and send: `draft_email` → `send_draft`. Gating `send_draft` does **not** gate all outbound mail: see [Calendar invitations send mail](calendar.md#calendar-invitations-send-mail).

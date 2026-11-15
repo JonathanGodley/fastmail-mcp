@@ -18,10 +18,9 @@
 //   living under a `###` subsection of the `## Available Tools (N Total)` section.
 //
 // Everything else that names a tool is a mention, and is deliberately not counted: prose
-// names tools in backticks (`send_draft`); the "Most Popular Tools" teaser uses the same
-// bullet shape but sits above the first `###`, so a tool listed only there is still
-// reported as undocumented; the Troubleshooting list is outside the section. Nested detail
-// bullets are indented, so they never match.
+// names tools in backticks (`send_draft`); a bullet of the same shape above the first `###`
+// is not counted, so a tool listed only there is still reported as undocumented. Nested
+// detail bullets are indented, so they never match.
 //
 // If you restructure that part of docs/reference/tools.md, keep the shape above or real entries will stop
 // counting here and this guard will report them as missing.
@@ -31,8 +30,15 @@
 //   Every tool the server ships appears in exactly ONE of the report's `functions: [...]`
 //   arrays (email / identity / contacts / calendar), so a caller planning off the report
 //   sees the whole surface and no tool claimed by two groups. The two meta-tools are
-//   exempt: they report on the server rather than acting on an account, and are listed in
-//   docs/reference/tools.md's "Most Popular Tools" teaser instead.
+//   exempt: they report on the server rather than acting on an account.
+//
+// README TOOL LIST CONTRACT - what counts as a tool listed in README.md:
+//
+//   A backticked tool name inside a table row (a line starting with `|`) under the
+//   `## Tools` heading, before the next `## ` heading. Names in a prose line there (the
+//   experimental snooze tools) and backticked names anywhere else in the README are
+//   mentions, and are not counted. The line stating "has N tools" under the same heading
+//   is checked against the TOOLS count.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -43,6 +49,7 @@ import { fileURLToPath } from 'node:url';
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_FILE = join(SRC_DIR, 'index.ts');
 const README_FILE = join(SRC_DIR, '..', 'docs', 'reference', 'tools.md');
+const REPO_README_FILE = join(SRC_DIR, '..', 'README.md');
 
 const TOOLS_HEADING = /^## Available Tools \((\d+) Total\)\s*$/;
 
@@ -210,6 +217,74 @@ describe('README tool inventory', () => {
       unique.size,
       `the "## Available Tools (${headingCount} Total)" heading disagrees with the ` +
         `${unique.size} tools documented below it`,
+    );
+  });
+});
+
+function collectReadmeToolList(): { names: string[]; statedCount: number | undefined } {
+  const lines = readLines(REPO_README_FILE);
+  const heading = lines.findIndex((l) => /^## Tools\s*$/.test(l));
+  assert.notEqual(heading, -1, 'could not find a `## Tools` heading in README.md');
+
+  const names: string[] = [];
+  let statedCount: number | undefined;
+  for (let i = heading + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^## /.test(line)) break; // the next top-level section ends the tool list
+    const count = /has (\d+) tools/.exec(line);
+    if (count && statedCount === undefined) statedCount = Number(count[1]);
+    if (!line.startsWith('|')) continue;
+    for (const match of line.matchAll(/`([a-z][a-z0-9_]*)`/g)) names.push(match[1]);
+  }
+  return { names, statedCount };
+}
+
+describe('README tool list', () => {
+  it('lists every tool the server ships', () => {
+    const { names } = collectReadmeToolList();
+    // A floor, so a scan that has stopped matching fails here rather than reporting
+    // every tool as missing for a reason that is not the table's.
+    assert.ok(
+      names.length >= 30,
+      `found only ${names.length} tool names in the README's \`## Tools\` table; the scan ` +
+        `has probably stopped matching`,
+    );
+
+    const listed = new Set(names);
+    const unlisted = collectShippedToolNames().filter((name) => !listed.has(name));
+    assert.deepEqual(
+      unlisted,
+      [],
+      `this tool ships but is not in the README's \`## Tools\` table: ${unlisted.join(', ')}. ` +
+        `Add it, in backticks, to the row of the group it belongs to`,
+    );
+  });
+
+  it('lists no tool the server does not ship', () => {
+    const shipped = new Set(collectShippedToolNames());
+    const phantom = collectReadmeToolList().names.filter((name) => !shipped.has(name));
+    assert.deepEqual(
+      phantom,
+      [],
+      `the README's \`## Tools\` table lists a tool that does not exist: ${phantom.join(', ')}. ` +
+        `It was removed from TOOLS (or renamed) and the table was left behind`,
+    );
+  });
+
+  it('lists each tool once, and states how many there are', () => {
+    const { names, statedCount } = collectReadmeToolList();
+    const repeated = names.filter((name, i) => names.indexOf(name) !== i);
+    assert.deepEqual(
+      repeated,
+      [],
+      `the README's \`## Tools\` table lists these tools more than once: ${repeated.join(', ')}`,
+    );
+    const shippedCount = collectShippedToolNames().length;
+    assert.equal(
+      statedCount,
+      shippedCount,
+      `the README's \`## Tools\` section says it has ${statedCount} tools, but the server ` +
+        `ships ${shippedCount}`,
     );
   });
 });

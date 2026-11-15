@@ -79,8 +79,6 @@ The signature fields are the identity's configured sign-off, closing line includ
 
 **Verbose adds**: every other property the server returns for the identity, passed through as sent. Which ones appear is the server's choice; on Fastmail they have included `bcc`, `verificationState`, `showInCompose`, `saveSentToMailboxId`, `displayName`, `isAutoConfigured`, `enableExternalSMTP`, `server`, `port`, `ssl`, `addBccOnSMTP`, `saveOnSMTP`, `externalCredentialId`, `warnings`, `useForAutoReply` and `verificationCheckTime`, but none is promised
 
-> **Drafts in reads.** `get_thread` excludes drafts by default; `search_emails`/`list_emails` include them. Drafts are identified by the `$draft` keyword, which survives a draft being moved out of Drafts, not by mailbox role, with one carve-out: a draft that now lives ONLY in Trash is neither shown nor counted (`edit_draft` and `delete_email` both leave a `$draft` copy there). Use `includeDrafts` (get_thread) / `excludeDrafts` (the two list/search tools) to override either default.
-
 ## Archiving does what the Fastmail client does
 
 `archive_email` is not a move. Fastmail's Archive button **removes the message from the Inbox** and leaves every other folder and label untouched; the Archive folder is added only when removing the Inbox would otherwise leave the message filed nowhere. This server does the same thing, measured against the live client rather than inferred from the protocol:
@@ -116,6 +114,8 @@ Three things it does not promise:
 - **Hand-rolling `inReplyTo`/`references` on `mode:'new'` under a mismatched subject is worse, and is not undoable.** Once such a draft exists, later drafts replying to that *same original message* are grouped onto the splinter thread too, including ones created afterwards with the correct `Re:` subject and the full reference chain. Deleting the offending drafts, emptying them from Trash, and recreating with a trimmed reference list all leave the mapping in place ([#68](https://github.com/JonathanGodley/fastmail-mcp/issues/68)).
 
 So reply with `mode:'reply'`, with or without `subject`, rather than reconstructing a reply out of `mode:'new'` plus manual threading headers. Typing the prefix yourself is the half-way version of that mistake, and both compose and `edit_draft` say so: a `Re:`/`Fwd:`/`Fw:` prefix written into a `mode:'new'` subject, or edited onto a draft that carries no threading headers, draws a note naming the mode that would have threaded it ([#188](https://github.com/JonathanGodley/fastmail-mcp/issues/188)). It is a note and never a refusal — a fresh conversation reusing an old subject is legitimate — and each route has its own silencer: on compose, passing `inReplyTo`/`references` yourself; on `edit_draft`, a draft that already carries `In-Reply-To`, `References` or `X-Forwarded-Message-Id`.
+
+> **Drafts in reads.** `get_thread` excludes drafts by default; `search_emails`/`list_emails` include them. Drafts are identified by the `$draft` keyword, which survives a draft being moved out of Drafts, not by mailbox role, with one carve-out: a draft that now lives ONLY in Trash is neither shown nor counted (`edit_draft` and `delete_email` both leave a `$draft` copy there). Use `includeDrafts` (get_thread) / `excludeDrafts` (the two list/search tools) to override either default.
 
 ## Reading long threads cheaply
 

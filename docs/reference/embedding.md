@@ -2,7 +2,7 @@
 
 ## Embedding this server as a spawned child
 
-The sections above describe registering the server with a terminal MCP client, which
+The README describes registering the server with a terminal MCP client, which
 keeps one long-lived connection. If instead your own program spawns this server per
 task - spawn, initialize, run a few tool calls, close stdin - the following applies.
 

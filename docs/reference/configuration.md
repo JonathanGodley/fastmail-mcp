@@ -98,7 +98,7 @@ You can install this server as a Desktop Extension for Claude Desktop using the 
 
 3. Use any of the tools (e.g. `list_emails`).
 
-## Setup
+## CalDAV setup
 
 1. Create an app-specific password on Fastmail:
    - Go to **Settings → Privacy & Security**, and in the **Connected apps & API tokens** section click **Manage app passwords and access**
