@@ -8,15 +8,30 @@
 // total), so a filter is honoured rather than ignored, and a narrower AND never counts more
 // than its wider half.
 //
-// Raw JMAP, not the built server. READ-ONLY: Email/query only, limit 0 or 1, totals read.
-// Output is accepted-or-error-type and counts only - no id, subject, address or mailbox
+// Raw JMAP, not the built server. READ-ONLY: Email/query only, limit 1, totals read.
+// Output is accepted-or-error-type (a refused request: HTTP status and error type, never
+// the body) and counts only - no id, subject, address or mailbox
 // name - so a run can be quoted into a public issue or commit.
 
-import { getSession, jmap } from './jmaplib.mjs';
+import { getSession, AUTH } from './jmaplib.mjs';
 import { makeChecker } from './probelib.mjs';
 
 const { check, failures } = makeChecker();
 const s = await getSession();
+
+// Not jmaplib's jmap(): on a non-OK status that throws with the response body in the message.
+async function call(methodCalls) {
+  const res = await fetch(s.apiUrl, {
+    method: 'POST',
+    headers: { ...AUTH, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'], methodCalls }),
+  });
+  if (res.status === 401) { console.error('AUTH FAILED: 401 from the JMAP API. Stopping.'); process.exit(3); }
+  let body = null;
+  try { body = await res.json(); } catch { /* reported as a status below */ }
+  if (!res.ok || !body) return { ok: false, type: `HTTP ${res.status}${typeof body?.type === 'string' ? ` ${body.type}` : ''}` };
+  return { ok: true, body };
+}
 
 // A base condition of the kind runFilteredQuery puts first in the AND (it holds the text,
 // date and mailbox keys); a date floor matches every message without naming a mailbox.
@@ -24,8 +39,9 @@ const BASE = { after: '1990-01-01T00:00:00Z' };
 
 // Returns { ok, total, type }. The error TYPE only: a description could quote account data.
 async function total(filter) {
-  const body = await jmap(s, [['Email/query', { accountId: s.accountId, filter, limit: 1, calculateTotal: true }, 'q']]);
-  const [name, args] = body.methodResponses[0];
+  const r = await call([['Email/query', { accountId: s.accountId, filter, limit: 1, calculateTotal: true }, 'q']]);
+  if (!r.ok) return r;
+  const [name, args] = r.body.methodResponses[0];
   if (name === 'error') return { ok: false, type: args.type };
   return { ok: true, total: args.total };
 }
