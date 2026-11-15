@@ -343,7 +343,8 @@ export function extractVEvent(data: string): string | null {
 }
 
 /**
- * Whether a STORED calendar resource holds a repeating series; what update/delete refuse on.
+ * Whether a STORED calendar resource holds a repeating series; what update refuses on, and delete
+ * without `occurrence`.
  * Read off the resource, never a listing row, whose RRULE expansion has stripped.
  *
  * Fails CLOSED, since it fronts an irreversible write. Any of four markers is enough: an
@@ -621,8 +622,10 @@ function expandedHoldsOccurrence(blocks: string[], target: OccurrenceKey): boole
 function occurrenceWindow(target: OccurrenceKey): { start: string; end: string } {
   const from = target.kind === 'date' ? msFromICalDateTime(`${target.date}T000000`) : target.ms;
   const to = target.kind === 'date' ? from + 24 * 60 * 60 * 1000 : target.ms;
-  const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
-  return { start: iso(from - MAX_UTC_OFFSET_MS), end: iso(to + MAX_UTC_OFFSET_MS) };
+  return {
+    start: shiftIsoMs(new Date(from).toISOString(), -MAX_UTC_OFFSET_MS),
+    end: shiftIsoMs(new Date(to).toISOString(), MAX_UTC_OFFSET_MS),
+  };
 }
 
 /**

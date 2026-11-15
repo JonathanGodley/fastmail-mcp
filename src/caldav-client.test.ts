@@ -4160,13 +4160,14 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 });
 
 describe('update_calendar_event / delete_calendar_event refuse a recurring series', () => {
-  // A repeating event is refused OUTRIGHT by both write tools, with no override parameter.
-  // The reason is the create surface: create_calendar_event has no RRULE parameter, so this
-  // server cannot make a repeating event, and under the project rule that a destroy must not
-  // remove what this server cannot recreate it must not destroy or rewrite one either. A
-  // delete takes every occurrence past and future and mails every attendee a cancellation; an
-  // update moves every occurrence, and for a series carrying RECURRENCE-ID overrides RFC 5545
-  // does not settle what should happen to them. Restoring the capability properly is #146.
+  // A whole repeating event is refused by both write tools, with no override parameter; delete's
+  // `occurrence` removes one occurrence only (#146, its own describe block below). The reason is
+  // the create surface: create_calendar_event has no RRULE parameter, so this server cannot make
+  // a repeating event, and under the project rule that a destroy must not remove what this
+  // server cannot recreate it must not destroy or rewrite one either. A delete takes every
+  // occurrence past and future and mails every attendee a cancellation; an update moves every
+  // occurrence, and for a series carrying RECURRENCE-ID overrides RFC 5545 does not settle what
+  // should happen to them.
   function makeRecurringIcal(exceptions: Array<{ recurrenceId: string; summary: string }> = []): string {
     const lines = [
       'BEGIN:VCALENDAR',
@@ -4818,8 +4819,15 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     { ms: at('2028-08-22T00:00:00Z'), lines: ['RECURRENCE-ID;VALUE=DATE:20280822', 'DTSTART;VALUE=DATE:20280822'] },
   ];
 
+  // A fake that drops every instance once anything is written, so the assertion on the line's
+  // form is the one that answers, not the after-write check.
+  const goneAfterAnyWrite = (instances: Instance[]) => ({
+    expand: (_params: FetchObjectsParams, written: string | undefined) =>
+      written === undefined ? [{ data: expandedBlob(instances), url: EVENT_URL, etag: '"e"' }] : [],
+  });
+
   it('excludes an all-day occurrence with a VALUE=DATE EXDATE', async () => {
-    const { client, mockDAVClient } = makeClient(ALL_DAY, ALL_DAY_INSTANCES);
+    const { client, mockDAVClient } = makeClient(ALL_DAY, ALL_DAY_INSTANCES, goneAfterAnyWrite(ALL_DAY_INSTANCES));
     const result = await client.deleteCalendarEvent(UID, '2027-08-22');
     assert.match(writtenBody(mockDAVClient), /\r\nEXDATE;VALUE=DATE:20270822\r\n/);
     assert.deepEqual(result.occurrence?.written, { kind: 'allday' });
@@ -4844,7 +4852,7 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
   ];
 
   it('accepts the first instance of an unbounded series, passed by its start', async () => {
-    const { client, mockDAVClient } = makeClient(UNBOUNDED_UTC, UNBOUNDED_INSTANCES);
+    const { client, mockDAVClient } = makeClient(UNBOUNDED_UTC, UNBOUNDED_INSTANCES, goneAfterAnyWrite(UNBOUNDED_INSTANCES));
     const result = await client.deleteCalendarEvent(UID, '2026-04-06T10:00:00Z');
     assert.match(writtenBody(mockDAVClient), /\r\nEXDATE:20260406T100000Z\r\n/);
     assert.deepEqual(result.occurrence?.written, { kind: 'utc' });
@@ -4902,6 +4910,8 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       ['a master with overrides but no rule', mutate('RRULE:FREQ=WEEKLY;COUNT=4\r\n', ''), /not one series with a single repeat rule/],
       ['two blocks with no RECURRENCE-ID', mutate('RECURRENCE-ID;TZID=Australia/Sydney:20260829T090000\r\n', ''), /not one series with a single repeat rule/],
       ['two RRULEs on the master', mutate('RRULE:FREQ=WEEKLY;COUNT=4', 'RRULE:FREQ=WEEKLY;COUNT=4\r\nRRULE:FREQ=DAILY;COUNT=2'), /not one series with a single repeat rule/],
+      ['an RRULE on an override', mutate('DTSTART;TZID=Australia/Sydney:20260829T093000', 'DTSTART;TZID=Australia/Sydney:20260829T093000\r\nRRULE:FREQ=DAILY;COUNT=2'), /not one series with a single repeat rule/],
+      ['a start whose value cannot be read', mutate('DTSTART;TZID=Australia/Sydney:20260822T090000', 'DTSTART;TZID=Australia/Sydney:soon'), /its start cannot be read/],
       ['an ATTENDEE on the master', mutate('SUMMARY:Planning sync\r\nSEQUENCE:1\r\nBEGIN:VALARM', 'SUMMARY:Planning sync\r\nATTENDEE:mailto:guest@example.com\r\nSEQUENCE:1\r\nBEGIN:VALARM'), /has attendees or an organizer/],
       ['an ORGANIZER on an override', mutate('DTSTART;TZID=Australia/Sydney:20260829T093000', 'DTSTART;TZID=Australia/Sydney:20260829T093000\r\nORGANIZER:mailto:host@example.com'), /has attendees or an organizer/],
       ['an ATTENDEE inside a VALARM', mutate('TRIGGER:-PT15M', 'TRIGGER:-PT15M\r\nATTENDEE:mailto:me@example.com'), /has attendees or an organizer/],
@@ -5120,10 +5130,10 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
         url: hostile,
         occurrence: { excluded: '2026-09-05T09:00:00', written: { kind: 'zoned', zone: hostile }, previousICalendar: '' },
       }, '');
+      assert.ok(item.text.includes(`Event ID: "${describeUntrustedAt(hostile, CALENDAR_UID_ECHO_LIMIT)}"`), 'UID');
+      assert.ok(item.text.includes(`resource url: "${describeUntrustedAt(hostile, CALENDAR_URL_ECHO_LIMIT)}"`), 'url');
+      assert.ok(item.text.includes(`zone "${describeUntrustedAt(hostile, WRITTEN_ZONE_ECHO_LIMIT)}"`), 'zone');
       assert.ok(!/[\r\n]/.test(item.text));
-      assert.ok(item.text.includes(`Event ID: "${describeUntrustedAt(hostile, CALENDAR_UID_ECHO_LIMIT)}"`));
-      assert.ok(item.text.includes(`resource url: "${describeUntrustedAt(hostile, CALENDAR_URL_ECHO_LIMIT)}"`));
-      assert.ok(item.text.includes(`zone "${describeUntrustedAt(hostile, WRITTEN_ZONE_ECHO_LIMIT)}"`));
     });
   });
 });
