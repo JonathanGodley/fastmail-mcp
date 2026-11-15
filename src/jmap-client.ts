@@ -4650,6 +4650,8 @@ export class JmapClient {
     hasAttachment?: boolean;
     isUnread?: boolean;
     isPinned?: boolean;
+    isAnswered?: boolean;
+    isForwarded?: boolean;
     mailbox?: string;
     requiredMailboxes?: string[];
     excludeMailboxes?: string[];
@@ -4697,6 +4699,10 @@ export class JmapClient {
     else if (filters.isUnread === false) conds.push({ hasKeyword: '$seen' });
     if (filters.isPinned === true) conds.push({ hasKeyword: '$flagged' });
     else if (filters.isPinned === false) conds.push({ notKeyword: '$flagged' });
+    if (filters.isAnswered === true) conds.push({ hasKeyword: '$answered' });
+    else if (filters.isAnswered === false) conds.push({ notKeyword: '$answered' });
+    if (filters.isForwarded === true) conds.push({ hasKeyword: '$forwarded' });
+    else if (filters.isForwarded === false) conds.push({ notKeyword: '$forwarded' });
     if (filters.excludeDrafts) conds.push({ notKeyword: '$draft' });
     // inMailbox is SINGULAR (RFC 8621 §4.4.1): N AND-ed conditions, not an array.
     for (const id of requiredMailboxIds) conds.push({ inMailbox: id });

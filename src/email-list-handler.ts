@@ -55,6 +55,8 @@ export async function searchEmailsTool(args: any, limit: number, client: EmailLi
     hasAttachment: coerceBool(hasAttachment, 'hasAttachment'),
     isUnread: coerceBool(isUnread, 'isUnread'),
     isPinned: coerceBool(isPinned, 'isPinned'),
+    isAnswered: coerceBool(a.isAnswered, 'isAnswered'),
+    isForwarded: coerceBool(a.isForwarded, 'isForwarded'),
     mailbox, requiredMailboxes, excludeMailboxes,
     after, before, limit, position,
     ascending,

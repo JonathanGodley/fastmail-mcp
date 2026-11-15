@@ -2806,6 +2806,60 @@ describe('searchEmails exclusion + count', () => {
     assert.ok(filter.conditions.some((c: any) => c.hasKeyword === '$flagged'));
   });
 
+  // #222. Each flag must send exactly one condition on its own keyword, of the right
+  // polarity, and nothing when omitted.
+  for (const [flag, keyword] of [['isAnswered', '$answered'], ['isForwarded', '$forwarded']] as const) {
+    const onKeyword = async (value: boolean | undefined) => {
+      const makeReq = stubRequests(client, async () =>
+        queryResponse({ ids: [], list: [], total: 0 }));
+      await client.searchEmails({ query: 'x', [flag]: value, includeTrash: true, includeSpam: true });
+      const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+      const conds: any[] = filter.operator === 'AND' ? filter.conditions : [filter];
+      return conds.filter((c) => c.hasKeyword === keyword || c.notKeyword === keyword);
+    };
+
+    it(`${flag}:true => one hasKeyword ${keyword}`, async () => {
+      assert.deepEqual(await onKeyword(true), [{ hasKeyword: keyword }]);
+    });
+
+    it(`${flag}:false => one notKeyword ${keyword}`, async () => {
+      assert.deepEqual(await onKeyword(false), [{ notKeyword: keyword }]);
+    });
+
+    it(`${flag} omitted => no condition on ${keyword}`, async () => {
+      assert.deepEqual(await onKeyword(undefined), []);
+    });
+  }
+
+  it('the four keyword flags are four separate conditions in one AND', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    await client.searchEmails({
+      isUnread: true, isPinned: false, isAnswered: false, isForwarded: true,
+      includeTrash: true, includeSpam: true,
+    });
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+    assert.equal(filter.operator, 'AND');
+    assert.deepEqual(
+      filter.conditions.filter((c: any) => 'hasKeyword' in c || 'notKeyword' in c),
+      [{ notKeyword: '$seen' }, { notKeyword: '$flagged' }, { notKeyword: '$answered' }, { hasKeyword: '$forwarded' }],
+    );
+  });
+
+  // With the default exclusion active a count query runs, and it must narrow by the same
+  // flags, or the withheld count would describe a wider set than the results.
+  it('the hidden-count query carries isAnswered and isForwarded too', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }));
+    await client.searchEmails({ isAnswered: true, isForwarded: false });
+    const batch = callArguments(makeReq)[0].methodCalls;
+    assert.equal(batch.length, 3);
+    const countFilter = batch[2][1].filter;
+    const countConds: any[] = countFilter.operator === 'AND' ? countFilter.conditions : [countFilter];
+    assert.ok(countConds.some((c) => c.hasKeyword === '$answered'), 'count query lacks isAnswered');
+    assert.ok(countConds.some((c) => c.notKeyword === '$forwarded'), 'count query lacks isForwarded');
+  });
+
   it('hidden = broaderTotal - visibleTotal', async () => {
     stubRequests(client, async () =>
       queryResponse({ ids: ['e1'], list: [{ id: 'e1' }], total: 8, broaderTotal: 11 }));
