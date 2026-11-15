@@ -2592,13 +2592,15 @@ function isAddressedResourceMissing(err: unknown): boolean {
 }
 
 /**
- * A tsdav rejection as one redacted, neutralised, bounded line (#235): tsdav builds its text out
- * of the server's answer. The server's own error classes pass through by class; anything else it
- * throws is kept out of reach by position, since `davCall` encloses only the tsdav call.
+ * A tsdav rejection as one redacted, neutralised, bounded line inside `"…"` (#235): tsdav builds
+ * its text out of the server's answer, with the reason phrase mid-sentence, so bare it could end
+ * a sentence and write the next. The server's own error classes pass through by class; anything
+ * else it throws is kept out of reach by position, since `davCall` encloses only the tsdav call.
  */
 function renderDavRejection(err: unknown): unknown {
   if (err instanceof InvalidInputError || err instanceof PathAccessError || err instanceof McpError) return err;
-  return new Error(describeUntrustedAt(err instanceof Error ? err.message : String(err), DAV_REJECTION_ECHO_LIMIT));
+  const text = err instanceof Error ? err.message : String(err);
+  return new Error(`CalDAV request failed: "${describeUntrustedAt(text, DAV_REJECTION_ECHO_LIMIT)}"`);
 }
 
 /** Await one tsdav call, rendering its rejection. Wrap the call expression and nothing else. */

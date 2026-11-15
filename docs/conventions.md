@@ -1298,8 +1298,8 @@ can be supplied by the value, and what follows it reads as the server's words. A
 line and with no control character
 ([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)). The helpers' quote swap
 makes `"…"` the one span such a value cannot leave. The same holds for text a remote server
-writes: a DAV reason phrase and tsdav's login failure each end a sentence, so a full stop in them
-writes the next one, and both are quoted. In calendar refusals and confirmations the one bare
+writes: a DAV reason phrase, tsdav's login failure and a tsdav call's rejection can each carry a
+full stop that writes the next sentence, and all three are quoted. In calendar refusals and confirmations the one bare
 helper render left is the configured zone, which this server itself sets; whether a value may be
 bare is a property of where it came from, re-checked when a message changes. Outside the calendar
 messages bare renders remain, and no list of them is kept: `.map(describeUntrusted)` alone
@@ -1365,7 +1365,9 @@ is defined.
 <status> <statusText>. Raw response: <body>` is the server's answer, and it would otherwise reach
 the caller whole, line breaks and all. Every tsdav call in `caldav-client.ts` is awaited through
 `davCall`, which renders a rejection through `describeUntrustedAt` at `DAV_REJECTION_ECHO_LIMIT`.
-The rejection is the whole message, so it is not quoted. `davCall` encloses the call expression
+It is quoted inside a frame of this server's own, `CalDAV request failed: "…"`: the reason phrase
+sits mid-sentence in tsdav's text, and once line breaks are stripped a forged sentence joins
+straight on. `davCall` encloses the call expression
 and nothing else, because this server's own messages are plain `Error`s too and only position
 tells them apart; its own error classes pass through by class as a backstop. The addressed fetch
 is the exception: `isAddressedResourceMissing` reads tsdav's raw text to swallow a 404, so that
