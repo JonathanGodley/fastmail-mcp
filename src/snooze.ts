@@ -238,7 +238,7 @@ export const SNOOZE_TOOLS = [
   },
   {
     name: 'snooze_email',
-    description: 'Snooze a message until a time: it leaves the Inbox for Snoozed and Fastmail returns it to the Inbox, unread, at that time, as the Fastmail app does. Other labels are kept. Only an Inbox message can be snoozed; on a message already snoozed this changes the wake time. Returns { emailId, wakeAt, wakeInto }, wakeAt in UTC.' + EXPERIMENTAL_NOTE,
+    description: 'Snooze a message until a time: it leaves the Inbox for Snoozed and Fastmail returns it to the Inbox, unread, at that time, as the Fastmail app does. Other labels are kept. Only an Inbox message can be snoozed; on a message already snoozed this changes the wake time. Returns { emailId, wakeAt, wakeInto }, wakeAt in UTC, plus previousWakeAt on a message that was already in Snoozed (null when it had no wake time).' + EXPERIMENTAL_NOTE,
     inputSchema: {
       type: 'object',
       properties: {

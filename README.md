@@ -1102,7 +1102,7 @@ The server exchanges the cookie for the web client's bearer token itself, as the
 
 - **list_snoozed_emails**: List the messages in the Snoozed mailbox, soonest wake time first. Each item carries `wakeAt` (UTC) and `wakeInto`, the mailbox it returns to, normally the Inbox. Returns `{ total, emails }`.
   - Parameters: `limit` (default: 50, max: 100)
-- **snooze_email**: Snooze an Inbox message until a time. It leaves the Inbox for Snoozed, keeping its other labels, and at that time Fastmail returns it to the Inbox marked unread, which is what the Fastmail app writes. On a message already snoozed it changes the wake time only. A message outside the Inbox is refused. Returns `{ emailId, wakeAt, wakeInto }`.
+- **snooze_email**: Snooze an Inbox message until a time. It leaves the Inbox for Snoozed, keeping its other labels, and at that time Fastmail returns it to the Inbox marked unread, which is what the Fastmail app writes. On a message already snoozed it changes the wake time only. A message outside the Inbox is refused. Returns `{ emailId, wakeAt, wakeInto }`, plus `previousWakeAt` on a message that was already in Snoozed (null when it had no wake time).
   - Parameters: `emailId` (required), `until` (required: a datetime in the future; one with no offset is local time in `FASTMAIL_TIMEZONE` or the host's zone, as for `search_emails`' `after`)
 - **unsnooze_email**: Return a snoozed message to the Inbox now and clear its snooze. Its read state is left as it is. Returns `{ emailId, movedTo, wasWakeAt }`.
   - Parameters: `emailId` (required)
