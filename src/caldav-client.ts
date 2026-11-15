@@ -2299,11 +2299,11 @@ export const CALENDAR_UID_ECHO_LIMIT = 320;
 export const LOGIN_FAILURE_ECHO_LIMIT = 200;
 
 /**
- * The bound on the zone a calendar write's success sentence names (#182). A stored TZID is
- * invitation-authored, and Outlook writes Windows display names such as "(UTC+01:00) Belgrade,
- * Bratislava, Budapest, Ljubljana, Prague" as TZIDs. The success sentence is the only place the
- * caller learns what was written, so it gets the wider bound; the refusals that name a stored
- * zone only explain a conflict, so they keep `ZONE_ECHO_LIMIT`.
+ * The bound on the zone a calendar write's success sentence names (#182). Outlook writes Windows
+ * display names such as "(UTC+01:00) Belgrade, Bratislava, Budapest, Ljubljana, Prague" as TZIDs.
+ * The success sentence is the only place the caller learns what was written, so it gets the wider
+ * bound; the refusals that name a stored zone only explain a conflict, so they keep
+ * `ZONE_ECHO_LIMIT`.
  */
 export const WRITTEN_ZONE_ECHO_LIMIT = 100;
 
