@@ -538,8 +538,8 @@ describe('recovery notes name only parameters the tool has', () => {
   });
 });
 
-// A tool's reference entry in docs/reference/tools.md: the indented lines under its `- **<name>**: …` bullet, up
-// to the next unindented list item. The entry LINE follows the structural contract at the top
+// A tool's entry in docs/reference/tools.md: the indented lines under its `- **<name>**: …`
+// bullet, up to the next unindented list item. The entry LINE follows the structural contract at the top
 // of readme-inventory.test.ts; the `- Parameters: …` line sits in the bullets beneath it.
 function collectReadmeToolEntries(): Map<string, string> {
   const lines = readFileSync(join(SRC_DIR, '..', 'docs', 'reference', 'tools.md'), 'utf8')
@@ -578,8 +578,8 @@ describe('docs/reference/tools.md documents every tool parameter', () => {
   it('mentions each declared parameter in the tool entry that has it', () => {
     const params = collectToolParams();
     const entries = collectReadmeToolEntries();
-    // A floor on both scans, so a restructured tool reference or TOOLS literal fails here rather
-    // than passing vacuously against an empty set on either side.
+    // A floor on both scans, so a restructured tool reference or TOOLS literal fails here
+    // rather than passing vacuously against an empty set on either side.
     assert.ok(params.size >= 30, `found only ${params.size} tools in the TOOLS literal; the schema scan has probably stopped matching`);
     assert.ok(entries.size >= 30, `found only ${entries.size} docs/reference/tools.md tool entries; the scan has probably stopped matching`);
 
@@ -770,8 +770,8 @@ describe('archive_email is wired to the strict string-array coercer', () => {
   });
 
   it('serialises counts alongside results, which both descriptions promise', () => {
-    // The tool description and docs/reference/tools.md both tell a caller the counts sum to the number
-    // of distinct ids they passed. A bucket with no entries produces no line, so `counts`
+    // The tool description and docs/reference/tools.md both tell a caller the counts sum to
+    // the number of distinct ids they passed. A bucket with no entries produces no line, so `counts`
     // has to be in the JSON item; serialising `result.results` alone passes every other
     // test in the repo.
     const lines = readLines('index.ts');

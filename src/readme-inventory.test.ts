@@ -1,9 +1,9 @@
-// Drift guards keeping docs/reference/tools.md's tool reference and the `check_function_availability` report
-// in step with the `TOOLS` array. Both are hand-maintained lists of tool names, and both go
+// Drift guards keeping docs/reference/tools.md's tool reference, the README's tool list and
+// the `check_function_availability` report in step with the `TOOLS` array. Both are hand-maintained lists of tool names, and both go
 // stale when a tool is added and its entry is never written.
 //
 // A count-only check passes when the "Available Tools (N Total)" heading is bumped but the
-// entry is missing, so the assertion is SET EQUALITY between TOOLS and docs/reference/tools.md, in both
+// entry is missing, so the assertion is SET EQUALITY between TOOLS and the reference, in both
 // directions (the reverse catches an entry left behind by a removed tool), and the heading
 // number is derived from the set rather than checked on its own.
 //
@@ -11,7 +11,7 @@
 // rewrite a tool's name or description literal, so the read is accurate whether or not
 // dist/ is current.
 //
-// TOOL REFERENCE STRUCTURAL CONTRACT (docs/reference/tools.md) - what counts as a tool's reference entry:
+// TOOL REFERENCE CONTRACT - what counts as a tool's entry in docs/reference/tools.md:
 //
 //   An UNINDENTED list item whose first content is the tool name in bold, immediately
 //   followed by a colon:  `- **send_draft**: Send an existing draft email …`
@@ -22,8 +22,8 @@
 // is not counted, so a tool listed only there is still reported as undocumented. Nested
 // detail bullets are indented, so they never match.
 //
-// If you restructure that part of docs/reference/tools.md, keep the shape above or real entries will stop
-// counting here and this guard will report them as missing.
+// If you restructure that part of docs/reference/tools.md, keep the shape above or real
+// entries will stop counting here and this guard will report them as missing.
 //
 // AVAILABILITY REPORT CONTRACT - what `check_function_availability` has to list:
 //

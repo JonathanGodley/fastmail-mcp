@@ -89,7 +89,7 @@ Then set the environment variables:
 | `FASTMAIL_BASE_URL` | Optional | JMAP base URL. Defaults to `https://api.fastmail.com`; only Fastmail's API hosts are accepted. |
 | `FASTMAIL_ALLOW_UNSAFE_BASE_URL` | Optional | `true` or `1` widens the host allowlist for a self-hosted JMAP server. HTTPS is still required. |
 | `FASTMAIL_DOWNLOAD_DIR` | Optional | Where `download_attachment` saves, confined to this directory. Defaults to `~/Downloads/fastmail-mcp/`. |
-| `FASTMAIL_ATTACH_DIR` | Optional | Turns on attaching local files to outgoing mail, confined to this directory. Unset, it is off. |
+| `FASTMAIL_ATTACH_DIR` | Optional | Turns on attaching local files to outgoing mail, confined to this directory. |
 | `FASTMAIL_ALLOW_BLOB_ATTACH` | Optional | `true` or `1` allows attaching content already in the account (a `blobId`, or one part of a message). |
 | `FASTMAIL_TIMEZONE` | Optional | Full IANA zone name for email dates and calendar times. Defaults to the host's zone; an invalid name stops the server starting. |
 | `FASTMAIL_CALDAV_USERNAME` | For calendar tools | Your Fastmail address. See [CalDAV setup](docs/reference/configuration.md#caldav-setup). |
@@ -98,13 +98,13 @@ Then set the environment variables:
 | `FASTMAIL_EXPERIMENTAL_SNOOZE` | Optional | `1` turns on the experimental snooze tools. |
 | `FASTMAIL_WEB_COOKIE` | For snooze tools | The session cookie of a Fastmail web login. Read [Experimental: snooze](docs/reference/tools.md#experimental-snooze) before setting it. |
 
-The same variables can go in `~/.fastmail-mcp/.env` instead; see [The settings file](docs/reference/configuration.md#the-settings-file). To install as a Claude Desktop Extension instead, see [Install as a Claude Desktop Extension (DXT)](docs/reference/configuration.md#install-as-a-claude-desktop-extension-dxt).
+The same variables can go in `~/.fastmail-mcp/.env` instead; see [The settings file](docs/reference/configuration.md#the-settings-file). To install as a Claude Desktop Extension, see [Install as a Claude Desktop Extension (DXT)](docs/reference/configuration.md#install-as-a-claude-desktop-extension-dxt).
 
 If the calendar or contacts tools report themselves unavailable or forbidden, run `check_function_availability` for setup guidance.
 
 ## Tools
 
-The server has 41 tools, listed here by group. Each one's parameters and behaviour are in [docs/reference/tools.md](docs/reference/tools.md).
+The server has 41 tools. Each one's parameters and behaviour are in [docs/reference/tools.md](docs/reference/tools.md).
 
 | Group | Tools |
 |---|---|
