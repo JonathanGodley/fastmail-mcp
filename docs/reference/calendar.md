@@ -147,6 +147,8 @@ The ambiguity refusal is raised **before** the repeating-event refusal below.
 
 **What counts as repeating** is read off the stored record, not off the row you passed, and any one of four markers is enough: an `RRULE`; an `RDATE`, which is how a series **lists** its occurrences instead of stating a rule ([#162](https://github.com/JonathanGodley/fastmail-mcp/issues/162)); more than one `VEVENT` in the record, since one CalDAV resource is one UID; or a `RECURRENCE-ID` on any block, which makes that block an edited occurrence. The test fails **closed**.
 
+**A record with an event nested inside another component**, or a component closed out of order, is refused by `update_calendar_event` and `delete_calendar_event` whether it repeats or not, before any other check, because such a layout can hide a repeat rule or an attendee from those checks ([#237](https://github.com/JonathanGodley/fastmail-mcp/issues/237)). Use the Fastmail web interface for it. The read tools still list and return it as before.
+
 `create_calendar_event` cannot make a repeating event, so this server will not rewrite or destroy a series it could not put back.
 
 ### Deleting one occurrence

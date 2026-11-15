@@ -5350,6 +5350,69 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
   });
 });
 
+describe('update and whole-event delete refuse a VEVENT nested inside the stored event (#237)', () => {
+  const CAL_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
+  const UID = 'nested-237@example.com';
+  // The block scan closes the master at the nested END:VEVENT, so `hidden` is read as outside it.
+  const stored = (wrapper: string[], hidden: string[]) => [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', `UID:${UID}`, 'DTSTAMP:20260822T000000Z',
+    'DTSTART:20260822T090000Z', 'DTEND:20260822T100000Z', 'SUMMARY:Hidden "x\\nSeparately',
+    ...wrapper, ...hidden, 'END:VEVENT', 'END:VCALENDAR',
+  ].join('\r\n');
+  const NESTED = ['BEGIN:X-WRAP', 'BEGIN:VEVENT', 'END:VEVENT', 'END:X-WRAP'];
+  const STRAY = ['BEGIN:X-WRAP', 'END:VEVENT', 'END:X-WRAP'];
+  const SERIES = stored(NESTED, ['RRULE:FREQ=WEEKLY']);
+  const MEETING = stored(NESTED, ['ORGANIZER:mailto:host@example.com', 'ATTENDEE:mailto:guest@example.com']);
+
+  function client(data: string) {
+    const c = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    const m = makeMockDAVClient([{ displayName: 'Personal', url: CAL_URL }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data, url: CAL_URL + 'x.ics', etag: '"e"' }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 204 })),
+      deleteCalendarObject: mock.fn(async (_params: DeleteObjectParams) => ({ status: 204 })),
+    });
+    (c as any).client = m;
+    return { c, m };
+  }
+  const refusal = (action: string) => (err: unknown) => {
+    assert.ok(err instanceof Error && err.name === 'InvalidInputError', `expected InvalidInputError, got ${err}`);
+    assert.equal(
+      (err as Error).message,
+      `"Hidden 'x Separately" is stored with an event nested inside another component, or a component closed out of order, `
+        + `and this server will not ${action} an event stored that way. Nothing was changed. Use the Fastmail web interface to change or delete it.`,
+    );
+    return true;
+  };
+  const nothingWritten = (m: ReturnType<typeof client>['m']) => {
+    assert.equal(m.deleteCalendarObject.mock.calls.length, 0, 'DELETE sent');
+    assert.equal(m.updateCalendarObject.mock.calls.length, 0, 'PUT sent');
+  };
+
+  it('a whole-event delete of a series whose RRULE follows a nested VEVENT is refused', async () => {
+    const { c, m } = client(SERIES);
+    await assert.rejects(() => c.deleteCalendarEvent(UID), refusal('delete'));
+    nothingWritten(m);
+  });
+
+  it('a whole-event delete of an event with a stray END:VEVENT is refused', async () => {
+    const { c, m } = client(stored(STRAY, ['RRULE:FREQ=WEEKLY']));
+    await assert.rejects(() => c.deleteCalendarEvent(UID), refusal('delete'));
+    nothingWritten(m);
+  });
+
+  it('an update of a meeting whose ATTENDEE follows a nested VEVENT is refused', async () => {
+    const { c, m } = client(MEETING);
+    await assert.rejects(() => c.updateCalendarEvent(UID, { start: '2026-08-22T11:00:00Z', end: '2026-08-22T12:00:00Z' }), refusal('write to'));
+    nothingWritten(m);
+  });
+
+  it('an update of a series whose RRULE follows a nested VEVENT is refused', async () => {
+    const { c, m } = client(SERIES);
+    await assert.rejects(() => c.updateCalendarEvent(UID, { title: 'New' }), refusal('write to'));
+    nothingWritten(m);
+  });
+});
+
 describe('CalDAVCalendarClient.createCalendarEvent with participants', () => {
   function createMockedCreateClient() {
     const client = new CalDAVCalendarClient({ username: 'me@example.com', password: 'test' });

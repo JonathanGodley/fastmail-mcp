@@ -482,31 +482,56 @@ interface OccurrenceSeries {
 }
 
 /**
- * The names of the resource's properties, read over the WHOLE text rather than per VEVENT block,
- * so a component `extractVEventBlocks` cannot see past cannot hide a line from the series gates.
- * A top-level VTIMEZONE's RRULE and RDATE lines are left out: they are daylight rules, not the
- * event's. Undefined when the component markers do not nest, or a VEVENT is anywhere but
- * directly inside the VCALENDAR, which is the layout that hides lines from the block scan.
+ * Walk a resource's logical lines with the stack of open components, calling `onProperty` for
+ * each property line. Returns false when the component markers do not nest, or a VEVENT opens
+ * anywhere but directly inside the VCALENDAR: the layouts that hide lines from
+ * `extractVEventBlocks`, which closes a block at the first END:VEVENT (#146, #237).
  */
-function resourcePropertyNames(icalData: string): string[] | undefined {
+function walkICalComponents(icalData: string, onProperty: (line: string, stack: string[]) => void = () => {}): boolean {
   const stack: string[] = [];
-  const names: string[] = [];
   for (const line of unfoldedICalLines(icalData)) {
     const marker = markerLine(line);
     const begin = marker && /^BEGIN:(.+)$/.exec(marker);
     const end = marker && /^END:(.+)$/.exec(marker);
     if (begin) {
-      if (begin[1] === 'VEVENT' && (stack.length !== 1 || stack[0] !== 'VCALENDAR')) return undefined;
+      if (begin[1] === 'VEVENT' && (stack.length !== 1 || stack[0] !== 'VCALENDAR')) return false;
       stack.push(begin[1]);
     } else if (end) {
-      if (stack.pop() !== end[1]) return undefined;
+      if (stack.pop() !== end[1]) return false;
     } else {
-      const name = /^([A-Za-z0-9-]+)[;:]/.exec(line)?.[1]?.toUpperCase();
-      const daylightRule = stack[0] === 'VCALENDAR' && stack[1] === 'VTIMEZONE' && (name === 'RRULE' || name === 'RDATE');
-      if (name && !daylightRule) names.push(name);
+      onProperty(line, stack);
     }
   }
-  return stack.length === 0 ? names : undefined;
+  return stack.length === 0;
+}
+
+/**
+ * The refusal update and whole-event delete raise on a stored resource `walkICalComponents`
+ * rejects: every gate they run reads the resource block by block, so such a layout can hide an
+ * RRULE or an ATTENDEE from them (#237).
+ */
+function hiddenLayoutRefusal(action: 'update' | 'delete', title: string): InvalidInputError {
+  return new InvalidInputError(
+    `"${echoCallerText(title)}" is stored with an event nested inside another component, or a component closed out of order, `
+    + `and this server will not ${action === 'update' ? 'write to' : 'delete'} an event stored that way. Nothing was changed. `
+    + 'Use the Fastmail web interface to change or delete it.',
+  );
+}
+
+/**
+ * The names of the resource's properties, read over the WHOLE text rather than per VEVENT block,
+ * so a component `extractVEventBlocks` cannot see past cannot hide a line from the series gates.
+ * A top-level VTIMEZONE's RRULE and RDATE lines are left out: they are daylight rules, not the
+ * event's. Undefined for a layout `walkICalComponents` rejects.
+ */
+function resourcePropertyNames(icalData: string): string[] | undefined {
+  const names: string[] = [];
+  const nests = walkICalComponents(icalData, (line, stack) => {
+    const name = /^([A-Za-z0-9-]+)[;:]/.exec(line)?.[1]?.toUpperCase();
+    const daylightRule = stack[0] === 'VCALENDAR' && stack[1] === 'VTIMEZONE' && (name === 'RRULE' || name === 'RDATE');
+    if (name && !daylightRule) names.push(name);
+  });
+  return nests ? names : undefined;
 }
 
 /**
@@ -4294,6 +4319,10 @@ export class CalDAVCalendarClient {
       throw new Error('Cannot update event: no iCal data found');
     }
 
+    if (!walkICalComponents(obj.data)) {
+      throw hiddenLayoutRefusal('update', calendarObjectTitle(obj.data, eventId));
+    }
+
     // Before ANY argument validation: nothing in the arguments can make this legal. Keyed on
     // the resolved RESOURCE, so the url form of the id reaches it too (#146).
     if (isRecurringSeriesResource(obj.data)) {
@@ -4534,10 +4563,15 @@ export class CalDAVCalendarClient {
 
     // Keyed on the resolved RESOURCE, not the argument's shape, so passing a row's url cannot
     // bypass it (#146).
-    const isSeries = isRecurringSeriesResource(obj.data);
     const title = calendarObjectTitle(obj.data, eventId);
-    // `null` reads as absent (docs/conventions.md, lenient input coercion).
-    if (occurrence === undefined || occurrence === null) {
+    // `null` reads as absent (docs/conventions.md, lenient input coercion). The occurrence path
+    // refuses the same layouts through `assessOccurrenceSeries`, with its own reason.
+    const wholeEvent = occurrence === undefined || occurrence === null;
+    if (wholeEvent && obj.data && !walkICalComponents(obj.data)) {
+      throw hiddenLayoutRefusal('delete', title);
+    }
+    const isSeries = isRecurringSeriesResource(obj.data);
+    if (wholeEvent) {
       if (isSeries) {
         const assessed = assessOccurrenceSeries(obj.data);
         throw recurringSeriesRefusal('delete', title, 'reason' in assessed ? assessed.reason : undefined);
