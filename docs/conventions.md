@@ -1354,6 +1354,17 @@ the former removes the Unicode format characters the control-character scrub lea
 The width is `describeUntrustedAt` at `LOGIN_FAILURE_ECHO_LIMIT`, whose reason is stated where it
 is defined.
 
+**A tsdav call's rejection is the same class of text**
+([#235](https://github.com/JonathanGodley/fastmail-mcp/issues/235)): `Collection query failed:
+<status> <statusText>. Raw response: <body>` is the server's answer, and it would otherwise reach
+the caller whole, line breaks and all. Every tsdav call in `caldav-client.ts` is awaited through
+`davCall`, which renders a rejection through `describeUntrustedAt` at `DAV_REJECTION_ECHO_LIMIT`.
+The rejection is the whole message, so it is not quoted. `davCall` encloses the call expression
+and nothing else, because this server's own messages are plain `Error`s too and only position
+tells them apart; its own error classes pass through by class as a backstop. The addressed fetch
+is the exception: `isAddressedResourceMissing` reads tsdav's raw text to swallow a 404, so that
+site renders only on its rethrow branch.
+
 **The wide form is a second NAME, not an optional parameter on `describeUntrusted`.** Call sites across this codebase render lists with a bare
 `.map(describeUntrusted)`, and `Array.prototype.map` passes the array INDEX as the second
 argument: a positional bound there becomes 0 for every first element and truncates it to a lone

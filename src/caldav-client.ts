@@ -1,8 +1,9 @@
 import { DAVClient, DAVCalendar, DAVCalendarObject, DAVResponse, davRequest, urlEquals } from 'tsdav';
+import { McpError } from '@modelcontextprotocol/sdk/types.js';
 // Caller-fixable input must throw coerce.ts's tagged InvalidInputError, which the CallTool
 // boundary maps to InvalidParams; a plain Error surfaces as InternalError. See
 // docs/conventions.md.
-import { InvalidInputError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS, zoneOffsetMsAt, utcMsFromComponents } from './coerce.js';
+import { InvalidInputError, PathAccessError, describeUntrustedAt, etcGmtOffsetNote, etcGmtUtcOffset, requireNonEmpty, validateClearFields, coerceCalendarWindowStart, coerceCalendarWindowEnd, startOfLocalDayUtcIso, describeTimezone, resolveCalendarInstantMs, echoCallerText, ZONE_ECHO_LIMIT, resolveUsableTimezone, isUsableTimezone, validateCallerTimezone, canonicalZoneName, GREGORIAN_CYCLE_YEARS, zoneOffsetMsAt, utcMsFromComponents } from './coerce.js';
 import { trimEnd } from './trim-end.js';
 import { foldICalLine } from './ical-fold.js';
 // A calendar window interprets local dates in the same zone the rest of the server displays,
@@ -2367,6 +2368,13 @@ export const CALENDAR_UID_ECHO_LIMIT = 320;
 export const LOGIN_FAILURE_ECHO_LIMIT = 200;
 
 /**
+ * The bound on a tsdav call's rejection (#235). tsdav's prefix, a status and the longest standard
+ * reason phrase take under 70 characters, leaving about 130 for the start of the server's body.
+ * Derived, not measured.
+ */
+export const DAV_REJECTION_ECHO_LIMIT = 200;
+
+/**
  * The bound on the zone a calendar write's success sentence names (#182). Outlook writes Windows
  * display names such as "(UTC+01:00) Belgrade, Bratislava, Budapest, Ljubljana, Prague" as TZIDs.
  * The success sentence is the only place the caller learns what was written, so it gets the wider
@@ -2583,6 +2591,25 @@ function isAddressedResourceMissing(err: unknown): boolean {
   return /^Collection query failed: 4(?:04|10)\b/.test(message);
 }
 
+/**
+ * A tsdav rejection as one redacted, neutralised, bounded line (#235): tsdav builds its text out
+ * of the server's answer. The server's own error classes pass through by class; anything else it
+ * throws is kept out of reach by position, since `davCall` encloses only the tsdav call.
+ */
+function renderDavRejection(err: unknown): unknown {
+  if (err instanceof InvalidInputError || err instanceof PathAccessError || err instanceof McpError) return err;
+  return new Error(describeUntrustedAt(err instanceof Error ? err.message : String(err), DAV_REJECTION_ECHO_LIMIT));
+}
+
+/** Await one tsdav call, rendering its rejection. Wrap the call expression and nothing else. */
+async function davCall<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    throw renderDavRejection(err);
+  }
+}
+
 /** The calendar name a message shows, with the url as the handle that always exists. */
 function calendarLabel(calendar: DAVCalendar): string {
   return unwrapDisplayName(calendar.displayName)
@@ -2612,12 +2639,12 @@ async function settleAmbiguousRecurrence(
 ): Promise<void> {
   if (undecided.size === 0) return;
 
-  const responses = await client.calendarMultiGet({
+  const responses = await davCall(() => client.calendarMultiGet({
     url: calendar.url,
     props: { 'd:getetag': {}, 'c:calendar-data': {} },
     objectUrls: [...undecided.values()].map(entry => entry.requestHref),
     depth: '1',
-  });
+  }));
 
   const answered = new Set<string>();
   for (const res of responses) {
@@ -3388,7 +3415,7 @@ export class CalDAVCalendarClient {
       return response;
     };
 
-    const calendars = await client.fetchCalendars({ fetch: capturingFetch });
+    const calendars = await davCall(() => client.fetchCalendars({ fetch: capturingFetch }));
     // An empty home URL needs no case: `findBrokenCalendarHomeCollections` reports nothing for it.
     const homeUrl = (client as any).account?.homeUrl;
     const brokenCollections = typeof homeUrl === 'string' && capturedHomeListing !== undefined
@@ -3419,11 +3446,11 @@ export class CalDAVCalendarClient {
     if (!homeUrl) {
       throw new Error('Calendar discovery failed: the CalDAV account has no calendar home URL.');
     }
-    const responses = await client.propfind({
+    const responses = await davCall(() => client.propfind({
       url: homeUrl,
       props: { 'd:resourcetype': {} },
       depth: '1',
-    });
+    }));
     assertDavOk(responses, 'discover calendars');
   }
 
@@ -3556,11 +3583,11 @@ export class CalDAVCalendarClient {
 
     const allEvents: CalendarEvent[] = [];
     for (const cal of targetCalendars) {
-      const objects = await client.fetchCalendarObjects({
+      const objects = await davCall(() => client.fetchCalendarObjects({
         calendar: cal,
         ...fetchOptions,
         urlFilter: calendarResourceUrlFilter(cal.url),
-      });
+      }));
       // Settled in one request per calendar; see `settleAmbiguousRecurrence` (#155).
       const undecided = new Map<string, UndecidedResource>();
       for (const obj of objects) {
@@ -3673,11 +3700,11 @@ export class CalDAVCalendarClient {
     const uidHolders = async (uid: string) => {
       const holders: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject }> = [];
       for (const calendar of selectable) {
-        const objects = await client.fetchCalendarObjects({
+        const objects = await davCall(() => client.fetchCalendarObjects({
           calendar,
           filters: uidEqualsFilter(uid),
           urlFilter: calendarResourceUrlFilter(calendar.url),
-        });
+        }));
         for (const obj of objects) {
           // LOAD-BEARING: the server matches case-insensitively; see `uidEqualsFilter`.
           if (ownUid(obj) === uid) holders.push({ calendar, obj });
@@ -3701,7 +3728,9 @@ export class CalDAVCalendarClient {
         // it would drop a copy from the ambiguity count so a write that should be refused goes
         // through. A collection-level 404 is safe to swallow: this collection answered the UID
         // query just above, so what is left is a race meaning the same thing.
-        if (!isAddressedResourceMissing(err)) throw err;
+        // Classified raw, THEN rendered: through `davCall`, a non-Error throw would become an
+        // Error carrying its text and be swallowed here as not-found.
+        if (!isAddressedResourceMissing(err)) throw renderDavRejection(err);
         continue;
       }
       for (const obj of objects) collect(calendar, obj);
@@ -3878,11 +3907,11 @@ export class CalDAVCalendarClient {
     // Trailing CRLF per RFC 5545 §3.1.
     const ical = icalLines.join('\r\n') + '\r\n';
 
-    const createResp = await client.createCalendarObject({
+    const createResp = await davCall(() => client.createCalendarObject({
       calendar: targetCal,
       filename: `${uid}.ics`,
       iCalString: ical,
-    });
+    }));
     assertDavOk(createResp, 'create calendar event');
 
     return {
@@ -4137,7 +4166,7 @@ export class CalDAVCalendarClient {
     }
 
     obj.data = data;
-    const updateResp = await client.updateCalendarObject({ calendarObject: obj });
+    const updateResp = await davCall(() => client.updateCalendarObject({ calendarObject: obj }));
     assertDavOk(updateResp, 'update calendar event');
 
     return {
@@ -4171,7 +4200,7 @@ export class CalDAVCalendarClient {
       throw recurringSeriesRefusal('delete', calendarObjectTitle(obj.data, eventId));
     }
 
-    const deleteResp = await client.deleteCalendarObject({ calendarObject: obj });
+    const deleteResp = await davCall(() => client.deleteCalendarObject({ calendarObject: obj }));
     assertDavOk(deleteResp, 'delete calendar event');
     const uid = ownUid(obj) || eventId;
     return { eventId: uid, url: obj.url, brokenCollections: asBrokenCollectionsField(brokenCollections) };

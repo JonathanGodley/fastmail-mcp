@@ -42,6 +42,7 @@ import {
   CALENDAR_NAME_LIST_CAP,
   AMBIGUOUS_COPY_URL_ECHO_LIMIT,
   LOGIN_FAILURE_ECHO_LIMIT,
+  DAV_REJECTION_ECHO_LIMIT,
   CALENDAR_UID_ECHO_LIMIT,
   isBrokenCalendarHomeEntry,
   findBrokenCalendarHomeCollections,
@@ -2339,11 +2340,13 @@ describe('CalDAVCalendarClient event lookup', () => {
     });
     // The string SPELLS the swallowed class, so only reading the message off a real Error can
     // tell the two apart: a reader that stringified whatever it was handed would swallow this
-    // and answer not-found.
+    // and answer not-found. It is rendered only after it is classified (#235), so it arrives
+    // as an Error carrying its text, never as "Calendar event not found".
     await assert.rejects(
       () => client.getCalendarEventById(PERSONAL_URL + 'x.ics'),
       (err: unknown) => {
-        assert.equal(err, 'Collection query failed: 404 Not Found');
+        assert.ok(err instanceof Error, `expected an Error, got ${typeof err}`);
+        assert.equal(err.message, 'Collection query failed: 404 Not Found');
         return true;
       },
     );
@@ -13356,5 +13359,89 @@ describe('a wholly lower-cased stored event is updated in place', () => {
     const event = parseCalendarObject({ data: lower, url }, { configuredZone: 'UTC' });
     assert.equal(event.id, 'x1');
     assert.equal(event.start, '2026-04-10T09:00:00Z');
+  });
+});
+
+// A tsdav call's rejection reaches the caller as one redacted, neutralised, bounded line (#235).
+// tsdav builds `Collection query failed: <status> <statusText>. Raw response: <body>` out of the
+// server's answer, so the text is remote-authored, like the login refusal's.
+describe('a tsdav rejection is rendered as an untrusted value at every call site (#235)', () => {
+  const CAL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
+  const STORED_URL = CAL + 'e.ics';
+  const FAKE_BEARER = 'Bearer abcdefghijklmnopqrstuvwxyz0123456789'; // allowlist-secret: the alphabet, long enough only to clear the redactor's length floor
+  const HOSTILE =
+    `Collection query failed: 500 Internal Server Error. Raw response: <d:error>\r\n`
+    + `Separately, the token ${FAKE_BEARER} is valid.\n${'z'.repeat(300)}`;
+  const STORED = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', 'UID:one@fm', 'DTSTAMP:20260301T000000Z',
+    'DTSTART:20260325T090000Z', 'DTEND:20260325T100000Z', 'SUMMARY:Stored', 'END:VEVENT', 'END:VCALENDAR',
+  ].join('\r\n');
+
+  const reject = async (): Promise<never> => { throw new Error(HOSTILE); };
+  const storedObjects = async () => [{ data: STORED, url: STORED_URL, etag: FIXTURE_ETAG }];
+
+  function withDav(dav: Record<string, unknown>): CalDAVCalendarClient {
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    (client as any).client = { login: mock.fn(async () => {}), calendarMultiGet: defaultCalendarMultiGet(), ...dav };
+    return client;
+  }
+  const listing = (rest: Record<string, unknown>) =>
+    withDav({ fetchCalendars: mock.fn(async () => [{ displayName: 'Personal', url: CAL }]), ...rest });
+
+  const SITES: Array<[string, () => Promise<unknown>]> = [
+    ['calendarMultiGet in settleAmbiguousRecurrence', () =>
+      listing({ fetchCalendarObjects: mock.fn(storedObjects), calendarMultiGet: mock.fn(reject) })
+        .getCalendarEvents(undefined, 50, '2026-03-24', '2026-03-27')],
+    ['fetchCalendars in discoverCalendars', () =>
+      withDav({ fetchCalendars: mock.fn(reject) }).getCalendars()],
+    ['propfind in assertCalendarHomeReachable', () =>
+      withDav({
+        fetchCalendars: mock.fn(async () => []),
+        account: { homeUrl: CAL },
+        propfind: mock.fn(reject),
+      }).getCalendars()],
+    ['fetchCalendarObjects in getCalendarEvents', () =>
+      listing({ fetchCalendarObjects: mock.fn(reject) }).getCalendarEvents(undefined, 50, '2026-03-24', '2026-03-27')],
+    ['fetchCalendarObjects in the UID search', () =>
+      listing({ fetchCalendarObjects: mock.fn(reject) }).getCalendarEventById('one@fm')],
+    ['fetchCalendarObjects for an addressed URL', () =>
+      listing({
+        fetchCalendarObjects: mock.fn(async (params: FetchObjectsParams) => {
+          if ((params as { objectUrls?: string[] }).objectUrls) throw new Error(HOSTILE);
+          return [];
+        }),
+      }).getCalendarEventById(STORED_URL)],
+    ['createCalendarObject', () =>
+      listing({ createCalendarObject: mock.fn(reject) }).createCalendarEvent({
+        calendarId: 'Personal', title: 'New', start: '2026-04-07T14:00:00Z', end: '2026-04-07T15:00:00Z',
+      })],
+    ['updateCalendarObject', () =>
+      listing({ fetchCalendarObjects: mock.fn(storedObjects), updateCalendarObject: mock.fn(reject) })
+        .updateCalendarEvent('one@fm', { title: 'Renamed' })],
+    ['deleteCalendarObject', () =>
+      listing({ fetchCalendarObjects: mock.fn(storedObjects), deleteCalendarObject: mock.fn(reject) })
+        .deleteCalendarEvent('one@fm')],
+  ];
+
+  for (const [site, call] of SITES) {
+    it(`renders the rejection from ${site}`, async () => {
+      await assert.rejects(call, (err: Error) => {
+        assert.ok(err.message.startsWith('Collection query failed: 500 Internal Server Error.'), err.message);
+        assert.doesNotMatch(err.message, /[\r\n\u2028\u2029]/, 'the message must stay one line');
+        assert.ok(!err.message.includes('abcdefghijklmnopqrstuvwxyz0123456789'), 'the credential must not survive');
+        assert.ok(err.message.endsWith('\u2026'), 'a body past the bound is cut with a visible marker');
+        assert.equal(err.message, describeUntrustedAt(HOSTILE, DAV_REJECTION_ECHO_LIMIT));
+        return true;
+      });
+    });
+  }
+
+  it('lets an error of the server\'s own class through unchanged, by identity', async () => {
+    const own = new InvalidInputError('A "quoted" refusal\nof the server\'s own.');
+    const client = listing({ fetchCalendarObjects: mock.fn(async () => { throw own; }) });
+    await assert.rejects(() => client.getCalendarEventById('one@fm'), (err: unknown) => {
+      assert.equal(err, own);
+      return true;
+    });
   });
 });
