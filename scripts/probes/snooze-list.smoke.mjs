@@ -42,6 +42,7 @@ try {
     console.log('simplified keys:', keys.join(', '));
     check('simplified: carries wakeAt and wakeInto', 'wakeAt' in item && 'wakeInto' in item);
     check('simplified: date is local time with an offset', /[+-]\d\d:\d\d$/.test(item.date ?? ''));
+    check('simplified: wakeAt is local time with an offset', /[+-]\d\d:\d\d$/.test(item.wakeAt ?? ''));
     check('simplified: roles include snoozed', (item.roles ?? []).includes('snoozed'));
     check('simplified: from is a string', typeof item.from === 'string');
     check('simplified: no raw snoozed object leaks through', !('snoozed' in item));

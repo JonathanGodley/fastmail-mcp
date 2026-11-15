@@ -1,7 +1,7 @@
 // The experimental snooze tools (#35), through an injected transport and an injected fetch.
 // The shapes the fakes answer with are the ones scripts/probes/snooze-*.probe.mjs measured.
 
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { InvalidInputError } from './coerce.js';
@@ -10,7 +10,7 @@ import {
   listSnoozedEmails, parseWakeTime, snoozeEmail, unsnoozeEmail,
 } from './snooze.js';
 import type { SnoozeTransport } from './snooze.js';
-import { simplifyEmail } from './email-formatter.js';
+import { setDefaultTimezone, simplifyEmail } from './email-formatter.js';
 import { EMAIL_PROPERTIES_COMPACT } from './jmap-client.js';
 import { projectListEmail } from './field-projection.js';
 
@@ -59,6 +59,10 @@ function fakeAccount(emails: Record<string, any>, opts: { refuse?: any } = {}) {
 
 const out = (content: any) => JSON.parse(content[0].text);
 
+// Wake times are reported in the configured zone; pin one so the expected values hold on any host.
+before(() => setDefaultTimezone('Australia/Sydney'));
+after(() => setDefaultTimezone(undefined));
+
 describe('parseWakeTime', () => {
   it('takes an offset as written and returns UTC', () => {
     assert.equal(parseWakeTime('2026-11-03T09:00:00+11:00', NOW), '2026-11-02T22:00:00Z');
@@ -67,7 +71,7 @@ describe('parseWakeTime', () => {
     assert.equal(parseWakeTime('2026-11-03T09:00:00', NOW, 'Australia/Sydney'), '2026-11-02T22:00:00Z');
   });
   it('refuses a time that is not in the future', () => {
-    assert.throws(() => parseWakeTime('2026-11-02T09:00:00Z', NOW), (e: any) => e instanceof InvalidInputError && /not in the future/.test(e.message));
+    assert.throws(() => parseWakeTime('2026-11-02T09:00:00Z', NOW), (e: any) => e instanceof InvalidInputError && /not in the future: .* is 2026-11-02T20:00:00\+11:00$/.test(e.message));
   });
   it('refuses a missing value', () => {
     assert.throws(() => parseWakeTime(undefined, NOW), (e: any) => e instanceof InvalidInputError && /until is required/.test(e.message));
@@ -88,7 +92,7 @@ describe('snooze_email', () => {
       snoozed: { until: '2026-11-02T22:00:00Z', setKeywords: WAKE_KEYWORDS },
     } }]);
     assert.deepEqual(emails.e1.mailboxIds, { 'mb-label': true, 'mb-snoozed': true });
-    assert.deepEqual(result, { emailId: 'e1', wakeAt: '2026-11-02T22:00:00Z', wakeInto: 'Inbox' });
+    assert.deepEqual(result, { emailId: 'e1', wakeAt: '2026-11-03T09:00:00+11:00', wakeInto: 'Inbox' });
   });
 
   it('changes only the wake time of a message already snoozed', async () => {
@@ -96,7 +100,13 @@ describe('snooze_email', () => {
     const { t, sets } = fakeAccount(emails);
     const result = out(await snoozeEmail({ emailId: 'e1', until: '2026-11-05T00:00:00Z' }, t, NOW));
     assert.deepEqual(sets(), [{ e1: { 'snoozed/until': '2026-11-05T00:00:00Z' } }]);
-    assert.equal(result.previousWakeAt, '2026-12-01T00:00:00Z');
+    assert.deepEqual(result, { emailId: 'e1', wakeAt: '2026-11-05T11:00:00+11:00', wakeInto: 'Inbox', previousWakeAt: '2026-12-01T11:00:00+11:00' });
+  });
+
+  it('reports a null previousWakeAt for a Snoozed message that had no wake time', async () => {
+    const { t } = fakeAccount({ e1: { mailboxIds: { 'mb-snoozed': true }, snoozed: null } });
+    const result = out(await snoozeEmail({ emailId: 'e1', until: '2026-11-05T00:00:00Z' }, t, NOW));
+    assert.equal(result.previousWakeAt, null);
   });
 
   it('refuses a message outside the Inbox and writes nothing', async () => {
@@ -129,7 +139,7 @@ describe('unsnooze_email', () => {
     const result = out(await unsnoozeEmail({ emailId: 'e1' }, t));
     assert.deepEqual(sets(), [{ e1: { 'mailboxIds/mb-snoozed': null, 'mailboxIds/mb-inbox': true, snoozed: null } }]);
     assert.deepEqual(emails.e1.mailboxIds, { 'mb-label': true, 'mb-inbox': true });
-    assert.deepEqual(result, { emailId: 'e1', movedTo: 'Inbox', wasWakeAt: '2026-12-01T00:00:00Z' });
+    assert.deepEqual(result, { emailId: 'e1', movedTo: 'Inbox', wasWakeAt: '2026-12-01T11:00:00+11:00' });
   });
 
   it('refuses a message that is not snoozed and writes nothing', async () => {
@@ -153,8 +163,8 @@ describe('list_snoozed_emails', () => {
     assert.equal(query.limit, 50);
     assert.equal(result.total, 2);
     assert.deepEqual(result.emails.map((e: any) => [e.id, e.wakeAt, e.wakeInto]), [
-      ['a', '2026-11-03T00:00:00Z', 'Inbox'],
-      ['b', '2026-11-04T00:00:00Z', 'Receipts'],
+      ['a', '2026-11-03T11:00:00+11:00', 'Inbox'],
+      ['b', '2026-11-04T11:00:00+11:00', 'Receipts'],
     ]);
   });
 
@@ -174,7 +184,7 @@ describe('list_snoozed_emails', () => {
       ...projectListEmail(simplifyEmail({ id: 'a', ...LISTED.a }), undefined),
       mailboxes: ['Snoozed', 'Receipts'],
       roles: ['snoozed'],
-      wakeAt: '2026-11-03T00:00:00Z',
+      wakeAt: '2026-11-03T11:00:00+11:00',
       wakeInto: 'Inbox',
     });
     assert.equal(email.from, 'Ann Example <a@example.invalid>');

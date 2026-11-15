@@ -8,7 +8,7 @@
 // snooze-list.smoke.mjs.
 
 import { coerceBool, coerceUtcDate, describeUntrusted, InvalidInputError, redactedJson, registerSecret } from './coerce.js';
-import { getDefaultTimezone, simplifyEmail } from './email-formatter.js';
+import { getDefaultTimezone, simplifyEmail, toLocalIso } from './email-formatter.js';
 import { EMAIL_PROPERTIES_COMPACT, attachMailboxInfo, buildMailboxInfoMap } from './jmap-client.js';
 import { projectListEmail } from './field-projection.js';
 import type { ToolContent } from './mailbox-handler.js';
@@ -150,9 +150,14 @@ export function parseWakeTime(value: unknown, now: Date = new Date(), zone: stri
   }
   const until = coerceUtcDate(value, 'until', zone)!;
   if (Date.parse(until) <= now.getTime()) {
-    throw new InvalidInputError(`until is not in the future: ${describeUntrusted(String(value))} is ${until}`);
+    throw new InvalidInputError(`until is not in the future: ${describeUntrusted(String(value))} is ${toLocalIso(until, zone)}`);
   }
   return until;
+}
+
+/** A stored wake time as the tools report it: local time with an offset, like an email's `date`. */
+function localWake(until: unknown): string | null {
+  return typeof until === 'string' && until ? toLocalIso(until) : null;
 }
 
 /**
@@ -177,7 +182,7 @@ export async function listSnoozedEmails(args: any, t: SnoozeTransport, limit: nu
     const dest = e.snoozed?.moveToMailboxId;
     return {
       ...projectListEmail(simplifyEmail(e), undefined),
-      wakeAt: e.snoozed?.until ?? null,
+      wakeAt: localWake(e.snoozed?.until),
       wakeInto: dest ? (mb.byId.get(dest)?.name ?? dest) : mb.inbox.name,
     };
   });
@@ -198,7 +203,7 @@ export async function snoozeEmail(args: any, t: SnoozeTransport, now: Date = new
   const inSnoozed = email.mailboxIds?.[mb.snoozed.id] === true;
   if (inSnoozed) {
     await update(t, accountId, emailId, email.snoozed ? { 'snoozed/until': until } : { snoozed: { until, setKeywords: WAKE_KEYWORDS } });
-    return [{ type: 'text', text: redactedJson({ emailId, wakeAt: until, wakeInto: mb.inbox.name, previousWakeAt: email.snoozed?.until ?? null }) }];
+    return [{ type: 'text', text: redactedJson({ emailId, wakeAt: localWake(until), wakeInto: mb.inbox.name, previousWakeAt: localWake(email.snoozed?.until) }) }];
   }
   if (email.mailboxIds?.[mb.inbox.id] !== true) {
     throw new InvalidInputError('snooze_email snoozes a message from the Inbox only; this one is not in the Inbox. Move it to the Inbox first.');
@@ -208,7 +213,7 @@ export async function snoozeEmail(args: any, t: SnoozeTransport, now: Date = new
     [`mailboxIds/${mb.snoozed.id}`]: true,
     snoozed: { until, setKeywords: WAKE_KEYWORDS },
   });
-  return [{ type: 'text', text: redactedJson({ emailId, wakeAt: until, wakeInto: mb.inbox.name }) }];
+  return [{ type: 'text', text: redactedJson({ emailId, wakeAt: localWake(until), wakeInto: mb.inbox.name }) }];
 }
 
 /** unsnooze_email: back to the Inbox now, snooze cleared. */
@@ -226,7 +231,7 @@ export async function unsnoozeEmail(args: any, t: SnoozeTransport): Promise<Tool
     [`mailboxIds/${mb.inbox.id}`]: true,
     snoozed: null,
   });
-  return [{ type: 'text', text: redactedJson({ emailId, movedTo: mb.inbox.name, wasWakeAt: email.snoozed?.until ?? null }) }];
+  return [{ type: 'text', text: redactedJson({ emailId, movedTo: mb.inbox.name, wasWakeAt: localWake(email.snoozed?.until) }) }];
 }
 
 const EXPERIMENTAL_NOTE =
@@ -235,7 +240,7 @@ const EXPERIMENTAL_NOTE =
 export const SNOOZE_TOOLS = [
   {
     name: 'list_snoozed_emails',
-    description: 'List the messages in the Snoozed mailbox, soonest wake time first. Returns { total, emails }; total is omitted when Fastmail does not return it, and then a full page may not be every snoozed message. Each email is the simplified shape list_emails returns (metadata + preview, no bodies; date in local time with a UTC offset; sentAt left out, as on list_emails, and carried by raw=true), plus wakeAt (UTC, when Fastmail returns it to wakeInto, normally the Inbox, marked unread). Use raw=true for the original JMAP objects, whose `snoozed` property carries the wake time.' + EXPERIMENTAL_NOTE,
+    description: 'List the messages in the Snoozed mailbox, soonest wake time first. Returns { total, emails }; total is omitted when Fastmail does not return it, and then a full page may not be every snoozed message. Each email is the simplified shape list_emails returns (metadata + preview, no bodies; date in local time with a UTC offset; sentAt left out, as on list_emails, and carried by raw=true), plus wakeAt (local time with a UTC offset, like date: when Fastmail returns it to wakeInto, normally the Inbox, marked unread). Use raw=true for the original JMAP objects, whose `snoozed` property carries the wake time in UTC.' + EXPERIMENTAL_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -246,7 +251,7 @@ export const SNOOZE_TOOLS = [
   },
   {
     name: 'snooze_email',
-    description: 'Snooze a message until a time: it leaves the Inbox for Snoozed and Fastmail returns it to the Inbox, unread, at that time, as the Fastmail app does. Other labels are kept. Only an Inbox message can be snoozed; on a message already snoozed this changes the wake time. Returns { emailId, wakeAt, wakeInto }, wakeAt in UTC, plus previousWakeAt on a message that was already in Snoozed (null when it had no wake time).' + EXPERIMENTAL_NOTE,
+    description: 'Snooze a message until a time: it leaves the Inbox for Snoozed and Fastmail returns it to the Inbox, unread, at that time, as the Fastmail app does. Other labels are kept. Only an Inbox message can be snoozed; on a message already snoozed this changes the wake time. Returns { emailId, wakeAt, wakeInto }, plus previousWakeAt on a message that was already in Snoozed (null when it had no wake time); wakeAt and previousWakeAt are local time with a UTC offset.' + EXPERIMENTAL_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -258,7 +263,7 @@ export const SNOOZE_TOOLS = [
   },
   {
     name: 'unsnooze_email',
-    description: 'Return a snoozed message to the Inbox now and clear its snooze. Its read state is left as it is. Returns { emailId, movedTo, wasWakeAt }.' + EXPERIMENTAL_NOTE,
+    description: 'Return a snoozed message to the Inbox now and clear its snooze. Its read state is left as it is. Returns { emailId, movedTo, wasWakeAt }, wasWakeAt in local time with a UTC offset.' + EXPERIMENTAL_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
