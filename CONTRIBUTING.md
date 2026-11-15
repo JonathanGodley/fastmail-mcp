@@ -24,6 +24,11 @@ Every tool that returns email data uses the simplified format from
 - every such tool accepts `raw: true` to bypass simplification and return the
   JMAP objects as fetched.
 
+A successful result does not restate what the caller asked for or already knows
+(which message it edited, that the expected thing happened). It carries only
+what the caller cannot work out for itself, such as the size of a plain-text
+part the server derived, and warnings when something did not go as asked.
+
 ### JMAP properties
 
 All email list and search methods in `src/jmap-client.ts` request the same set
