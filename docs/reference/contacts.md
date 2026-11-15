@@ -4,15 +4,15 @@
 
 **Default**: `id`, `name`, `emails`, `phones`, `organization`, `notes`, and `kind` when it is not `individual`
 
-**Verbose adds**: `addresses`, `titles`, `anniversaries`, plus every remaining JMAP field under its own JSContact name and in its stored shape: on Fastmail that includes `links` (URLs), `onlineServices`, `media` (photos), `nicknames` and `kind` on an ordinary card — *and* it widens `emails`/`phones` from the hybrid shape below to the whole stored entry objects, so it adds detail to fields the default already returns, not just extra fields.
+**Verbose adds**: `addresses`, `anniversaries`, every entry of `organizations`, `titles` and `notes` whole and keyed, plus every remaining JMAP field under its own JSContact name and in its stored shape: on Fastmail that includes `links` (URLs), `onlineServices`, `media` (photos), `nicknames` and `kind` on an ordinary card — *and* it widens `emails`/`phones` from the hybrid shape below to the whole stored entry objects, so it adds detail to fields the default already returns, not just extra fields.
 
 **Simplification applied:**
 - Name resolved from `name.full`, or when that is absent from the name's `components`: in stored order when the name is marked ordered, otherwise title, given, middle, surname, second surname, generation, credential
 - Emails and phones flattened from JMAP's Id-map to an array — see the hybrid shape below
-- Organization extracted from first entry
-- Notes extracted from JMAP's `{hash: {note}}` object format
+- Default view: `organization` is the first organization's name, and `notes` is the text of every note joined with a newline
 - `kind` omitted when it is the default `individual` - see below
-- Verbose: addresses as objects, titles as strings, anniversaries as stored; the other passed-through fields keep JMAP's Id-map shape
+- Verbose: addresses as objects, anniversaries as stored; `organizations`, `titles` and `notes` are the card's own Id-maps, keys kept, so a title's `organizationId` refers to a key of `organizations`; `organization` is still emitted; an `online` key, which RFC 9553 does not define, is copied whole when present; a value of any of these four keys that is not a map is passed through as stored, except null or an empty string, which are omitted; the other passed-through fields keep JMAP's Id-map shape
+- Verbose `name` is the same display string as the default; the structured name is in `raw` only
 
 ### `kind` tells you which cards the write tools will refuse
 

@@ -729,15 +729,20 @@ const CONTACT_SHAPE_DESC =
   'rather than discovering it from a refused write. ' +
   'Each emails/phones entry is EITHER a bare string (the address / the number, when the entry ' +
   'carries no label) OR an {address, label} / {number, label} object — so handle both shapes. ' +
-  'Use verbose=true for the whole entry objects (contexts, pref, …), addresses, titles, URLs, ' +
-  'photos and anniversaries, and kind on EVERY card (individual included, so the "no field means ' +
+  'Use verbose=true for the whole entry objects (contexts, pref, …), addresses, photos and ' +
+  'anniversaries, every organization, title and note whole in its keyed map (a title\'s ' +
+  'organizationId refers to an organizations key), the links and onlineServices maps that hold ' +
+  'URLs, and kind on EVERY card (individual included, so the "no field means ' +
   'individual" reading above applies to the default view only). Use raw=true for the original ' +
   'JMAP response, which also carries kind on every card.';
 
 const CONTACT_VERBOSE_PARAM_DESC =
   'Return each emails/phones entry whole (contexts, pref and any other stored field) instead ' +
   'of the bare-string-or-{value,label} shape, and include the extra contact fields ' +
-  '(addresses, titles, URLs, photos, anniversaries). Also returns kind on EVERY card, ' +
+  '(addresses, photos, anniversaries, and the links and onlineServices maps that hold URLs). ' +
+  'Returns organizations, titles and notes whole as keyed maps (a title\'s organizationId ' +
+  'refers to an organizations key), and still ' +
+  'returns organization. Also returns kind on EVERY card, ' +
   'including the individual the default view omits — so under verbose the presence of kind ' +
   'says nothing about what the card is; read its value. Not needed for most tasks.';
 
