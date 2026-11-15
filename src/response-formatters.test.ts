@@ -1265,8 +1265,18 @@ describe('simplifyContact verbose keyed maps', () => {
     assert.equal(simplifyContact({ id: 'ct-ns', notes: 'VIP client' }, { verbose: true }).notes, 'VIP client');
   });
 
-  it('emits no organizations, titles or online that is a string where a map belongs', () => {
-    assert.deepEqual(simplifyContact({ id: 'ct-ss', organizations: 'ab', titles: 'ab', online: 'ab' }, { verbose: true }), { id: 'ct-ss' });
+  it('passes a malformed organizations, titles, notes or online through as stored under verbose only', () => {
+    const malformed = { id: 'ct-ss', organizations: 'ab', titles: 5, notes: 7, online: 'ab' };
+    assert.deepEqual(simplifyContact(malformed, { verbose: true }), malformed);
+    assert.deepEqual(simplifyContact(malformed), { id: 'ct-ss' });
+    const blank = { id: 'ct-sb', organizations: '', titles: '', notes: '', online: '' };
+    assert.deepEqual(simplifyContact(blank, { verbose: true }), { id: 'ct-sb' });
+  });
+
+  it('skips a null note entry in either view', () => {
+    const notes = { n1: null, n2: { note: 'Kept note' } };
+    assert.equal(simplifyContact({ id: 'ct-nn', notes }).notes, 'Kept note');
+    assert.deepEqual(simplifyContact({ id: 'ct-nn', notes }, { verbose: true }).notes, notes);
   });
 
   it('the default view still shows the first organization name and the notes joined', () => {
@@ -1274,6 +1284,8 @@ describe('simplifyContact verbose keyed maps', () => {
     assert.equal(result.organization, 'Quillfeather Labs');
     assert.equal(result.notes, 'First note\nSecond note');
     assert.equal('organizations' in result, false);
+    assert.equal('titles' in result, false);
+    assert.equal('online' in result, false);
   });
 });
 

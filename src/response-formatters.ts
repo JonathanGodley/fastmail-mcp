@@ -812,7 +812,7 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
     if (typeof raw.notes === 'string') {
       result.notes = raw.notes;
     } else if (typeof raw.notes === 'object') {
-      const noteTexts = Object.values(raw.notes).map((n: any) => n.note).filter(Boolean);
+      const noteTexts = Object.values(raw.notes).map((n: any) => n?.note).filter(Boolean);
       if (noteTexts.length) result.notes = noteTexts.join('\n');
     }
   }
@@ -823,10 +823,11 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
       if (list.length) result.addresses = list;
     }
     // Copied whole with their keys: a title's organizationId and a localizations path name a key
-    // (RFC 9553 sections 2.2.5 and 2.7.1).
+    // (RFC 9553 sections 2.2.5 and 2.7.1). A malformed non-object value is passed through as stored.
     for (const key of ['organizations', 'titles', 'notes', 'online']) {
       const value = raw[key];
-      if (value && typeof value === 'object' && Object.keys(value).length) result[key] = value;
+      if (value == null || value === '') continue;
+      if (typeof value !== 'object' || Object.keys(value).length) result[key] = value;
     }
     if (raw.photos && typeof raw.photos === 'object') {
       result.photos = raw.photos;
