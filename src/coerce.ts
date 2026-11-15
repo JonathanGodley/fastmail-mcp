@@ -1076,7 +1076,7 @@ export function coercePosition(value: unknown, options?: { ascendingHint?: boole
   }
   if (n < 0) {
     throw new InvalidInputError(
-      `${paramName} cannot be negative: "${echoPosition(value)}". It is an offset from the START of the results${options?.ascendingHint ? '; to read from the oldest end pass ascending:true' : ''}. ${POSITION_HINT}`,
+      `${paramName} cannot be negative: "${echoPosition(value)}". It is an offset from the START of the results${options?.ascendingHint ? '; to read from the other end pass ascending:true' : ''}. ${POSITION_HINT}`,
     );
   }
   return n;

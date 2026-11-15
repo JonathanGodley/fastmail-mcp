@@ -472,7 +472,7 @@ describe('coercePosition (#51)', () => {
         assert.ok(err instanceof InvalidInputError);
         assert.equal(
           err.message,
-          'position cannot be negative: "-1". It is an offset from the START of the results; to read from the oldest end pass ascending:true. ' +
+          'position cannot be negative: "-1". It is an offset from the START of the results; to read from the other end pass ascending:true. ' +
             'Pass a whole number of results to skip (0 or greater), e.g. position:20 for the second page of a limit:20 listing.',
         );
         return true;

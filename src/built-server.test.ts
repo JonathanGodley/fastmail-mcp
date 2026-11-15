@@ -36,6 +36,7 @@ import type { CalendarListClient } from './calendar-list-handler.js';
 import { listEmailsTool, searchEmailsTool } from './email-list-handler.js';
 import type { EmailListClient } from './email-list-handler.js';
 import type { QueryResult } from './jmap-client.js';
+import { EMAIL_SORT_VALUES } from './jmap-client.js';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SRC_DIR, '..');
@@ -313,6 +314,12 @@ describe('edit_draft advertises the clearFields enum on its array elements', () 
     assert.deepEqual(arrayItems(schema.properties.clearFields).enum, [
       'to', 'cc', 'bcc', 'replyTo', 'subject', 'textBody', 'htmlBody', 'attachments', 'forwardedMessageId',
     ]);
+  });
+
+  // #223. The schema spreads EMAIL_SORT_VALUES, which no source-text guard can read.
+  it('advertises the sortBy enum on search_emails as the shared value set', async () => {
+    const schema = await toolSchema('search_emails');
+    assert.deepEqual(schema.properties.sortBy?.enum, [...EMAIL_SORT_VALUES]);
   });
 });
 

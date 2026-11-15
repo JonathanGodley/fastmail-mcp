@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, computeExclusion, readSourceReferences, fillUrlTemplate, decideArchiveBranch } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, EMAIL_SORT_VALUES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, computeExclusion, readSourceReferences, fillUrlTemplate, decideArchiveBranch } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
@@ -2437,6 +2437,64 @@ describe('ascending sort parameter', () => {
 
       const sort = callArguments(makeReq)[0].methodCalls[0][1].sort;
       assert.deepEqual(sort, [{ property: 'receivedAt', isAscending: true }]);
+    });
+  });
+
+  // #223. With sortBy omitted the visible query must stay exactly what it was, key for key.
+  describe('searchEmails sortBy', () => {
+    const visibleQuery = async (opts: Record<string, unknown>) => {
+      stubMailboxes(client);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
+      await client.searchEmails({ query: 'test', limit: 10, ...opts });
+      return callArguments(makeReq)[0].methodCalls;
+    };
+
+    for (const sortBy of [undefined, 'date'] as const) {
+      it(`sortBy ${sortBy ?? 'omitted'} sends exactly today's visible query`, async () => {
+        const q = (await visibleQuery({ sortBy }))[0][1];
+        assert.deepEqual({ ...q, filter: 'F' }, {
+          accountId: ACCOUNT_ID,
+          filter: 'F',
+          sort: [{ property: 'receivedAt', isAscending: false }],
+          limit: 10,
+          calculateTotal: true,
+        });
+      });
+    }
+
+    // The tie-break is receivedAt DESCENDING whatever `ascending` says: newest first within
+    // a group of equal keys, as the default order is.
+    for (const sortBy of ['sentAt', 'size', 'from', 'to', 'subject'] as const) {
+      for (const ascending of [false, true]) {
+        it(`sortBy ${sortBy}, ascending ${ascending} => [${sortBy}, receivedAt desc]`, async () => {
+          const q = (await visibleQuery({ sortBy, ascending }))[0][1];
+          assert.deepEqual(q.sort, [
+            { property: sortBy, isAscending: ascending },
+            { property: 'receivedAt', isAscending: false },
+          ]);
+        });
+      }
+    }
+
+    it('the hidden-count query stays unsorted', async () => {
+      stubMailboxes(client);
+      const makeReq = stubRequests(client, async () => ({
+        methodResponses: [
+          ['Email/query', { ids: [], total: 0 }, 'query'],
+          ['Email/get', { list: [] }, 'emails'],
+          ['Email/query', { ids: [], total: 0 }, 'count'],
+        ],
+      }));
+      await client.searchEmails({ query: 'test', sortBy: 'size' });
+      const batch = callArguments(makeReq)[0].methodCalls;
+      assert.equal(batch.length, 3);
+      assert.equal(batch[2][1].sort, undefined);
+    });
+
+    // The set is what scripts/probes/sort-properties.probe.mjs verified Fastmail accepts
+    // and orders; a value outside it has not been measured.
+    it('offers exactly the six probe-verified sort values', () => {
+      assert.deepEqual([...EMAIL_SORT_VALUES], ['date', 'sentAt', 'size', 'from', 'to', 'subject']);
     });
   });
 

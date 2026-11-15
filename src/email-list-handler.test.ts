@@ -143,6 +143,7 @@ describe('searchEmailsTool', () => {
       limit: 20,
       position: undefined,
       ascending: false,
+      sortBy: undefined,
       excludeDrafts: false,
       includeTrash: false,
       includeSpam: false,
@@ -178,6 +179,7 @@ describe('searchEmailsTool', () => {
       limit: 37,
       position: undefined,
       ascending: false,
+      sortBy: undefined,
       excludeDrafts: false,
       includeTrash: false,
       includeSpam: false,
@@ -211,6 +213,7 @@ describe('searchEmailsTool', () => {
       limit: 20,
       position: 6,
       ascending: true,
+      sortBy: undefined,
       excludeDrafts: true,
       includeTrash: true,
       includeSpam: true,
@@ -228,9 +231,30 @@ describe('searchEmailsTool', () => {
     }
   });
 
+  it('reads sortBy as absent when omitted or null, and matches it trimmed and case-insensitively', async () => {
+    const stub = stubClient();
+    await searchEmailsTool({ sortBy: null }, 20, stub.client);
+    await searchEmailsTool({ sortBy: ' SIZE ' }, 20, stub.client);
+    await searchEmailsTool({ sortBy: 'sentat' }, 20, stub.client);
+    assert.deepEqual(stub.searchEmails.mock.calls.map((c) => c.arguments[0]!.sortBy), [undefined, 'size', 'sentAt']);
+  });
+
+  it('refuses an unsupported sortBy before the query, naming it and listing the values', async () => {
+    for (const value of ['bogus', '', 'receivedAt', 7]) {
+      const stub = stubClient();
+      await assert.rejects(
+        () => searchEmailsTool({ sortBy: value }, 20, stub.client),
+        (err: Error) => err.name === 'InvalidInputError'
+          && err.message.startsWith('sortBy must be one of "date", "sentAt", "size", "from", "to", "subject"'),
+        String(value),
+      );
+      assert.equal(calls(stub), 0, String(value));
+    }
+  });
+
   it('checks its arguments in a fixed order', async () => {
     await assertCheckOrder(searchEmailsTool, [
-      ['ascending', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
+      ['ascending', 'x'], ['sortBy', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
       ['requiredMailboxes', [1]], ['excludeMailboxes', [1]], ['hasAttachment', 'x'],
       ['isUnread', 'x'], ['isPinned', 'x'], ['isAnswered', 'x'], ['isForwarded', 'x'],
       ['excludeDrafts', 'x'], ['includeTrash', 'x'],

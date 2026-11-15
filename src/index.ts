@@ -9,7 +9,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { FastmailAuth, FastmailConfig } from './auth.js';
-import { JmapClient, QueryResult } from './jmap-client.js';
+import { EMAIL_SORT_VALUES, JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { setDefaultTimezone } from './email-formatter.js';
@@ -446,6 +446,13 @@ const INCLUDE_SPAM_DESC =
 const ASCENDING_DESC =
   lenientBool('Sort oldest first instead of newest first (default: false).');
 
+// search_emails takes sortBy, so its `ascending` names what the default means per sort.
+const SEARCH_ASCENDING_DESC =
+  lenientBool('Sort ascending instead of descending (default: false). The default is newest first for date/sentAt, largest first for size, and Z to A for from/to/subject; true reverses it. Messages with an equal key stay newest first either way.');
+
+const SORT_BY_DESC =
+  'What to order results by (default: "date", the received time shown as `date`). "sentAt" is the send time the sender claims; it is returned only when named in fields. "size" is the whole message in bytes. "from"/"to" compare the first address\'s display name, or the address when it has none, ignoring case. "subject" ignores leading Re:/Fwd: and bracketed tags. A message with no such header sorts as empty. Direction comes from ascending. Pass the same sortBy and ascending on every page you read with position.';
+
 // The reliability contract that makes silence trustworthy. The no-note guarantee leads as
 // its own sentence (a skimming model must hit "no note => trustworthy" first).
 //
@@ -633,7 +640,7 @@ const POSITION_TOOL_DESC =
   'Results are ONE PAGE: the summary line always states the total number of matches, and when more remain it carries a `nextPosition` to pass back as `position`. No `nextPosition` means you have seen every match — do not re-run to check.';
 
 const POSITION_PARAM_DESC =
-  'Skip this many results before returning the page — a 0-based offset into the full match set, and the way to read past this tool\'s `limit` cap (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it: it is the position the server actually served plus what it actually returned, so a short final page ends the listing instead of advertising another one. Every response states the total match count; `nextPosition` appears only while more results remain. All filters (including the default Trash/Spam exclusion) are applied server-side to every page, so paging never changes what matches. The Trash/Spam withheld-count note describes the WHOLE match set, not the page: the same count repeats on every page, so never add up the notes across pages. Omit it, or pass 0, for the first page. A position past the end is not an error — it returns an empty page alongside the real total, so you can see you overshot. Must be a whole number, 0 or greater: a negative value is rejected (JMAP would read it as counting back from the end; to read from the oldest end use ascending:true) and so is a fraction.';
+  'Skip this many results before returning the page — a 0-based offset into the full match set, and the way to read past this tool\'s `limit` cap (e.g. limit:50, then position:50, position:100). Take the value from the previous response\'s `nextPosition` rather than computing it: it is the position the server actually served plus what it actually returned, so a short final page ends the listing instead of advertising another one. Every response states the total match count; `nextPosition` appears only while more results remain. All filters (including the default Trash/Spam exclusion) are applied server-side to every page, so paging never changes what matches; pass the same filters and ordering arguments on every page, since the offset counts into the order they define. The Trash/Spam withheld-count note describes the WHOLE match set, not the page: the same count repeats on every page, so never add up the notes across pages. Omit it, or pass 0, for the first page. A position past the end is not an error — it returns an empty page alongside the real total, so you can see you overshot. Must be a whole number, 0 or greater: a negative value is rejected (JMAP would read it as counting back from the end; to read from the other end use ascending:true) and so is a fraction.';
 
 // The contacts version: the same contract, without the email-only Trash/Spam and
 // `ascending` sentences, plus the order a page follows (measured: #94).
@@ -1052,7 +1059,7 @@ const TOOLS = [
       {
         name: 'search_emails',
         // One search tool (#12): anything new is a parameter on this tool.
-        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion; requiredMailboxes/excludeMailboxes scope across several mailboxes at once. isAnswered/isForwarded test a mark kept per stored copy: replying marks only the copy replied to, so other copies of that message (a duplicate delivery, a copy in another folder) and earlier messages in the thread still match isAnswered:false, and a reply sent by something that never sets the mark on this mailbox is not recorded (any client on this account that sets IMAP \\Answered does set it). ' + SEARCH_SCOPE_RELIABILITY_CONTRACT + ` Recovery example: if a search returns a "2 ${excludedCountPhrase('Trash/Spam')}" note, re-run with includeTrash:true (or mailbox:"trash") to find the deleted message.` + ' Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LIST_SENT_AT_DESC + ' ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion; requiredMailboxes/excludeMailboxes scope across several mailboxes at once. isAnswered/isForwarded test a mark kept per stored copy: replying marks only the copy replied to, so other copies of that message (a duplicate delivery, a copy in another folder) and earlier messages in the thread still match isAnswered:false, and a reply sent by something that never sets the mark on this mailbox is not recorded (any client on this account that sets IMAP \\Answered does set it). ' + SEARCH_SCOPE_RELIABILITY_CONTRACT + ` Recovery example: if a search returns a "2 ${excludedCountPhrase('Trash/Spam')}" note, re-run with includeTrash:true (or mailbox:"trash") to find the deleted message.` + ' Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LIST_SENT_AT_DESC + ' ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). Results come newest first; sortBy orders them by sentAt, size, from, to or subject instead, e.g. sortBy:"size" for the largest messages first. limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1132,7 +1139,12 @@ const TOOLS = [
             position: positionSchemaProperty(),
             ascending: {
               type: ['boolean', 'string'],
-              description: ASCENDING_DESC,
+              description: SEARCH_ASCENDING_DESC,
+            },
+            sortBy: {
+              type: 'string',
+              enum: [...EMAIL_SORT_VALUES],
+              description: SORT_BY_DESC,
             },
             excludeDrafts: {
               type: ['boolean', 'string'],

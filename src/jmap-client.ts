@@ -273,6 +273,12 @@ export const EMAIL_PROPERTIES_COMPACT = [
   'textBody', 'sentAt',
 ] as const;
 
+// search_emails' `sortBy` values: the six Email/query sorts scripts/probes/sort-properties.probe.mjs
+// measured Fastmail accepting and ordering (#223). Named as the simplified fields are, so `date`
+// is JMAP's `receivedAt`.
+export const EMAIL_SORT_VALUES = ['date', 'sentAt', 'size', 'from', 'to', 'subject'] as const;
+export type EmailSortBy = typeof EMAIL_SORT_VALUES[number];
+
 // VERBOSE: superset with body properties, for verbose mode, getEmailById and getThread's
 // includeBodies mode (#74). The two provenance headers are deliberately VERBOSE-tier, not
 // COMPACT: their values matter only when operating on one draft, so an ordinary thread
@@ -4541,6 +4547,7 @@ export class JmapClient {
     callerExcludeIds?: string[];
     limit: number;
     ascending: boolean;
+    sortBy?: EmailSortBy;
     mailboxes: any[];
     position?: number;
   }): Promise<QueryResult> {
@@ -4575,7 +4582,11 @@ export class JmapClient {
     const visibleQuery: any = {
       accountId: session.accountId,
       filter: visibleFilter,
-      sort: [{ property: 'receivedAt', isAscending: ascending }],
+      // The tie-break is receivedAt descending whatever `ascending` says, so a group of equal
+      // keys reads newest first, as the default order does (#223).
+      sort: !opts.sortBy || opts.sortBy === 'date'
+        ? [{ property: 'receivedAt', isAscending: ascending }]
+        : [{ property: opts.sortBy, isAscending: ascending }, { property: 'receivedAt', isAscending: false }],
       limit,
       calculateTotal: true,
     };
@@ -4660,6 +4671,7 @@ export class JmapClient {
     limit?: number;
     position?: number;
     ascending?: boolean;
+    sortBy?: EmailSortBy;
     excludeDrafts?: boolean;
     includeTrash?: boolean;
     includeSpam?: boolean;
@@ -4726,6 +4738,7 @@ export class JmapClient {
       callerExcludeIds,
       limit: Math.min(filters.limit || 20, 100),
       ascending: filters.ascending ?? false,
+      sortBy: filters.sortBy,
       mailboxes,
       position: filters.position,
     });
