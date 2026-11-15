@@ -619,11 +619,21 @@ interface ResolvedOccurrence {
  * the second pass through a repeated hour.
  */
 function resolveOccurrence(occurrence: string, series: OccurrenceSeries, title: string): ResolvedOccurrence {
-  const serialized = validateAndFormatICalDate(occurrence, 'occurrence');
+  let serialized: string;
+  try {
+    serialized = validateAndFormatICalDate(occurrence, 'occurrence');
+  } catch (err) {
+    if (err instanceof InvalidInputError) throw new InvalidInputError(`${err.message}. Nothing was deleted.`);
+    throw err;
+  }
   const quoted = `"${echoCallerText(occurrence)}"`;
   const refuse = (why: string) => new InvalidInputError(
     `occurrence ${quoted} does not name an occurrence of "${echoCallerText(title)}": ${why}. Nothing was deleted. `
     + 'Pass the recurrenceId of the occurrence\'s list_calendar_events row.',
+  );
+  // For a real occurrence this server will not exclude, unlike `refuse`.
+  const decline = (why: string) => new InvalidInputError(
+    `occurrence ${quoted} of "${echoCallerText(title)}" ${why}. Nothing was deleted. Use the Fastmail web interface to delete it.`,
   );
   const isDate = /^\d{8}$/.test(serialized);
   if (series.frame === 'date') {
@@ -640,14 +650,16 @@ function resolveOccurrence(occurrence: string, series: OccurrenceSeries, title: 
 
   const offset = series.frame === 'zoned' ? zoneOffsetMsAt(ms, series.zone) : 0;
   const wall = new Date(ms + offset).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, '');
+  // A rule (BYHOUR) or a clock change can put a real occurrence at another time of day; the
+  // exclusion is built from the start's time, so only those occurrences are accepted.
   if (wall.slice(9, 15) !== series.value.slice(9, 15)) {
-    throw refuse('it does not fall at the series\' time of day');
+    throw decline('is not at the series\' own start time of day, and this server only removes occurrences at that time');
   }
   if (series.frame === 'utc') {
     return { target: { kind: 'instant', ms }, line: `EXDATE:${wall}Z`, display: formatICalDate(`${wall}Z`)!, written: { kind: 'utc' } };
   }
   if (resolveCalendarInstantMs(wallClockIso(wall), series.zone) !== ms) {
-    throw refuse('it falls in the second pass through an hour the clocks repeat, which an exclusion cannot name');
+    throw decline('falls in the second pass through an hour the clocks repeat, which an exclusion in the series\' zone cannot name');
   }
   return {
     target: { kind: 'instant', ms },
