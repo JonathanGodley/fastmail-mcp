@@ -3149,10 +3149,11 @@ function assertDavOk(resp: unknown, action: string): void {
       throw new Error(`Failed to ${action}: server returned no status`);
     }
     if (status < 200 || status >= 300) {
-      // Server-authored, so echoed; the default bound, since nobody pastes a reason phrase back.
+      // Remote-authored, so quoted: bare, a full stop in it ends this sentence and writes the
+      // next. The default bound, since nobody pastes a reason phrase back.
       const reason = (r as any)?.statusText;
       const phrase = typeof reason === 'string' && reason.trim().length > 0
-        ? ` ${echoCallerText(reason)}`
+        ? ` "${echoCallerText(reason)}"`
         : '';
       throw new Error(`Failed to ${action}: server returned ${status}${phrase}`);
     }
@@ -3209,7 +3210,7 @@ function classifyWrittenLine(formatted: FormattedDateProperty): CalendarZoneWrit
 
 function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
   switch (info.kind) {
-    case 'zoned': return `zone ${describeUntrustedAt(info.zone, WRITTEN_ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(info.zone ?? '')}`;
+    case 'zoned': return `zone "${describeUntrustedAt(info.zone, WRITTEN_ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(info.zone ?? '')}`;
     case 'utc': return 'UTC';
     case 'floating': return 'floating (no zone)';
     case 'allday': return 'all-day (no time component)';
@@ -3343,7 +3344,7 @@ export class CalDAVCalendarClient {
       // A plain Error: configuration, not caller input. `detail` is remote-authored, so it takes
       // `describeUntrustedAt`, which also redacts an echoed credential (#182).
       throw new Error(
-        `CalDAV login failed: ${describeUntrustedAt(detail, LOGIN_FAILURE_ECHO_LIMIT)}. Check the configured CalDAV app password ` +
+        `CalDAV login failed: "${describeUntrustedAt(detail, LOGIN_FAILURE_ECHO_LIMIT)}". Check the configured CalDAV app password ` +
         `(a separate credential from the Fastmail JMAP API token).`,
       );
     }

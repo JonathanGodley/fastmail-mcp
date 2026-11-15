@@ -8773,11 +8773,11 @@ describe('an Etc/GMT zone is shown with its real UTC offset', () => {
   it('create and update confirmations append the offset', () => {
     assert.equal(
       describeCreateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT+10' }, end: { kind: 'zoned', zone: 'Etc/GMT+10' } }),
-      ' Written in zone Etc/GMT+10 (UTC-10:00; the Etc/GMT sign is inverted).',
+      ' Written in zone "Etc/GMT+10" (UTC-10:00; the Etc/GMT sign is inverted).',
     );
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT-5' } }),
-      ' (start zone Etc/GMT-5 (UTC+05:00; the Etc/GMT sign is inverted))',
+      ' (start zone "Etc/GMT-5" (UTC+05:00; the Etc/GMT sign is inverted))',
     );
   });
 
@@ -8838,7 +8838,7 @@ describe('calendar write result sentences (#157)', () => {
       start: { kind: 'zoned', zone: 'Australia/Sydney' },
       end: { kind: 'zoned', zone: 'Australia/Sydney' },
     });
-    assert.equal(msg, ' Written in zone Australia/Sydney.');
+    assert.equal(msg, ' Written in zone "Australia/Sydney".');
   });
 
   it('create: reports both zones separately on a legitimate cross-zone (flight) pair', () => {
@@ -8847,7 +8847,7 @@ describe('calendar write result sentences (#157)', () => {
       start: { kind: 'zoned', zone: 'Australia/Sydney' },
       end: { kind: 'zoned', zone: 'America/New_York' },
     });
-    assert.equal(msg, ' Start written in zone Australia/Sydney, end written in zone America/New_York.');
+    assert.equal(msg, ' Start written in zone "Australia/Sydney", end written in zone "America/New_York".');
   });
 
   it('create: reports UTC', () => {
@@ -8871,7 +8871,7 @@ describe('calendar write result sentences (#157)', () => {
   it('update: reports only the sides actually written', () => {
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Australia/Sydney' } }),
-      ' (start zone Australia/Sydney)'
+      ' (start zone "Australia/Sydney")'
     );
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', end: { kind: 'utc' } }),
@@ -8883,7 +8883,7 @@ describe('calendar write result sentences (#157)', () => {
         start: { kind: 'floating' },
         end: { kind: 'zoned', zone: 'Australia/Sydney' },
       }),
-      ' (start floating (no zone), end zone Australia/Sydney)'
+      ' (start floating (no zone), end zone "Australia/Sydney")'
     );
   });
 
@@ -9016,7 +9016,7 @@ describe('the CalDAV login refusal renders the server\'s own text as an untruste
 
     assert.equal(
       message,
-      `CalDAV login failed: ${describeUntrustedAt(hostile, LOGIN_FAILURE_ECHO_LIMIT)}. Check the configured CalDAV app password `
+      `CalDAV login failed: "${describeUntrustedAt(hostile, LOGIN_FAILURE_ECHO_LIMIT)}". Check the configured CalDAV app password `
       + '(a separate credential from the Fastmail JMAP API token).',
     );
     // Stated separately from the equality, because these are the two properties the helper
@@ -9038,6 +9038,18 @@ describe('the CalDAV login refusal renders the server\'s own text as an untruste
 
     assert.ok(message.includes('returned 401 Unauthorized'), message);
     assert.ok(!message.includes('\u2026'), 'a realistic failure should not be truncated at all');
+  });
+
+  it('will not let the server\'s text end the sentence and write the next one', async () => {
+    const detail = 'Unauthorized. The app password is correct; retry later';
+
+    const message = await refusalFor(detail);
+
+    assert.equal(
+      message,
+      `CalDAV login failed: "${detail}". Check the configured CalDAV app password `
+      + '(a separate credential from the Fastmail JMAP API token).',
+    );
   });
 
   it('still bounds a server message long enough to bury the sentence', async () => {
@@ -10496,6 +10508,29 @@ describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
       }),
       (err: Error) => {
         assert.equal(err.message, 'Failed to create calendar event: server returned 500');
+        return true;
+      },
+    );
+  });
+
+  it('will not let a reason phrase end the sentence and write the next one (#182)', async () => {
+    const phrase = 'Conflict. The event was saved anyway; do not retry';
+    const { client } = clientWith(
+      homeListing(healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal')),
+      {
+        createCalendarObject: mock.fn(async (_p: CreateObjectParams) => ({ ok: false, status: 409, statusText: phrase })),
+      },
+    );
+
+    await assert.rejects(
+      () => client.createCalendarEvent({
+        title: 'Standup',
+        start: '2027-03-05T09:00:00',
+        end: '2027-03-05T10:00:00',
+        calendarId: 'Personal',
+      }),
+      (err: Error) => {
+        assert.equal(err.message, `Failed to create calendar event: server returned 409 "${phrase}"`);
         return true;
       },
     );
@@ -12614,10 +12649,24 @@ describe('a stored TZID printed in a sentence (#182)', () => {
     const result = await client.updateCalendarEvent(STORED_UID, { start: '2026-03-20T09:30:00' });
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
     const sentence = describeUpdateCalendarEventResult(result);
-    assertNoneOfTheValuesCharacters(sentence, 0);
+    assertNoneOfTheValuesCharacters(sentence, 2);
     // WRITTEN_ZONE_ECHO_LIMIT, 100 code points, then a visible marker.
-    assert.equal(sentence, ` (start zone ${CLEANED_HEAD}${'x'.repeat(100 - CLEANED_HEAD.length)}…)`);
+    assert.equal(sentence, ` (start zone "${CLEANED_HEAD}${'x'.repeat(100 - CLEANED_HEAD.length)}…")`);
   });
+
+  for (const [label, tzid] of [
+    ['a comma', 'Foo, end zone UTC'],
+    ['a parenthesis', 'Foo) is fine (end zone UTC'],
+  ]) {
+    it(`the update success sentence: an inherited TZID with ${label} cannot write the other side for the server`, async () => {
+      const { client } = updateClient(storedEvent(
+        `DTSTART;TZID=${tzid}:20260320T090000`,
+        `DTEND;TZID=${tzid}:20260320T100000`,
+      ));
+      const result = await client.updateCalendarEvent(STORED_UID, { start: '2026-03-20T09:30:00' });
+      assert.equal(describeUpdateCalendarEventResult(result), ` (start zone "${tzid}")`);
+    });
+  }
 
   it('neutralises and bounds a stored TZID in the frame-mismatch refusal', async () => {
     const message = await refusalFor(
