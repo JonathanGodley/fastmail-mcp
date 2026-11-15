@@ -1363,15 +1363,16 @@ is defined.
 **A tsdav call's rejection is the same class of text**
 ([#235](https://github.com/JonathanGodley/fastmail-mcp/issues/235)): `Collection query failed:
 <status> <statusText>. Raw response: <body>` is the server's answer, and it would otherwise reach
-the caller whole, line breaks and all. Every tsdav call in `caldav-client.ts` is awaited through
-`davCall`, which renders a rejection through `describeUntrustedAt` at `DAV_REJECTION_ECHO_LIMIT`.
-It is quoted inside a frame of this server's own, `CalDAV request failed: "…"`: the reason phrase
-sits mid-sentence in tsdav's text, and once line breaks are stripped a forged sentence joins
-straight on. `davCall` encloses the call expression
-and nothing else, because this server's own messages are plain `Error`s too and only position
-tells them apart; its own error classes pass through by class as a backstop. The addressed fetch
-is the exception: `isAddressedResourceMissing` reads tsdav's raw text to swallow a 404, so that
-site renders only on its rethrow branch.
+the caller whole, line breaks and all. Every tsdav call in `caldav-client.ts` whose rejection can
+reach the caller is rendered through `describeUntrustedAt` at `DAV_REJECTION_ECHO_LIMIT`, quoted
+inside a frame of this server's own, `CalDAV request failed: "…"`: the reason phrase sits
+mid-sentence in tsdav's text, and once line breaks are stripped a forged sentence joins straight
+on. Most are awaited through `davCall`, which encloses the call expression and nothing else,
+because this server's own messages are plain `Error`s too and only position tells them apart;
+its own error classes pass through by class as a backstop. Three calls sit outside it. The
+addressed fetch renders only on its rethrow branch, because `isAddressedResourceMissing` reads
+tsdav's raw text to swallow a 404. `client.login()` is rendered by the login refusal above. The
+broken-collection `davRequest` catches and returns `[]`, so nothing of it reaches the caller.
 
 **The wide form is a second NAME, not an optional parameter on `describeUntrusted`.** Call sites across this codebase render lists with a bare
 `.map(describeUntrusted)`, and `Array.prototype.map` passes the array INDEX as the second
