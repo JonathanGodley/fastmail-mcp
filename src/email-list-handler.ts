@@ -28,8 +28,11 @@ export function normalizeSortBy(value: unknown): EmailSortBy | undefined {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : undefined;
   const match = EMAIL_SORT_VALUES.find(v => v.toLowerCase() === text);
   if (!match) {
+    const received = typeof value === 'string' ? `got: "${echoCallerText(value)}"`
+      : Array.isArray(value) ? 'received an array'
+      : `received ${/^[aeiou]/.test(typeof value) ? 'an' : 'a'} ${typeof value}`;
     throw new InvalidInputError(
-      `sortBy must be one of ${EMAIL_SORT_VALUES.map(v => `"${v}"`).join(', ')} (got: "${echoCallerText(value)}"). ` +
+      `sortBy must be one of ${EMAIL_SORT_VALUES.map(v => `"${v}"`).join(', ')} (${received}). ` +
       'Omit it for the default order, newest first.',
     );
   }

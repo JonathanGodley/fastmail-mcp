@@ -447,7 +447,7 @@ const ASCENDING_DESC =
   lenientBool('Sort ascending instead of descending (default: false). The default is newest first for date/sentAt, largest first for size, and Z to A for from/to/subject; true reverses it. Messages with an equal key stay newest first either way.');
 
 const SORT_BY_DESC =
-  'What to order results by (default: "date", the received time shown as `date`). "sentAt" is the send time the sender claims; it is returned only when named in fields. "size" is the whole message in bytes. "from"/"to" compare the first address\'s display name, or the address when it has none, ignoring case. "subject" ignores leading Re:/Fwd: and bracketed tags. A message with no such header sorts as empty. Direction comes from ascending.';
+  'What to order results by (default: "date", the received time shown as `date`). "sentAt" is the send time the sender claims; it is returned only when named in fields. "size" is the whole message in bytes. "from"/"to" compare the first address\'s display name, or the address when it has none, ignoring case. "subject" uses the server\'s own subject ordering, which ignores leading Re:/Fwd:; the exact collation is the server\'s. A message with no From, To or Subject sorts as empty for that sort. Direction comes from ascending.';
 
 // The reliability contract that makes silence trustworthy. The no-note guarantee leads as
 // its own sentence (a skimming model must hit "no note => trustworthy" first).

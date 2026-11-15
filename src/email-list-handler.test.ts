@@ -135,6 +135,16 @@ describe('listEmailsTool', () => {
     }
   });
 
+  // An echo of ["size"] would read `got: "size"`, a value the same message lists as valid.
+  for (const [value, type] of [[['size'], 'an array'], [{ by: 'size' }, 'an object'], [7, 'a number'], [true, 'a boolean']] as const) {
+    it(`names the type of a non-string sortBy instead of echoing it: ${type}`, async () => {
+      await assert.rejects(
+        () => listEmailsTool({ sortBy: value }, 20, stubClient().client),
+        (err: Error) => err.name === 'InvalidInputError' && err.message.includes(`(received ${type})`) && !err.message.includes('got:'),
+      );
+    });
+  }
+
   it('checks its arguments in a fixed order', async () => {
     await assertCheckOrder(listEmailsTool, [
       ['ascending', 'x'], ['sortBy', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
