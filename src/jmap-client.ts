@@ -1989,20 +1989,31 @@ export class JmapClient {
     const deletedMailbox = this.readListResultIfPresent(response, 0).find(mb => mb?.id === id);
     if (!deletedMailbox) return { deleted: id };
     // The only sign that a server ignored both the checks above and its own refusals.
-    const unsafe: string[] = [];
-    if (deletedMailbox.totalEmails !== undefined && deletedMailbox.totalEmails !== 0) {
-      unsafe.push(`held ${describeUntrusted(deletedMailbox.totalEmails)} messages`);
+    // An absent field, a count of 0 and a null role say nothing; a malformed value is reported
+    // as unknown, never quoted as a count or a role.
+    const facts: string[] = [];
+    const doubts: string[] = [];
+    const count = deletedMailbox.totalEmails;
+    if (Number.isInteger(count) && count > 0) {
+      facts.push(`held ${count} ${count === 1 ? 'message' : 'messages'}`);
+    } else if (count !== undefined && count !== 0) {
+      doubts.push('The server did not report a valid message count for it at the moment of the destroy, so it cannot be shown to have been empty.');
     }
-    if (deletedMailbox.role !== undefined && deletedMailbox.role !== null) {
-      unsafe.push(`had the role "${describeUntrusted(deletedMailbox.role)}"`);
+    const role = deletedMailbox.role;
+    if (typeof role === 'string') {
+      facts.push(`had the role "${describeUntrusted(role)}"`);
+    } else if (role !== undefined && role !== null) {
+      doubts.push('The server reported its role in a form that is not a role name, so it cannot be shown to have been an ordinary folder.');
     }
-    if (unsafe.length === 0) return { deleted: id, deletedMailbox };
+    if (facts.length === 0 && doubts.length === 0) return { deleted: id, deletedMailbox };
+    const which = facts.length ? `, which at the moment of the destroy ${facts.join(' and ')}` : '';
+    const advice = facts.length
+      ? 'Its mail may have been removed with it; check Trash and the Fastmail web interface.'
+      : 'Check Trash and the Fastmail web interface.';
     return {
       deleted: id,
       deletedMailbox,
-      warning:
-        `WARNING: the server destroyed ${label}, which at the moment of the destroy ${unsafe.join(' and ')}. ` +
-        'Its mail may have been removed with it; check Trash and the Fastmail web interface.',
+      warning: [`WARNING: the server destroyed ${label}${which}.`, ...doubts, advice].join(' '),
     };
   }
 

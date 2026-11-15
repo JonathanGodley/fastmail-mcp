@@ -5567,6 +5567,48 @@ describe('deleteMailbox', () => {
     assert.match((await client.deleteMailbox('mb-old')).warning ?? '', /moment of the destroy had the role "archive"\./);
   });
 
+  it('says "1 message" in the singular and "2 messages" in the plural', async () => {
+    for (const [totalEmails, phrase] of [[1, 'held 1 message.'], [2, 'held 2 messages.']] as const) {
+      client = makeClient();
+      stubDelete({ echo: [{ ...OLD_AS_DESTROYED, totalEmails }] });
+      const warning = (await client.deleteMailbox('mb-old')).warning ?? '';
+      assert.ok(warning.includes(`moment of the destroy ${phrase} Its mail may have been removed`), warning);
+    }
+  });
+
+  it('reports a malformed echoed count as unknown, never as a number of messages', async () => {
+    for (const totalEmails of ['0', null, -1, 1.5]) {
+      client = makeClient();
+      stubDelete({ echo: [{ ...OLD_AS_DESTROYED, totalEmails }] });
+      assert.equal(
+        (await client.deleteMailbox('mb-old')).warning,
+        'WARNING: the server destroyed mailbox "Projects/Old" (id "mb-old"). The server did not report a valid message ' +
+          'count for it at the moment of the destroy, so it cannot be shown to have been empty. ' +
+          'Check Trash and the Fastmail web interface.',
+        JSON.stringify(totalEmails),
+      );
+    }
+  });
+
+  it('reports a malformed echoed role as unknown, never quoting it as a role', async () => {
+    for (const role of [7, { name: 'archive' }]) {
+      client = makeClient();
+      stubDelete({ echo: [{ ...OLD_AS_DESTROYED, role }] });
+      assert.equal(
+        (await client.deleteMailbox('mb-old')).warning,
+        'WARNING: the server destroyed mailbox "Projects/Old" (id "mb-old"). The server reported its role in a form ' +
+          'that is not a role name, so it cannot be shown to have been an ordinary folder. ' +
+          'Check Trash and the Fastmail web interface.',
+        JSON.stringify(role),
+      );
+    }
+  });
+
+  it('gives no warning when the echo shows a count of 0 and a null role', async () => {
+    stubDelete({ echo: [OLD_AS_DESTROYED] });
+    assert.equal((await client.deleteMailbox('mb-old')).warning, undefined);
+  });
+
   it('gives no warning when the echo omits totalEmails and role', async () => {
     const { totalEmails: _t, role: _r, ...bare } = OLD_AS_DESTROYED;
     stubDelete({ echo: [bare] });
