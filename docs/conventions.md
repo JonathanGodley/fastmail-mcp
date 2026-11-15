@@ -1284,7 +1284,7 @@ lines the join exists to show. Each line then goes through `describePart` at
 `JOIN_LINE_ECHO_LIMIT` (120). The markup run at an HTML join is redacted whole, cut to
 `JOIN_MARKUP_ECHO_LIMIT` (80) on the side away from the token, then neutralised.
 
-**An invitation-controlled value is quoted, inside `"…"`.** "Bare" is never a synonym for
+**In a calendar message, an invitation-controlled value is quoted, inside `"…"`.** "Bare" is never a synonym for
 "safe". A value dropped unquoted into a sentence that single-quotes something *else* breaks that
 sentence's quote parity, and everything after it reads as prose outside any span. Nor do quotes
 have to be involved: any delimiter the sentence relies on, a closing parenthesis or a full stop,
@@ -1294,11 +1294,12 @@ line and with no control character
 ([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)). The helpers' quote swap
 makes `"…"` the one span such a value cannot leave. The same holds for text a remote server
 writes: a DAV reason phrase and tsdav's login failure each end a sentence, so a full stop in them
-writes the next one, and both are quoted. A bare render is left only for a value this server
-itself configures (the configured zone), and whether that holds is a property of where the value
-came from, re-checked when a message changes.
-No list of bare callers is kept: `.map(describeUntrusted)` alone renders bare across more than
-four files, and a list would read as a completed audit while going stale.
+writes the next one, and both are quoted. In calendar refusals and confirmations the one bare
+helper render left is the configured zone, which this server itself sets; whether a value may be
+bare is a property of where it came from, re-checked when a message changes. Outside the calendar
+messages bare renders remain, and no list of them is kept: `.map(describeUntrusted)` alone
+renders bare across more than four files, and a list would read as a completed audit while going
+stale.
 The three refusals `validateDateConsistency` raises show why it matters: each echoes a
 DTSTART/DTEND, and only a side the caller actually supplied is the caller's own validated
 input. A side they left alone is read from the stored VEVENT, where `formatICalDate` hands
