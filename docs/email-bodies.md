@@ -578,7 +578,7 @@ carries the original unrendered.
   HTML into the text part of an html-only original — this server's attachment carry and
   `htmlToText` conversion are deliberate improvements, not parity.
 
-## Why trash + recreate is mandatory
+## Why recreate is mandatory
 
 JMAP email body properties are immutable and server-set (RFC 8621 §4.1.4); only
 `keywords` and `mailboxIds` are mutable. So editing a draft's subject or body is done
@@ -596,49 +596,58 @@ recreate: Fastmail assembles the `multipart/related` structure from the re-refer
 flat part (`blobId` + `cid` + `disposition`), so the embedded image survives (#13). Only a part the recreate cannot re-reference, or a body that interleaves
 multiple same-type text parts, is refused rather than silently mangled (#85).
 
-### Disposing of the replaced draft: Trash, never destroy (#65)
+### Disposing of the replaced draft: destroyed, as the web client does (#229)
 
-The old copy is disposed of by moving it to the mailbox with the `trash` role (an
-`Email/set update` of `mailboxIds` only; `keywords` are left alone, so the copy is still
-a `$draft` and restoring it is a move back to Drafts; Trash retention applies by mailbox,
-not by keyword). A destroy would leave a replaced draft recoverable only from a
-support-side backup; #65 records the data loss that cost.
+The old copy is destroyed (`Email/set destroy`) once the replacement is created and
+confirmed. Fastmail's own web client does the same on a draft save, and nothing is left in
+Trash.
 
-A body edit from a stale copy is refused: it must carry the `bodyHash` of the current body
-from a read or from the write that saved it (see "How quoted history survives an edit" above). What the hash cannot catch
-is a caller who read the current body and then deliberately replaced it, or a change that
-lands between the check and the write, so the mitigation for those is on the disposal side
-plus disclosure:
+Nothing undoes an edit. The guard is on the way in: every body edit has to carry the
+`bodyHash` of the current body (see "How quoted history survives an edit" above), which
+refuses an edit made from a stale copy before anything is written. What the hash cannot
+catch is a caller who read the current body and then deliberately replaced it, or a change
+that lands between the check and the write. Those are not recoverable. Keeping the replaced
+copy in Trash as an undo was tried and dropped: #229 records why.
 
-- **Trash, not destroy** turns the overwrite into a one-step undo. How long the copy
-  survives is the account's business: Fastmail's Trash retention is a per-account setting
-  and can be set to never auto-purge, so "recoverable until Trash is emptied or
-  auto-purged" is the honest claim — not a fixed expiry window (not live-probed).
-- **There is no destroy fallback.** If the Trash move can't happen (no `trash` role on the
-  account, a `notUpdated` entry, a thrown transport error, or a response that reports the
-  id in neither `updated` nor `notUpdated`), the old draft is left exactly where it was and
-  reported as `orphanedOldDraftId` + `orphanedOldDraftReason`. Success is confirmed
-  positively from `updated` (RFC 8620 §5.3 puts every id in exactly one map, and `updated`
-  maps id → object|**null**, so it is a key test, not a truthiness test) — inferring it
-  from the absence of a `notUpdated` entry would report "recoverable in Trash" for a draft
-  still sitting in Drafts. The edit itself already succeeded, so this never throws. A
-  visible duplicate the caller can delete is strictly cheaper than the unrecoverable act
-  this path exists to avoid.
-- **A trashed draft stops counting as an active draft.** `get_thread` hides drafts and
-  reports how many it hid, keyed on the `$draft` keyword; since the replaced copy keeps
-  that keyword, every edit would otherwise add one to that count for the life of the Trash
-  copy, and a thread with one real draft reply would warn about three. So a `$draft`
-  message whose ONLY mailbox is the `trash`-role one is neither shown nor counted (a
-  caller who wants Trash content reads Trash). If the `trash` role can't be resolved,
-  every draft is counted as before — fail toward over-warning, never toward missing a
-  real draft reply.
-- **The result echoes back what was replaced** (`replacedDraft`: id, subject, to/cc/bcc/replyTo, and
-  body character counts), so a caller comparing against its own copy sees an unintended
-  overwrite immediately. Sizes rather than the previous bodies: the old draft is intact in
-  Trash, so its full content is one `get_email` away.
+- **The destroy is confirmed positively, and never thrown.** Success is the id appearing in
+  `destroyed`. A `notDestroyed` entry, a thrown transport error, or a response naming the id
+  in neither list leaves the old draft where it was, reported as `orphanedOldDraftId` +
+  `orphanedOldDraftReason`: the edit already succeeded, and a visible duplicate the caller
+  can delete is cheaper than a claim that the copy is gone when it may not be.
+- **`notFound` is its own outcome** (`vanishedOldDraftId`). The old copy went between the
+  read and the destroy, which is what another client saving the draft looks like (below),
+  so the result warns that Drafts may hold a second copy rather than reporting a clean
+  delete or a duplicate.
+- **A trashed draft does not count as an active draft.** `get_thread` hides drafts and
+  reports how many it hid, keyed on the `$draft` keyword, and a draft deleted with
+  `delete_email` keeps that keyword in Trash. So a `$draft` message whose ONLY mailbox is
+  the `trash`-role one is neither shown nor counted (a caller who wants Trash content reads
+  Trash). If the `trash` role can't be resolved, every draft is counted — fail toward
+  over-warning, never toward missing a real draft reply.
+- **The result echoes back what was replaced** (`replacedDraft`: id, subject,
+  to/cc/bcc/replyTo, and body character counts), so a caller comparing against its own copy
+  sees an unintended overwrite immediately.
 
-Exactly one of `trashedOldDraftId` / `orphanedOldDraftId` is always set — the fate of the
-replaced draft is never left unstated.
+Exactly one of `destroyedOldDraftId` / `vanishedOldDraftId` / `orphanedOldDraftId` is always
+set — the fate of the replaced draft is never left unstated.
+
+### Two writers on one draft: the web composer (accepted limit)
+
+Measured live 2026-11-15 on one throwaway draft, driving the Fastmail web client:
+
+- **A web-client draft save destroys the copy it replaces.** The saved draft came back under
+  a new id and the old id was no longer found anywhere, Trash included.
+- **An open composer does not notice an `edit_draft`.** After an edit replaced the draft the
+  composer was open on, it kept showing the old body, with no warning.
+- **Saving from that stale composer forks the draft.** The save created a second draft in
+  Drafts from the composer's stale body, beside the one `edit_draft` wrote, and destroyed
+  the copy the composer had been open on (then in Trash, where the edit had moved it).
+
+Nothing here detects the fork: the server cannot see an open composer, the session's next
+edit passes its `bodyHash` check because its own copy is unchanged, and matching a second
+draft by subject would misfire on legitimate drafts. Editing one draft through two clients
+at once is left to the user not to do; the tool description says so. Not measured: the same
+sequence with the old copy destroyed rather than trashed.
 
 ## Body extraction: matching by MIME type, not list membership
 

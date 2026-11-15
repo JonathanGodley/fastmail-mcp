@@ -90,7 +90,7 @@ try {
   check('after drop: part carried as regular attachment (not lost)', !!findImg(em) && findImg(em).isInline !== true, JSON.stringify(findImg(em) ?? em.attachments));
 } finally {
   // Each edit already trashed its predecessor; trashing the rest is idempotent.
-  for (const id of trash) { try { await c.call('delete_email', { emailId: id }); } catch { /* already in Trash */ } }
+  for (const id of trash) { try { await c.call('delete_email', { emailId: id }); } catch { /* already deleted by an edit */ } }
   console.log(`trashed ${trash.length} draft generations`);
   await c.close();
 }

@@ -244,7 +244,7 @@ describe('an id the remote server hands back is echoed like any other value we d
       if (params.create) {
         return { methodResponses: [['Email/set', { created: { draft: { id: HOSTILE } } }, 'createDraft']] };
       }
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: ['draft-1'] }, 'destroyOldDraft']] };
     });
 
     const result = await client.updateDraft('draft-1', {

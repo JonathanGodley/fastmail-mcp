@@ -472,7 +472,7 @@ const MAILBOXES_WITH_TRASH = [
 ];
 
 // Wire makeRequest for create-then-dispose: Email/get returns the fixture; the create-only
-// Email/set returns a created id; the update-only Email/set moves the old draft to Trash.
+// Email/set returns a created id; the destroy-only Email/set removes the old draft.
 function mockUpdate(client: JmapClient, fixture: any, mailboxes: any[] = MAILBOXES_WITH_TRASH) {
   mock.method(client, 'getMailboxes', async () => mailboxes);
   return stubRequests(client, async (req: any) => {
@@ -480,11 +480,11 @@ function mockUpdate(client: JmapClient, fixture: any, mailboxes: any[] = MAILBOX
     if (method === 'Email/get') {
       return { methodResponses: [['Email/get', { list: [fixture] }, 'getEmail']] };
     }
-    // Email/set — create-then-dispose issues a create-only call, then an update-only call.
+    // Email/set — create-then-dispose issues a create-only call, then a destroy-only call.
     if (params.create) {
       return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
     }
-    return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+    return { methodResponses: [['Email/set', { destroyed: ['draft-1'] }, 'destroyOldDraft']] };
   });
 }
 
@@ -517,10 +517,10 @@ describe('updateDraft', () => {
 
     const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
     assert.equal(result.id, 'draft-2');
-    assert.equal(result.trashedOldDraftId, 'draft-1');
+    assert.equal(result.destroyedOldDraftId, 'draft-1');
     assert.equal(result.orphanedOldDraftId, undefined);
 
-    // Three calls: Email/get, a create-ONLY Email/set, then the Trash move.
+    // Three calls: Email/get, a create-ONLY Email/set, then the destroy.
     assert.equal(makeReq.mock.calls.length, 3);
     const createCall = callArguments(makeReq, 1)[0].methodCalls[0];
     assert.equal(createCall[0], 'Email/set');
@@ -532,51 +532,32 @@ describe('updateDraft', () => {
     assert.equal(disposeCall[1].create, undefined); // dispose call must NOT also create
   });
 
-  // ---- disposal of the replaced draft: Trash, never destroy (#65) ----
+  // ---- disposal of the replaced draft: destroyed, as Fastmail's own client does (#229) ----
 
-  it('moves the replaced draft to Trash and never issues a destroy', async () => {
+  it('destroys the replaced draft, and only that draft, without moving it first', async () => {
     const makeReq = mockUpdate(client, EXISTING_DRAFT);
 
     const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
-    assert.equal(result.trashedOldDraftId, 'draft-1');
+    assert.equal(result.destroyedOldDraftId, 'draft-1');
 
     const disposeParams = callArguments(makeReq, 2)[0].methodCalls[0][1];
-    // mailboxIds only: keywords (incl. $draft) are left untouched, so the trashed copy is
-    // still a draft and can be moved back to Drafts.
-    assert.deepEqual(disposeParams.update, { 'draft-1': { mailboxIds: { 'mb-trash': true } } });
-    assert.equal(disposeParams.update['draft-1'].keywords, undefined);
-    // No call anywhere in the exchange may destroy the replaced draft.
+    assert.deepEqual(disposeParams.destroy, ['draft-1']);
+    // No call anywhere in the exchange moves the replaced draft: nothing is left in Trash.
     for (const call of makeReq.mock.calls) {
-      assert.equal(call.arguments[0].methodCalls[0][1].destroy, undefined);
+      assert.equal(call.arguments[0].methodCalls[0][1].update, undefined);
     }
   });
 
-  it('resolves Trash by exact role, not by a folder merely named like it', async () => {
-    const makeReq = mockUpdate(client, EXISTING_DRAFT, [
-      { id: 'mb-drafts', name: 'Drafts', role: 'drafts' },
-      { id: 'mb-fake', name: 'Trash bin rules', role: null },
-      { id: 'mb-trash', name: 'Deleted Items', role: 'Trash' }, // role casing is normalised
-    ]);
-
-    const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
-    assert.equal(result.trashedOldDraftId, 'draft-1');
-    const disposeParams = callArguments(makeReq, 2)[0].methodCalls[0][1];
-    assert.deepEqual(disposeParams.update, { 'draft-1': { mailboxIds: { 'mb-trash': true } } });
-  });
-
-  it('with no Trash mailbox: leaves the old draft in place with a reason, does NOT destroy it', async () => {
-    const makeReq = mockUpdate(client, EXISTING_DRAFT, [DRAFTS_MAILBOX]);
+  it('destroys the replaced draft on an account with no Trash mailbox', async () => {
+    mockUpdate(client, EXISTING_DRAFT, [DRAFTS_MAILBOX]);
 
     const result = await client.updateDraft('draft-1', { subject: 'X' });
     assert.equal(result.id, 'draft-2');
-    assert.equal(result.trashedOldDraftId, undefined);
-    assert.equal(result.orphanedOldDraftId, 'draft-1');
-    assert.match(result.orphanedOldDraftReason!, /trash role/i);
-    // Email/get + create, and then nothing: no fallback destroy.
-    assert.equal(makeReq.mock.calls.length, 2);
+    assert.equal(result.destroyedOldDraftId, 'draft-1');
+    assert.equal(result.orphanedOldDraftId, undefined);
   });
 
-  it('on a failed Trash move (notUpdated): surfaces the orphan + reason, does NOT throw', async () => {
+  it('when the old draft is already gone (notFound): reports it vanished, not orphaned or destroyed', async () => {
     mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
     stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
@@ -586,17 +567,38 @@ describe('updateDraft', () => {
       if (params.create) {
         return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
       }
-      return { methodResponses: [['Email/set', { notUpdated: { 'draft-1': { type: 'serverFail', description: 'busy' } } }, 'trashOldDraft']] };
+      return { methodResponses: [['Email/set', { notDestroyed: { 'draft-1': { type: 'notFound' } } }, 'destroyOldDraft']] };
     });
 
     const result = await client.updateDraft('draft-1', { subject: 'X' });
     assert.equal(result.id, 'draft-2');
-    assert.equal(result.trashedOldDraftId, undefined);
+    assert.equal(result.vanishedOldDraftId, 'draft-1');
+    assert.equal(result.destroyedOldDraftId, undefined);
+    assert.equal(result.orphanedOldDraftId, undefined);
+  });
+
+  it('on a failed destroy (notDestroyed): surfaces the orphan + reason, does NOT throw', async () => {
+    mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
+    stubRequests(client, async (req: any) => {
+      const [method, params] = req.methodCalls[0];
+      if (method === 'Email/get') {
+        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
+      }
+      if (params.create) {
+        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
+      }
+      return { methodResponses: [['Email/set', { notDestroyed: { 'draft-1': { type: 'serverFail', description: 'busy' } } }, 'destroyOldDraft']] };
+    });
+
+    const result = await client.updateDraft('draft-1', { subject: 'X' });
+    assert.equal(result.id, 'draft-2');
+    assert.equal(result.destroyedOldDraftId, undefined);
+    assert.equal(result.vanishedOldDraftId, undefined);
     assert.equal(result.orphanedOldDraftId, 'draft-1');
     assert.match(result.orphanedOldDraftReason!, /serverFail|busy/);
   });
 
-  it('when the server reports the move in neither updated nor notUpdated: orphaned, not assumed trashed', async () => {
+  it('when the server reports the destroy in neither destroyed nor notDestroyed: orphaned, not assumed gone', async () => {
     mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
     stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
@@ -606,19 +608,19 @@ describe('updateDraft', () => {
       if (params.create) {
         return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
       }
-      // Neither map mentions draft-1: claiming "recoverable in Trash" here would be a
-      // guess about a draft that may still be sitting in Drafts.
-      return { methodResponses: [['Email/set', { updated: {}, notUpdated: {} }, 'trashOldDraft']] };
+      // Neither list mentions draft-1: claiming it was deleted here would be a guess about
+      // a draft that may still be sitting in Drafts.
+      return { methodResponses: [['Email/set', { destroyed: [], notDestroyed: {} }, 'destroyOldDraft']] };
     });
 
     const result = await client.updateDraft('draft-1', { subject: 'X' });
     assert.equal(result.id, 'draft-2');
-    assert.equal(result.trashedOldDraftId, undefined);
+    assert.equal(result.destroyedOldDraftId, undefined);
     assert.equal(result.orphanedOldDraftId, 'draft-1');
-    assert.match(result.orphanedOldDraftReason!, /did not report the move/i);
+    assert.match(result.orphanedOldDraftReason!, /did not report the delete/i);
   });
 
-  it('treats a null entry in updated as a successful move (JMAP allows id -> null)', async () => {
+  it('when the destroy request throws: surfaces the orphan + reason, does NOT throw', async () => {
     mock.method(client, 'getMailboxes', async () => MAILBOXES_WITH_TRASH);
     stubRequests(client, async (req: any) => {
       const [method, params] = req.methodCalls[0];
@@ -628,31 +630,7 @@ describe('updateDraft', () => {
       if (params.create) {
         return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
       }
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
-    });
-
-    const result = await client.updateDraft('draft-1', { subject: 'X' });
-    assert.equal(result.trashedOldDraftId, 'draft-1');
-    assert.equal(result.orphanedOldDraftId, undefined);
-  });
-
-  it('when the mailbox lookup throws: surfaces the orphan + reason, does NOT throw', async () => {
-    // The first lookup is the Drafts gate before anything is written; the one after the
-    // create is the one that fails here.
-    let lookups = 0;
-    mock.method(client, 'getMailboxes', async () => {
-      if (lookups++ === 0) return MAILBOXES_WITH_TRASH;
       throw new Error('network down');
-    });
-    stubRequests(client, async (req: any) => {
-      const [method, params] = req.methodCalls[0];
-      if (method === 'Email/get') {
-        return { methodResponses: [['Email/get', { list: [EXISTING_DRAFT] }, 'getEmail']] };
-      }
-      if (params.create) {
-        return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
-      }
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
     });
 
     const result = await client.updateDraft('draft-1', { subject: 'X' });
@@ -1251,7 +1229,7 @@ describe('updateDraft', () => {
       if (params.create) {
         return { methodResponses: [['Email/set', { notCreated: { draft: { type: 'invalidProperties', description: 'bad blob' } } }, 'createDraft']] };
       }
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: ['draft-1'] }, 'destroyOldDraft']] };
     });
     await assert.rejects(
       () => client.updateDraft('draft-1', { subject: 'X' }),
@@ -1353,7 +1331,7 @@ describe('updateDraft', () => {
         created = params.create.draft;
         return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
       }
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: ['draft-1'] }, 'destroyOldDraft']] };
     });
   }
 
@@ -1546,7 +1524,7 @@ describe('updateDraft', () => {
         return { methodResponses: [['Email/get', { list: [HTML_ONLY_REPLY] }, 'getEmail']] };
       }
       if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: ['draft-1'] }, 'destroyOldDraft']] };
     });
     const result = await client.updateDraft('draft-1', { htmlBody: '<p>x</p>', bodyHash: hashOf(HTML_ONLY_REPLY) });
     assert.equal(result.bodyHash, undefined);
@@ -5219,7 +5197,7 @@ describe('updateDraft embedded images (#13)', () => {
         return { methodResponses: [['Email/get', { list: [before] }, 'getEmail']] };
       }
       if (params.create) return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: ['draft-1'] }, 'destroyOldDraft']] };
     });
   }
 
@@ -5946,7 +5924,7 @@ describe('updateDraft bodyEdits (#177)', () => {
         created = { ...params.create.draft, id: 'draft-2' };
         return { methodResponses: [['Email/set', { created: { draft: { id: 'draft-2' } } }, 'createDraft']] };
       }
-      return { methodResponses: [['Email/set', { updated: { 'draft-1': null } }, 'trashOldDraft']] };
+      return { methodResponses: [['Email/set', { destroyed: ['draft-1'] }, 'destroyOldDraft']] };
     });
   }
 

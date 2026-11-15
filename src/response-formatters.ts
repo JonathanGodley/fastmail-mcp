@@ -164,14 +164,16 @@ export function formatBodyHash(result: { bodyHash?: string; bodyHashWithheld?: s
 }
 
 // The replaced copy's contents are echoed so a caller that edited from a stale read sees
-// what it overwrote, and can restore it from Trash (#65).
+// what it overwrote (#65).
 export function formatEditDraftResult(result: UpdateDraftResult): string {
   // Server/exception text on a RETURNED result, which the CallTool catch never redacts, so it
   // is neutralised here (#134): at the one render site, so a new assignment site in
   // jmap-client.ts is covered without anyone remembering.
-  const disposal = result.trashedOldDraftId
-    ? `The previous draft (id ${result.trashedOldDraftId}) was moved to Trash, where it stays recoverable until Trash is emptied or auto-purged.`
-    : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be moved to Trash (${describeUntrusted(result.orphanedOldDraftReason ?? 'reason unknown')}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
+  const disposal = result.destroyedOldDraftId
+    ? `The previous draft (id ${result.destroyedOldDraftId}) was permanently deleted.`
+    : result.vanishedOldDraftId
+      ? `WARNING: the previous draft (id ${result.vanishedOldDraftId}) was already gone when this edit went to delete it, so something else replaced or deleted it during the edit. If another client saved this draft, Drafts now holds a second copy without this edit; check with search_emails before editing further.`
+      : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be deleted (${describeUntrusted(result.orphanedOldDraftReason ?? 'reason unknown')}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
   const fingerprint = formatReplacedDraft(result.replacedDraft);
   const replaced = fingerprint
     ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`

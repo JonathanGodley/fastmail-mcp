@@ -701,8 +701,7 @@ function isImagePart(part: any): boolean {
 }
 
 // A compact fingerprint of the draft an edit replaced, so a caller that edited from a
-// stale copy sees what it overwrote (#65). Sizes, not bodies, and no Bcc: the old draft
-// survives in Trash.
+// stale copy sees what it overwrote (#65). Sizes, not bodies.
 export interface ReplacedDraftInfo {
   id: string;
   subject?: string;
@@ -714,14 +713,16 @@ export interface ReplacedDraftInfo {
   htmlBodySize?: number;
 }
 
-// updateDraft's result. Exactly ONE of trashedOldDraftId / orphanedOldDraftId is always
-// set: the old copy's fate is never left unstated.
+// updateDraft's result. Exactly ONE of destroyedOldDraftId / vanishedOldDraftId /
+// orphanedOldDraftId is always set: the old copy's fate is never left unstated.
 export interface UpdateDraftResult {
   id: string;
   replacedDraft: ReplacedDraftInfo;
-  trashedOldDraftId?: string;
+  destroyedOldDraftId?: string;
+  // The old copy was already gone when the destroy ran (`notFound`).
+  vanishedOldDraftId?: string;
   orphanedOldDraftId?: string;
-  // Why the Trash move didn't happen. Set whenever orphanedOldDraftId is.
+  // Why the destroy didn't happen. Set whenever orphanedOldDraftId is.
   orphanedOldDraftReason?: string;
   // What the edit did to the draft's embedded images (#13); present only when it did something.
   inlineImages?: { embedded: number; degraded: number; removed: number };
@@ -1713,7 +1714,7 @@ export class JmapClient {
   }
 
   /**
-   * edit_draft refuses a draft filed in Trash. A superseded copy keeps `$draft` there, and the
+   * edit_draft refuses a draft filed in Trash. A deleted draft keeps `$draft` there, and the
    * recreate carries the old copy's mailboxIds, so an edit would write the replacement into
    * Trash too. A draft filed anywhere else (draft_email's `mailbox`) stays editable.
    */
@@ -2815,44 +2816,40 @@ export class JmapClient {
       throw new Error('Draft update returned no email ID');
     }
 
-    // The edit has SUCCEEDED. The old copy moves to TRASH, never destroy (#65), so an edit
-    // from a stale copy is a one-step undo. Only mailboxIds is patched; `$draft` stays, as on
-    // delete_email, and getThread does not count a Trash-only draft as active.
+    // The edit has SUCCEEDED. The old copy is DESTROYED, not trashed, as Fastmail's own client
+    // does on a draft save (#229); bodyHash is the guard against a stale-copy overwrite.
     //
-    // Any failure here leaves a duplicate with the OLD content: reported as an orphan, NOT
-    // thrown, since the edit succeeded. Deliberately NO destroy fallback.
-    let trashedOldDraftId: string | undefined;
+    // A destroy the server does not confirm leaves a duplicate with the OLD content: reported
+    // as an orphan, NOT thrown, since the edit succeeded. `notFound` is its own outcome: the
+    // old copy went during this edit, which is what another client saving the draft looks like.
+    let destroyedOldDraftId: string | undefined;
+    let vanishedOldDraftId: string | undefined;
     let orphanedOldDraftId: string | undefined;
     let orphanedOldDraftReason: string | undefined;
     try {
-      const mailboxes = await this.getMailboxes();
-      const trashMailbox = this.findByExactRole(mailboxes, 'trash');
-      if (!trashMailbox) {
+      const destroyResponse = await this.makeRequest({
+        using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
+        methodCalls: [
+          ['Email/set', {
+            accountId: session.accountId,
+            destroy: [emailId],
+          }, 'destroyOldDraft']
+        ]
+      });
+      // Confirm POSITIVELY from `destroyed`: absence from both lists means the server said
+      // nothing.
+      const destroyResult = this.getMethodResult(destroyResponse, 0);
+      const destroySetError = this.setErrorFor(destroyResult.notDestroyed, emailId);
+      if (destroySetError?.type === 'notFound') {
+        vanishedOldDraftId = emailId;
+      } else if (destroySetError) {
         orphanedOldDraftId = emailId;
-        orphanedOldDraftReason = 'this account has no mailbox with the trash role';
+        orphanedOldDraftReason = this.describeSetError(destroySetError);
+      } else if (Array.isArray(destroyResult.destroyed) && destroyResult.destroyed.includes(emailId)) {
+        destroyedOldDraftId = emailId;
       } else {
-        const trashResponse = await this.makeRequest({
-          using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'],
-          methodCalls: [
-            ['Email/set', {
-              accountId: session.accountId,
-              update: { [emailId]: { mailboxIds: { [trashMailbox.id]: true } } },
-            }, 'trashOldDraft']
-          ]
-        });
-        // Confirm the move POSITIVELY, by key in `updated` (its values may be null): absence
-        // from both maps means the server said nothing.
-        const trashResult = this.getMethodResult(trashResponse, 0);
-        const trashSetError = this.setErrorFor(trashResult.notUpdated, emailId);
-        if (trashSetError) {
-          orphanedOldDraftId = emailId;
-          orphanedOldDraftReason = this.describeSetError(trashSetError);
-        } else if (Object.prototype.hasOwnProperty.call(trashResult.updated ?? {}, emailId)) {
-          trashedOldDraftId = emailId;
-        } else {
-          orphanedOldDraftId = emailId;
-          orphanedOldDraftReason = 'the server did not report the move as applied';
-        }
+        orphanedOldDraftId = emailId;
+        orphanedOldDraftReason = 'the server did not report the delete as applied';
       }
     } catch (err) {
       orphanedOldDraftId = emailId;
@@ -2938,7 +2935,8 @@ export class JmapClient {
     return {
       id: newEmailId,
       replacedDraft,
-      ...(trashedOldDraftId && { trashedOldDraftId }),
+      ...(destroyedOldDraftId && { destroyedOldDraftId }),
+      ...(vanishedOldDraftId && { vanishedOldDraftId }),
       ...(orphanedOldDraftId && { orphanedOldDraftId, orphanedOldDraftReason }),
       ...(issuedBodyHash !== undefined && { bodyHash: issuedBodyHash }),
       ...(bodyHashWithheld !== undefined && { bodyHashWithheld }),

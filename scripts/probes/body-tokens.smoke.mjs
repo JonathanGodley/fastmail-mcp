@@ -29,6 +29,8 @@ await c.init();
 const { check, failures } = makeChecker();
 const trash = [];
 const keep = r => { const id = idOf(text(r)); if (id) trash.push(id); return id; };
+// A successful edit_draft deletes the draft it replaced, so that id leaves the cleanup list.
+const replaced = (r, id) => { if (!r.isError && trash.includes(id)) trash.splice(trash.indexOf(id), 1); };
 
 // BOTH bodies and the hash in one read: the default get_email omits bodyHtml whenever a
 // text part exists, and a hash is issued only to a read that showed every stored byte.
@@ -153,6 +155,7 @@ try {
   });
   check('unflagged edit: accepted with the current hash', !r.isError, text(r).slice(0, 300));
   const d3 = keep(r);
+  replaced(r, d1);
   check('unflagged edit: the stored-as-written note fired',
     /\{\{signature\}\} tokens? the stored body did not/.test(text(r)), text(r).slice(0, 400));
   check('unflagged edit: a hash for the next edit came back',
@@ -174,6 +177,7 @@ try {
   });
   check('flagged edit: accepted', !r.isError, text(r).slice(0, 300));
   const d4 = keep(r);
+  replaced(r, d3);
   const flagged = await readDraft(d4);
   check('flagged edit: no token survives the expansion',
     !TOKEN_RE.test(flagged.html) && !TOKEN_RE.test(flagged.txt),
@@ -183,7 +187,6 @@ try {
       words(flagged.html).includes(SIG_WORDS), `looking for "${SIG_WORDS.slice(0, 60)}" in ${words(flagged.html).slice(0, 200)}`);
   }
 } finally {
-  // An edit already moved each superseded copy to Trash, so a repeat delete is a no-op.
   // Failures are counted, not swallowed.
   let undeleted = 0;
   for (const id of trash) {
