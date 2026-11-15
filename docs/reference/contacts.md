@@ -11,7 +11,7 @@
 - Emails and phones flattened from JMAP's Id-map to an array — see the hybrid shape below
 - Default view: `organization` is the first organization's name, and `notes` is the text of every note joined with a newline
 - `kind` omitted when it is the default `individual` - see below
-- Verbose: addresses as objects, anniversaries as stored; `organizations`, `titles` and `notes` are the card's own Id-maps, keys kept, so a title's `organizationId` refers to a key of `organizations`; `organization` is still emitted; an `online` key, which RFC 9553 does not define, is copied whole when present; a value of any of these four keys that is not a map is passed through as stored; the other passed-through fields keep JMAP's Id-map shape
+- Verbose: addresses as objects, anniversaries as stored; `organizations`, `titles` and `notes` are the card's own Id-maps, keys kept, so a title's `organizationId` refers to a key of `organizations`; `organization` is still emitted; an `online` key, which RFC 9553 does not define, is copied whole when present; a value of any of these four keys that is not a map is passed through as stored, except null or an empty string, which are omitted; the other passed-through fields keep JMAP's Id-map shape
 - Verbose `name` is the same display string as the default; the structured name is in `raw` only
 
 ### `kind` tells you which cards the write tools will refuse
