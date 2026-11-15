@@ -21,8 +21,10 @@ export const USAGE = 'Usage: node scripts/mutation-test.mjs <commit> | --all [--
 
 // These read src/ as text or run the built dist/, so under Stryker they either fail its initial
 // run (its instrumentation reads process.env and reprints the mutated file whole) or measure
-// the last build instead of the mutant.
-export const EXCLUDED_TESTS = ['index-env', 'readme-inventory', 'tool-schema', 'config-surface', 'built-server', 'server-lifecycle']
+// the last build instead of the mutant. payload-sizes is excluded for cost instead: it never
+// compares sizes, so it kills only a mutant that throws, yet with per-test coverage it would run
+// for every mutant on the five read paths it measures.
+export const EXCLUDED_TESTS = ['index-env', 'readme-inventory', 'tool-schema', 'config-surface', 'built-server', 'server-lifecycle', 'payload-sizes']
   .map((name) => `src/${name}.test.ts`);
 
 // A mutant that grows the JavaScript heap without bound would otherwise take the whole machine

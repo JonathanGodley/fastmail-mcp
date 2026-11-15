@@ -91,6 +91,7 @@ const HANDLER_FILES = [
   'contacts-handler.ts',
   'calendar-list-handler.ts',
   'email-list-handler.ts',
+  'email-get-handler.ts',
 ];
 
 function readLines(file: string): string[] {
