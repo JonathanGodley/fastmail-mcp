@@ -12,8 +12,9 @@
 // in a 200 propstat, the component names it lists, and whether the display name equals the
 // literal `DEFAULT_TASK_CALENDAR_NAME`. For each non-calendar entry it reports the names of
 // `resourcetype`'s direct children and the same two facts. It counts the display names it read
-// and runs the name comparison on a synthetic entry: together those show a false `taskNamed` is
-// a name that differs, not a name that went unread or a comparison that cannot match. It counts
+// and runs the name comparison on a synthetic entry: when every name was read and the self-check
+// matches, a false `taskNamed` is a name that differs, not one that went unread or a comparison
+// that cannot match. It counts
 // the calendar homes the principal names, which bounds what it looked at. Raw PROPFIND over bare
 // `fetch`, so it sees the answer before tsdav's own component filter or its flattening of absent
 // and empty into `[]`.
@@ -24,18 +25,23 @@
 //
 // OUTPUT IS SAFE TO QUOTE PUBLICLY. Names, URLs and hrefs are held in memory only. It prints
 // counts, an index per entry, booleans, component and resourcetype names from the allowlists
-// below (anything else prints as `<other>`, and is counted), the HTTP status of a refused
-// request, and for an unexpected error its name and code, never its message.
+// below (anything else prints as `<other>`, and is counted), and these fixed refusals:
+// `REFUSED  <step>: HTTP <status>`, `REFUSED  <step>: absent`, `REFUSED  href: <URL error code>`,
+// `REFUSED  href: on another origin`, and for an unexpected error `FAIL  unexpected error: <name>
+// <code>`, never its message.
 //
-// LIMITS: elements are matched by local name whatever their namespace, and hex character
-// references (`&#x…;`) in a display name are not decoded, so a name written that way would not
-// compare equal.
+// LIMITS: elements are matched by local name whatever their namespace; hex character references
+// (`&#x…;`) in a display name are not decoded, so a name written that way would not compare
+// equal; a tag inside an XML comment in `resourcetype` is counted as a child; and a raw `>` inside
+// an attribute value drops that `comp`.
 //
-// Exits non-zero on a refused request, when the self-check fails, or when no display name is read.
+// Exits non-zero on a refused request, when the self-check fails, or when any entry's display name
+// went unread.
 //
 // Run: python scripts/probes/run-probe.py calendar-component-set.probe.mjs
 
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { makeChecker } from './probelib.mjs';
 
 const ROOT = 'https://caldav.fastmail.com/dav/';
@@ -46,8 +52,9 @@ const TASK_NAME = 'DEFAULT_TASK_CALENDAR_NAME';
 // implements.
 export const COMPONENTS = new Set(['VEVENT', 'VTODO', 'VJOURNAL', 'VFREEBUSY', 'VTIMEZONE', 'VAVAILABILITY', 'VPOLL']);
 // RFC 4918 (collection), RFC 4791 (calendar), RFC 6638 (schedule-inbox, schedule-outbox),
-// RFC 3744 (principal), RFC 6352 (addressbook), and CalendarServer's notification collection.
-export const RESOURCE_TYPES = new Set(['collection', 'calendar', 'schedule-inbox', 'schedule-outbox', 'principal', 'addressbook', 'notification']);
+// RFC 3744 (principal), RFC 6352 (addressbook), CalendarServer's notification collection, and the
+// `notifications` collection Cyrus emits beside it.
+export const RESOURCE_TYPES = new Set(['collection', 'calendar', 'schedule-inbox', 'schedule-outbox', 'principal', 'addressbook', 'notification', 'notifications']);
 
 let otherNames = 0;
 export const allow = (set, name) => {
@@ -225,12 +232,14 @@ async function main() {
   console.log(`names outside the allowlists, printed as <other>: ${otherNames}`);
 
   check('the display-name comparison matches a synthetic task-named entry', selfCheck);
-  check('at least one display name was read', namesRead > 0);
+  check('a display name was read for every entry', namesRead === entries.length && entries.length > 0);
   if (failures() > 0) process.exitCode = 1;
 }
 
-// Imported for an offline check, it runs nothing.
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+// Imported for an offline check, it runs nothing. Compared by real path, because Node resolves a
+// link in the module URL but not in argv[1], and a skipped run would print nothing and exit 0.
+const real = p => { try { return realpathSync(p); } catch { return undefined; } };
+if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) {
   main().catch(e => {
     if (!(e instanceof Refused)) console.log(`FAIL  unexpected error: ${e?.name ?? 'Error'}${e?.code ? ` ${e.code}` : ''}`);
     process.exit(1);
