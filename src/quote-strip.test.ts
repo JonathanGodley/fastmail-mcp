@@ -381,7 +381,7 @@ describe('stripQuotedText — unprefixed continuations inside a quote run', () =
 });
 
 // These pin the OVER-strip direction: content that is not quoted correspondence but wears
-// a quote marker. All are documented in docs/email-bodies.md and the README as accepted
+// a quote marker. All are documented in docs/email-bodies.md and docs/reference/email.md as accepted
 // residuals — the caller's tell is quotedBytesStripped, and the remedy is re-reading
 // without the flag.
 describe('stripQuotedText — documented over-strip residuals', () => {

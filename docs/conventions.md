@@ -1101,7 +1101,7 @@ of them:
   tool that can never populate it: the list/search tools fetch `EMAIL_PROPERTIES_COMPACT`,
   so every simplified field derived from the `EMAIL_PROPERTIES_VERBOSE` additions (today
   `bodyText`, `bodyHtml`, `bodyHtmlSize`, `attachments`, `forwardedMessageId`,
-  `sourceEmailId`) comes back absent there. That is documented in the README rather than rejected — it is not a typo,
+  `sourceEmailId`) comes back absent there. That is documented in `docs/reference/responses.md` rather than rejected — it is not a typo,
   and rejecting it would make the vocabulary tool-dependent. State the rule (a field needing
   the full-message fetch is never populated on a list result) rather than only the list, so
   a field added to the verbose tier later inherits the same status without a doc rewrite.
@@ -1401,7 +1401,7 @@ signals ride on it; a `raw` caller additionally has the JMAP response's own
   what matches, and the hidden-count query stays a count — it carries no `position`.
   That count is over the whole filtered set, not the page, so the withheld-count note
   repeats identically on every page and must never be summed across pages (the tool
-  descriptions and README say so).
+  descriptions and `docs/reference/responses.md` say so).
 - **`position: 0` and an omitted `position` are the same request.** 0 is the JMAP
   default, so the parameter is only put on the wire when it is non-zero.
 - **A position past the end is not an error.** Every paged tool returns an empty page
@@ -2436,7 +2436,7 @@ write path.
 The one row that carries no recurrence claim in either direction is the placeholder a resource
 with no parseable VEVENT produces (`{ id, url, title: 'Untitled' }`). It is not set to
 `isRecurring: false`: "does not repeat" would be as unfounded as "does", said about a record
-nothing was read out of. The tool description and README carve it out by name rather than
+nothing was read out of. The tool description and `docs/reference/tools.md` carve it out by name rather than
 claiming the field is decided on literally every row.
 
 ## Local-time formatting and the U+202F trap
@@ -2522,7 +2522,7 @@ really embed — resolved to exactly one part, that part declaring itself an ima
 carrying a blob. Testing mere *resolution* would open an attribution over a quote showing
 nothing; testing the sanitised string would call an image-only message unquotable.
 
-Accepted threat floor (documented in README): `sanitize-html` is a string-to-string
+Accepted threat floor (documented in `docs/reference/tools.md`): `sanitize-html` is a string-to-string
 sanitiser (roughly the bar Gmail / Apple Mail emit) and does not fully eliminate exotic
 mutation-XSS. Stripping script / `on*` / `style` / unscoped wrappers plus pinned schemes
 is the deliberate safety floor, not an oversight. It governs the markup this server writes
@@ -2559,7 +2559,7 @@ Two consequences worth knowing before changing startup code:
 `src/server-lifecycle.test.ts` is the guard: it spawns the built `dist/index.js`, closes
 stdin, and fails if the process does not exit on its own. The consumer-facing side of
 this (spawn directly with node, never via `cmd /c` on Windows, expected handshake
-latency) is in the README's embedding section.
+latency) is in `docs/reference/embedding.md`.
 
 ## Dependency / build gotchas
 

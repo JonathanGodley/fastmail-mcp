@@ -15,7 +15,7 @@ The dangerous steps (anything that pushes, publishes, or closes a public issue) 
 - **Large or feature release? Run `/triage-release` first, strongly suggested,** before bundling more than a handful of commits or any new feature surface; a two-line fix release does not need it.
 - **Confirm what is bundled** (batching, and its security-fix exception: `CLAUDE.md` Releasing).
 - **Check upstream drift.** `git fetch upstream && git log --oneline $(git merge-base HEAD upstream/main)..upstream/main`. A two-digit list means schedule a sync — the method is `docs/upstream-sync.md`. This check never blocks a release; it just makes the drift visible while someone is looking.
-- **Confirm the documentation tax was paid.** Each bundled change must already have shipped its README + tool-description (`src/index.ts`) updates (`CONTRIBUTING.md` "Documentation ships with the change"); fix any outstanding one before tagging.
+- **Confirm the documentation tax was paid.** Each bundled change must already have shipped its `docs/reference/` and tool-description (`src/index.ts`) updates (`CONTRIBUTING.md` "Documentation ships with the change"); fix any outstanding one before tagging.
 
 ## 2. Bump the version: three hand-edited sites, the lockfile and the README pin
 
