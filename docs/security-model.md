@@ -260,8 +260,11 @@ message — the recipient sees a meeting invitation rather than free-form mail, 
 is the event — but it is a real one, and it is reachable with `send_draft` fully denied.
 
 **Why it is documented rather than blocked.** Refusing attendees would remove the feature
-outright, since there is no way to write an attendee without the server scheduling it, and
-the tool's purpose includes inviting people. So the control is disclosure: the tool
+outright, since this server has no way to write an attendee without the server scheduling
+it, and the tool's purpose includes inviting people. CalDAV scheduling does define one:
+`SCHEDULE-AGENT=NONE` on the `ATTENDEE` line (RFC 6638 section 7.1) tells the server to
+send nothing for that attendee. Whether Fastmail honours it has not been measured; #114
+holds that measurement and the decision on gating. So today the control is disclosure: the tool
 description says plainly that naming an attendee emails them, and the parameter is optional
 — an event written without `participants` notifies nobody. An operator who needs the
 guarantee that nothing leaves the account has to deny `create_calendar_event` and
