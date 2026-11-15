@@ -2604,9 +2604,7 @@ describe('echoCallerText bound', () => {
   });
 });
 
-// The floor both echo helpers share: nothing that breaks a line or overrides direction survives.
-// What echoCallerText keeps beyond describeUntrusted is every other character a working value
-// can contain, so the format characters real names carry pass through (#182).
+// The rule for which helper a value takes is in docs/conventions.md, "Untrusted values in prose" (#182).
 describe('echoCallerText neutralises C1 controls and bidi overrides, and keeps other format characters', () => {
   const ch = (code: number) => String.fromCharCode(code);
 
