@@ -273,9 +273,8 @@ export const EMAIL_PROPERTIES_COMPACT = [
   'textBody', 'sentAt',
 ] as const;
 
-// search_emails' `sortBy` values: the six Email/query sorts scripts/probes/sort-properties.probe.mjs
-// measured Fastmail accepting and ordering (#223). Named as the simplified fields are, so `date`
-// is JMAP's `receivedAt`.
+// Only sorts scripts/probes/sort-properties.probe.mjs measured on Fastmail (#223). Named as the
+// simplified fields are, so `date` is JMAP's `receivedAt`.
 export const EMAIL_SORT_VALUES = ['date', 'sentAt', 'size', 'from', 'to', 'subject'] as const;
 export type EmailSortBy = typeof EMAIL_SORT_VALUES[number];
 
@@ -4582,8 +4581,7 @@ export class JmapClient {
     const visibleQuery: any = {
       accountId: session.accountId,
       filter: visibleFilter,
-      // The tie-break is receivedAt descending whatever `ascending` says, so a group of equal
-      // keys reads newest first, as the default order does (#223).
+      // Tie-break fixed newest-first, not following `ascending` (docs/conventions.md, #223).
       sort: !opts.sortBy || opts.sortBy === 'date'
         ? [{ property: 'receivedAt', isAscending: ascending }]
         : [{ property: opts.sortBy, isAscending: ascending }, { property: 'receivedAt', isAscending: false }],

@@ -446,7 +446,6 @@ const INCLUDE_SPAM_DESC =
 const ASCENDING_DESC =
   lenientBool('Sort oldest first instead of newest first (default: false).');
 
-// search_emails takes sortBy, so its `ascending` names what the default means per sort.
 const SEARCH_ASCENDING_DESC =
   lenientBool('Sort ascending instead of descending (default: false). The default is newest first for date/sentAt, largest first for size, and Z to A for from/to/subject; true reverses it. Messages with an equal key stay newest first either way.');
 

@@ -2440,8 +2440,7 @@ describe('ascending sort parameter', () => {
     });
   });
 
-  // #223. With sortBy omitted the visible query must stay exactly what it was, key for key.
-  describe('searchEmails sortBy', () => {
+  describe('searchEmails sortBy (#223)', () => {
     const visibleQuery = async (opts: Record<string, unknown>) => {
       stubMailboxes(client);
       const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
@@ -2462,8 +2461,6 @@ describe('ascending sort parameter', () => {
       });
     }
 
-    // The tie-break is receivedAt DESCENDING whatever `ascending` says: newest first within
-    // a group of equal keys, as the default order is.
     for (const sortBy of ['sentAt', 'size', 'from', 'to', 'subject'] as const) {
       for (const ascending of [false, true]) {
         it(`sortBy ${sortBy}, ascending ${ascending} => [${sortBy}, receivedAt desc]`, async () => {
