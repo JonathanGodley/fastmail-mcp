@@ -4693,7 +4693,7 @@ export class JmapClient {
     if (before) base.before = before;
     if (resolvedMailboxId) base.inMailbox = resolvedMailboxId;
 
-    // Each keyword is its own condition (mixed polarities can't share one FilterCondition).
+    // Each keyword is its own condition: a FilterCondition holds at most one hasKeyword and one notKeyword.
     const conds: any[] = [];
     if (filters.isUnread === true) conds.push({ notKeyword: '$seen' });
     else if (filters.isUnread === false) conds.push({ hasKeyword: '$seen' });
