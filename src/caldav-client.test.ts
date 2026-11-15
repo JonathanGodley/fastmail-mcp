@@ -8510,11 +8510,11 @@ describe('an Etc/GMT zone is shown with its real UTC offset', () => {
   it('create and update confirmations append the offset', () => {
     assert.equal(
       describeCreateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT+10' }, end: { kind: 'zoned', zone: 'Etc/GMT+10' } }),
-      ' Written in zone Etc/GMT+10 (UTC-10:00; the Etc/GMT sign is inverted).',
+      ' Written in zone "Etc/GMT+10" (UTC-10:00; the Etc/GMT sign is inverted).',
     );
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Etc/GMT-5' } }),
-      ' (start zone Etc/GMT-5 (UTC+05:00; the Etc/GMT sign is inverted))',
+      ' (start zone "Etc/GMT-5" (UTC+05:00; the Etc/GMT sign is inverted))',
     );
   });
 
@@ -8575,7 +8575,7 @@ describe('calendar write result sentences (#157)', () => {
       start: { kind: 'zoned', zone: 'Australia/Sydney' },
       end: { kind: 'zoned', zone: 'Australia/Sydney' },
     });
-    assert.equal(msg, ' Written in zone Australia/Sydney.');
+    assert.equal(msg, ' Written in zone "Australia/Sydney".');
   });
 
   it('create: reports both zones separately on a legitimate cross-zone (flight) pair', () => {
@@ -8584,7 +8584,7 @@ describe('calendar write result sentences (#157)', () => {
       start: { kind: 'zoned', zone: 'Australia/Sydney' },
       end: { kind: 'zoned', zone: 'America/New_York' },
     });
-    assert.equal(msg, ' Start written in zone Australia/Sydney, end written in zone America/New_York.');
+    assert.equal(msg, ' Start written in zone "Australia/Sydney", end written in zone "America/New_York".');
   });
 
   it('create: reports UTC', () => {
@@ -8608,7 +8608,7 @@ describe('calendar write result sentences (#157)', () => {
   it('update: reports only the sides actually written', () => {
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', start: { kind: 'zoned', zone: 'Australia/Sydney' } }),
-      ' (start zone Australia/Sydney)'
+      ' (start zone "Australia/Sydney")'
     );
     assert.equal(
       describeUpdateCalendarEventResult({ eventId: 'e1', end: { kind: 'utc' } }),
@@ -8620,7 +8620,7 @@ describe('calendar write result sentences (#157)', () => {
         start: { kind: 'floating' },
         end: { kind: 'zoned', zone: 'Australia/Sydney' },
       }),
-      ' (start floating (no zone), end zone Australia/Sydney)'
+      ' (start floating (no zone), end zone "Australia/Sydney")'
     );
   });
 
@@ -12347,10 +12347,24 @@ describe('a stored TZID printed in a sentence (#182)', () => {
     const result = await client.updateCalendarEvent(STORED_UID, { start: '2026-03-20T09:30:00' });
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
     const sentence = describeUpdateCalendarEventResult(result);
-    assertNoneOfTheValuesCharacters(sentence, 0);
+    assertNoneOfTheValuesCharacters(sentence, 2);
     // WRITTEN_ZONE_ECHO_LIMIT, 100 code points, then a visible marker.
-    assert.equal(sentence, ` (start zone ${CLEANED_HEAD}${'x'.repeat(100 - CLEANED_HEAD.length)}…)`);
+    assert.equal(sentence, ` (start zone "${CLEANED_HEAD}${'x'.repeat(100 - CLEANED_HEAD.length)}…")`);
   });
+
+  for (const [label, tzid] of [
+    ['a comma', 'Foo, end zone UTC'],
+    ['a parenthesis', 'Foo) is fine (end zone UTC'],
+  ]) {
+    it(`the update success sentence: an inherited TZID with ${label} cannot write the other side for the server`, async () => {
+      const { client } = updateClient(storedEvent(
+        `DTSTART;TZID=${tzid}:20260320T090000`,
+        `DTEND;TZID=${tzid}:20260320T100000`,
+      ));
+      const result = await client.updateCalendarEvent(STORED_UID, { start: '2026-03-20T09:30:00' });
+      assert.equal(describeUpdateCalendarEventResult(result), ` (start zone "${tzid}")`);
+    });
+  }
 
   it('neutralises and bounds a stored TZID in the frame-mismatch refusal', async () => {
     const message = await refusalFor(

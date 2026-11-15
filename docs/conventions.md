@@ -1324,9 +1324,8 @@ the wider hole, and it turns on what the helper DOES, not on how the value is qu
 does three things, and quoting answers exactly one of them: whether a value can close the span
 around it. The other two — scrubbing control characters and U+2028/U+2029, and bounding the length — are things only the helper
 does, and **a value that reaches a message through no helper loses both of them however it is
-quoted, and whether or not it is quoted at all**. So an unquoted unhelped render is not the
-inert case the whole-sentence criterion above describes; that criterion is about span parity
-and says nothing here. It is the same defect presenting differently: one line of prose becomes
+quoted, and whether or not it is quoted at all**. Quoting is about span parity and says nothing
+here. It is the same defect presenting differently: one line of prose becomes
 two, and the second reads as the server's own next sentence. No length is needed and no quote
 is needed. `jmap-client.ts`'s path refusals are the worked example: nothing in this codebase
 rejects a line separator in a path (`rejectWindowsPathEscapes` covers device namespaces, UNC
@@ -1339,8 +1338,9 @@ recorded on [#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190). S
 sentences were not swept there. The calendar tools' have since been traced
 ([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)). Update and delete print the
 event id and url, and every write can append broken-collection paths, all through helpers. The
-zone written was the one value printed with none; on an update it can be a stored TZID, and it
-now renders through `describeUntrustedAt` at `WRITTEN_ZONE_ECHO_LIMIT`.
+zone written was the one value printed with none; on an update it can be a stored TZID, so it
+renders through `describeUntrustedAt` at `WRITTEN_ZONE_ECHO_LIMIT`, inside `"…"` on every zoned
+write: bare, a TZID of `Foo, end zone UTC` would confirm `(start zone Foo, end zone UTC)`.
 
 **One value outside it was traced and was not server text**
 ([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)): the `detail` in

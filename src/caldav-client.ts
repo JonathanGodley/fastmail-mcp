@@ -3140,7 +3140,7 @@ function classifyWrittenLine(formatted: FormattedDateProperty): CalendarZoneWrit
 
 function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
   switch (info.kind) {
-    case 'zoned': return `zone ${describeUntrustedAt(info.zone, WRITTEN_ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(info.zone ?? '')}`;
+    case 'zoned': return `zone "${describeUntrustedAt(info.zone, WRITTEN_ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(info.zone ?? '')}`;
     case 'utc': return 'UTC';
     case 'floating': return 'floating (no zone)';
     case 'allday': return 'all-day (no time component)';
