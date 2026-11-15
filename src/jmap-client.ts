@@ -1873,14 +1873,13 @@ export class JmapClient {
   }
 
   /**
-   * Delete one empty mailbox that has no children, has a null role, and the account may
-   * delete. The checks run on a read that completes first, because a JMAP batch cannot make
-   * the destroy conditional on them; that read's state guards the destroy as `ifInState`.
-   * The server's own `mailboxHasEmail`/`mailboxHasChild` refusals are a further layer, not
-   * the only one, since neither they nor `ifInState` has been measured on Fastmail.
+   * The checks run on a read that completes first, because a JMAP batch cannot make the
+   * destroy conditional on them; that read's state guards the destroy as `ifInState`. The
+   * server's own `mailboxHasEmail`/`mailboxHasChild` refusals are a further layer, not the
+   * only one, since neither they nor `ifInState` has been measured on Fastmail.
    *
-   * `deletedMailbox` is read inside the destroy batch, so it is the mailbox as destroyed. It
-   * is best-effort: absent after a confirmed destroy, the call still succeeds without it.
+   * `deletedMailbox` is read inside the destroy batch, so it is the mailbox as destroyed. Its
+   * absence after a confirmed destroy is not a failure: the delete has happened.
    */
   async deleteMailbox(input: string): Promise<{ deleted: string; deletedMailbox?: any }> {
     const ref = requireNonEmpty(input, 'mailbox', 'pass the id, role, name or path of the mailbox to delete');
@@ -1892,7 +1891,6 @@ export class JmapClient {
     const label = `mailbox "${describeUntrusted(buildMailboxPathMap(mailboxes).paths.get(id) ?? target.name)}" (id "${describeUntrusted(id)}")`;
 
     // The role and rights refusals come first and alone: acting on the mailbox cannot clear them.
-    // A role mailbox is a kind create_mailbox (name and parentId only) cannot produce.
     if (target.role !== null) {
       const why = target.role === undefined
         ? 'the server reported no role for it, so it cannot be shown to be an ordinary folder'
