@@ -1,9 +1,9 @@
-// Drift guards keeping README's tool reference and the `check_function_availability` report
+// Drift guards keeping docs/reference/tools.md's tool reference and the `check_function_availability` report
 // in step with the `TOOLS` array. Both are hand-maintained lists of tool names, and both go
 // stale when a tool is added and its entry is never written.
 //
 // A count-only check passes when the "Available Tools (N Total)" heading is bumped but the
-// entry is missing, so the assertion is SET EQUALITY between TOOLS and README, in both
+// entry is missing, so the assertion is SET EQUALITY between TOOLS and docs/reference/tools.md, in both
 // directions (the reverse catches an entry left behind by a removed tool), and the heading
 // number is derived from the set rather than checked on its own.
 //
@@ -11,7 +11,7 @@
 // rewrite a tool's name or description literal, so the read is accurate whether or not
 // dist/ is current.
 //
-// README STRUCTURAL CONTRACT - what counts as a tool's reference entry:
+// TOOL REFERENCE STRUCTURAL CONTRACT (docs/reference/tools.md) - what counts as a tool's reference entry:
 //
 //   An UNINDENTED list item whose first content is the tool name in bold, immediately
 //   followed by a colon:  `- **send_draft**: Send an existing draft email …`
@@ -23,7 +23,7 @@
 // reported as undocumented; the Troubleshooting list is outside the section. Nested detail
 // bullets are indented, so they never match.
 //
-// If you restructure that part of README, keep the shape above or real entries will stop
+// If you restructure that part of docs/reference/tools.md, keep the shape above or real entries will stop
 // counting here and this guard will report them as missing.
 //
 // AVAILABILITY REPORT CONTRACT - what `check_function_availability` has to list:
@@ -32,7 +32,7 @@
 //   arrays (email / identity / contacts / calendar), so a caller planning off the report
 //   sees the whole surface and no tool claimed by two groups. The two meta-tools are
 //   exempt: they report on the server rather than acting on an account, and are listed in
-//   README's "Most Popular Tools" teaser instead.
+//   docs/reference/tools.md's "Most Popular Tools" teaser instead.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -42,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_FILE = join(SRC_DIR, 'index.ts');
-const README_FILE = join(SRC_DIR, '..', 'README.md');
+const README_FILE = join(SRC_DIR, '..', 'docs', 'reference', 'tools.md');
 
 const TOOLS_HEADING = /^## Available Tools \((\d+) Total\)\s*$/;
 
@@ -98,7 +98,7 @@ function collectDocumentedToolNames(): { names: string[]; headingCount: number }
   assert.notEqual(
     headingIndex,
     -1,
-    'could not find a `## Available Tools (N Total)` heading in README.md',
+    'could not find a `## Available Tools (N Total)` heading in docs/reference/tools.md',
   );
   const headingCount = Number(TOOLS_HEADING.exec(lines[headingIndex])![1]);
 
@@ -122,7 +122,7 @@ describe('README tool inventory', () => {
   it('documents every tool the server ships', () => {
     const shipped = collectShippedToolNames();
     // A floor, so a scan that has stopped matching fails here rather than passing
-    // vacuously against an equally empty README set.
+    // vacuously against an equally empty documented set.
     assert.ok(
       shipped.length >= 30,
       `found only ${shipped.length} tools in the TOOLS literal; the source scan has ` +
@@ -134,7 +134,7 @@ describe('README tool inventory', () => {
     assert.deepEqual(
       undocumented,
       [],
-      `this tool ships with no README entry: ${undocumented.join(', ')}. Add a ` +
+      `this tool ships with no docs/reference/tools.md entry: ${undocumented.join(', ')}. Add a ` +
         `\`- **<name>**: …\` entry under the matching \`###\` subsection of ` +
         `"## Available Tools", alongside the other tools of its kind`,
     );
@@ -147,7 +147,7 @@ describe('README tool inventory', () => {
     assert.deepEqual(
       phantom,
       [],
-      `the README documents a tool that does not exist: ${phantom.join(', ')}. It was ` +
+      `docs/reference/tools.md documents a tool that does not exist: ${phantom.join(', ')}. It was ` +
         `removed from TOOLS (or renamed) and its entry was left behind — delete the entry`,
     );
   });
@@ -201,7 +201,7 @@ describe('README tool inventory', () => {
     assert.equal(
       unique.size,
       names.length,
-      `two README entries document the same tool: ${
+      `two docs/reference/tools.md entries document the same tool: ${
         names.filter((n, i) => names.indexOf(n) !== i).join(', ')
       }`,
     );

@@ -291,9 +291,9 @@ describe('snooze tool surface', () => {
   });
 
   it('documents exactly these tools in README\'s experimental section', () => {
-    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8').replace(/\r/g, '');
+    const readme = readFileSync(new URL('../docs/reference/tools.md', import.meta.url), 'utf8').replace(/\r/g, '');
     const start = readme.indexOf('\n## Experimental: snooze');
-    assert.notEqual(start, -1, 'README has no "## Experimental: snooze" section');
+    assert.notEqual(start, -1, 'docs/reference/tools.md has no "## Experimental: snooze" section');
     const end = readme.indexOf('\n## ', start + 1);
     const section = readme.slice(start, end === -1 ? undefined : end);
     const documented = [...section.matchAll(/^- \*\*([a-z_]+)\*\*:/gm)].map(m => m[1]);

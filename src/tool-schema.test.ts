@@ -538,14 +538,14 @@ describe('recovery notes name only parameters the tool has', () => {
   });
 });
 
-// A tool's README reference entry: the indented lines under its `- **<name>**: …` bullet, up
+// A tool's reference entry in docs/reference/tools.md: the indented lines under its `- **<name>**: …` bullet, up
 // to the next unindented list item. The entry LINE follows the structural contract at the top
 // of readme-inventory.test.ts; the `- Parameters: …` line sits in the bullets beneath it.
 function collectReadmeToolEntries(): Map<string, string> {
-  const lines = readFileSync(join(SRC_DIR, '..', 'README.md'), 'utf8')
+  const lines = readFileSync(join(SRC_DIR, '..', 'docs', 'reference', 'tools.md'), 'utf8')
     .split('\n').map((l) => l.replace(/\r$/, ''));
   const heading = lines.findIndex((l) => /^## Available Tools \(\d+ Total\)\s*$/.test(l));
-  assert.notEqual(heading, -1, 'could not find a `## Available Tools (N Total)` heading in README.md');
+  assert.notEqual(heading, -1, 'could not find a `## Available Tools (N Total)` heading in docs/reference/tools.md');
 
   const entries = new Map<string, string[]>();
   let current: string | undefined;
@@ -565,7 +565,7 @@ function collectReadmeToolEntries(): Map<string, string> {
   return new Map([...entries].map(([tool, body]) => [tool, body.join('\n')]));
 }
 
-// README documents every parameter, not just every tool.
+// docs/reference/tools.md documents every parameter, not just every tool.
 //
 // readme-inventory.test.ts asserts set equality on tool NAMES; it says nothing about an
 // entry's contents, so a parameter added to an existing tool (the far commoner change) would
@@ -578,10 +578,10 @@ describe('README documents every tool parameter', () => {
   it('mentions each declared parameter in the tool entry that has it', () => {
     const params = collectToolParams();
     const entries = collectReadmeToolEntries();
-    // A floor on both scans, so a restructured README or TOOLS literal fails here rather
+    // A floor on both scans, so a restructured tool reference or TOOLS literal fails here rather
     // than passing vacuously against an empty set on either side.
     assert.ok(params.size >= 30, `found only ${params.size} tools in the TOOLS literal; the schema scan has probably stopped matching`);
-    assert.ok(entries.size >= 30, `found only ${entries.size} README tool entries; the README scan has probably stopped matching`);
+    assert.ok(entries.size >= 30, `found only ${entries.size} docs/reference/tools.md tool entries; the scan has probably stopped matching`);
 
     const missing: string[] = [];
     for (const [tool, declared] of params) {
@@ -596,7 +596,7 @@ describe('README documents every tool parameter', () => {
     assert.deepEqual(
       missing,
       [],
-      `this parameter is declared in the tool's schema but named nowhere in its README ` +
+      `this parameter is declared in the tool's schema but named nowhere in its docs/reference/tools.md ` +
         `entry: ${missing.join(', ')}. Add it to that entry's \`- Parameters:\` line (and ` +
         `anywhere else the entry describes behaviour it changes), so a reader of the docs ` +
         `sees the same surface a reader of the schema does`,
@@ -1543,15 +1543,19 @@ describe('no surface says a signature expansion withholds the body hash', () => 
     /an edit that expanded the body/,
     /AFTER_EXPANSION/,
   ];
-  const SURFACES: [string, string][] = [
-    ['tool descriptions', SCHEMA_FILE],
-    ['README', join(SRC_DIR, '..', 'README.md')],
-    ['inline-notes.ts', join(SRC_DIR, 'inline-notes.ts')],
-    ['jmap-client.ts', join(SRC_DIR, 'jmap-client.ts')],
+  const REFERENCE_DIR = join(SRC_DIR, '..', 'docs', 'reference');
+  const SURFACES: [string, string[]][] = [
+    ['tool descriptions', [SCHEMA_FILE]],
+    ['README and docs/reference', [
+      join(SRC_DIR, '..', 'README.md'),
+      ...readdirSync(REFERENCE_DIR).filter((f) => f.endsWith('.md')).map((f) => join(REFERENCE_DIR, f)),
+    ]],
+    ['inline-notes.ts', [join(SRC_DIR, 'inline-notes.ts')]],
+    ['jmap-client.ts', [join(SRC_DIR, 'jmap-client.ts')]],
   ];
-  for (const [name, file] of SURFACES) {
+  for (const [name, files] of SURFACES) {
     it(name, () => {
-      const text = readFileSync(file, 'utf8');
+      const text = files.map((file) => readFileSync(file, 'utf8')).join('\n');
       assert.ok(text.includes('bodyHash'), `${name} does not mention bodyHash, so it was not the file meant`);
       for (const re of STALE) assert.equal(re.test(text), false, `${name} still matches ${re}`);
     });

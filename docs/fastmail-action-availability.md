@@ -468,7 +468,7 @@ here, not that one property happens to be missing.
 **What follows for this server.** Any `VTIMEZONE` it embeds has to come from somewhere other than the
 platform. `src/vtimezone.ts` generates one from Node's own ICU timezone data (#166): not
 byte-identical to Cyrus's own, but resolving to the same offsets across the event's span; the
-shipped model is in [README.md's "Writing calendar times"](../README.md#writing-calendar-times) and
+shipped model is in [docs/reference/calendar.md's "Writing calendar times"](reference/calendar.md#writing-calendar-times) and
 `docs/conventions.md`'s "VTIMEZONE residual".
 
 **Dated, not permanent.** One account, one deployment, one day. A config switch is exactly the kind
