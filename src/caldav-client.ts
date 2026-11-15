@@ -4649,6 +4649,13 @@ export class CalDAVCalendarClient {
         };
       }
       if (blocks.some(b => hasICalProperty(b, 'RRULE'))) return { unusable: 'the calendar server did not expand the series' };
+      // A block this server cannot place could be the target, or the first instance, under a
+      // spelling it does not read, so it voids both the existence proof and the proof of absence.
+      const unplaceable = blocks.some((block) => {
+        const line = parseAllICalProperties(block, 'RECURRENCE-ID')[0] ?? parseAllICalProperties(block, 'DTSTART')[0];
+        return line === undefined || readOccurrenceKey(line) === undefined;
+      });
+      if (unplaceable) return { unusable: 'the answer holds an occurrence whose date cannot be read' };
       return { blocks };
     };
     const unusableBeforeWrite = (why: string) => new InvalidInputError(

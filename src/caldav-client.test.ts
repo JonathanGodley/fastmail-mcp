@@ -5106,6 +5106,33 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       await refuses(inList, '2026-09-12T09:00:00', /is already excluded by an EXDATE the series stores/, listed);
     });
 
+    it('refuses before the write when any block in an answer has a date that cannot be read', async () => {
+      const unreadable = (lines: string[]) => ({ ms: 0, lines });
+      for (const [label, extra, window] of [
+        // Beside the target, in the target's window.
+        ['a RECURRENCE-ID', unreadable(['RECURRENCE-ID;TZID=Nowhere/Zone:20260905T090000', 'DTSTART:20260904T230000Z']), 'target'],
+        // Beside the first instance, in the first instance's window.
+        ['a bare DTSTART', unreadable(['DTSTART:soon']), 'first'],
+      ] as Array<[string, Instance, string]>) {
+        const { client, mockDAVClient } = makeClient(GOLDEN, GOLDEN_INSTANCES, {
+          expand: (params) => {
+            const from = Date.parse(params.timeRange!.start);
+            const to = Date.parse(params.timeRange!.end);
+            const live = GOLDEN_INSTANCES.filter(i => i.ms >= from && i.ms < to);
+            const isTarget = live.some(i => i === GOLDEN_INSTANCES[2]);
+            if ((window === 'target') === isTarget) live.push(extra);
+            return [{ data: expandedBlob(live), url: EVENT_URL, etag: '"e"' }];
+          },
+        });
+        await assert.rejects(() => client.deleteCalendarEvent(UID, '2026-09-04T23:00:00Z'), (err: Error) => {
+          assert.ok(isInvalidInput(err), label);
+          assert.match(err.message, /cannot be used: the answer holds an occurrence whose date cannot be read\. Nothing was deleted\./, label);
+          return true;
+        });
+        assertNothingWritten(mockDAVClient);
+      }
+    });
+
     it('refuses before the write when the answer holds the resource without calendar data', async () => {
       const { client, mockDAVClient } = makeClient(GOLDEN, GOLDEN_INSTANCES, { expand: () => [{ data: undefined, url: EVENT_URL, etag: '"e"' }] });
       await assert.rejects(() => client.deleteCalendarEvent(UID, '2026-09-04T23:00:00Z'), (err: Error) => {
@@ -5188,6 +5215,15 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     it('reports NOT CONFIRMED when the answer holds the resource with no event in it', async () => {
       const { result } = await afterWrite(() => [{ data: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR', url: EVENT_URL, etag: '"e"' }]);
       unconfirmed(result, /, but the answer holds the series without any event data, /);
+    });
+
+    it('reports NOT CONFIRMED when a block in the answer after the write has a date that cannot be read', async () => {
+      // The target, still there, under a RECURRENCE-ID this server cannot place: it must not read as gone.
+      const { result } = await afterWrite(() => [{
+        data: expandedBlob([{ ...GOLDEN_INSTANCES[2], lines: ['RECURRENCE-ID;TZID=Nowhere/Zone:20260905T090000', 'DTSTART:20260904T230000Z'] }]),
+        url: EVENT_URL, etag: '"e"',
+      }]);
+      unconfirmed(result, /, but the answer holds an occurrence whose date cannot be read, /);
     });
 
     it('reports NOT CONFIRMED when the answer after the write is unexpanded or over the cap', async () => {
