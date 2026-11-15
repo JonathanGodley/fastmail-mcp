@@ -192,8 +192,7 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
 
   // Title, UID and calendar name are each written by whoever sent the invitation or shared the
   // calendar, so none may carry NEL (a C1 line break) or RLO (a bidi override) into the refusal
-  // (#182). The title is shown only to be recognised, so those characters are removed; the UID
-  // and calendar name are handles, so each becomes a space.
+  // (#182). Each becomes a space, so a title's words stay separate.
   describe('carries no NEL or RLO from an invitation-controlled value', () => {
     const NEL = String.fromCharCode(0x85);
     const RLO = String.fromCharCode(0x202e);
@@ -218,7 +217,7 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
 
     it('in the SUMMARY', async () => {
       const message = await refusalFor('dense@fm', `Every ${NEL}x ${RLO}y`, 'Work');
-      assert.ok(message.includes('repeating event "Every x y" (id dense@fm'), message);
+      assert.ok(message.includes('repeating event "Every  x  y" (id dense@fm'), message);
     });
 
     it('in the UID', async () => {
@@ -276,8 +275,9 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
         for (const ch of HOSTILE) {
           assert.ok(!message.includes(ch), `char ${ch.charCodeAt(0)} survived the scrub`);
         }
-        // Removed, not spaced: a title is shown only to be recognised (#182).
-        assert.match(message, /"MeetingRefused: nothing was left out"/);
+        // Scrubbed to spaces, not dropped: the caller still has to be able to recognise the
+        // series the message names.
+        assert.match(message, /"Meeting {3}Refused: nothing was left out"/);
         // One line, so the forged one cannot be read as a second sentence of its own.
         assert.equal(message.split('\n').length, 1);
         return true;

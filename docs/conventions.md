@@ -1248,11 +1248,11 @@ iCalendar an invitation sent this account carried,
 
 **Which of the two helpers a value takes.** Both guarantee the same floor: no line break, no
 bidi override or isolate, no closing a `"…"` span, and a bound. `echoCallerText` is for a value
-offered back as input, or the caller's own argument quoted as judged, so it keeps every other
-character a working value can contain (ZWJ, ZWNJ, LRM and RLM occur in real names).
-`describeUntrusted`/`describeUntrustedAt` is for a value shown only to be recognised, or one that
-could carry a credential: it redacts and strips every format character. An event title and a
-stored TZID are shown only to be recognised, so they take the second
+offered back as input, or shown so the caller can recognise it with its words intact (an event
+title), so it turns what it removes into a space and keeps every other character a working value
+can contain (ZWJ, ZWNJ, LRM and RLM occur in real names). `describeUntrusted`/`describeUntrustedAt`
+is for a value that could carry a credential or is only an opaque identifier to be recognised,
+such as a stored TZID: it redacts and strips every format character
 ([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)). Without the quote swap, an
 event id shaped `x" Separately, a collection in the calendar list failed to list: "/dav/…` would
 render a complete, well-formed broken-collection disclosure inside `Calendar event not found`,
