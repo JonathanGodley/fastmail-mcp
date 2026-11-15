@@ -1238,7 +1238,7 @@ export function coerceAttachments(value: unknown): AttachmentSpec[] | undefined 
     const obj = item as Record<string, unknown>;
     const unknownKeys = Object.keys(obj).filter(k => !ATTACHMENT_KEYS.has(k));
     if (unknownKeys.length > 0) {
-      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...ATTACHMENT_KEYS].join(', ')}`);
+      throw new McpError(ErrorCode.InvalidParams, `attachments[${i}] has unknown key(s): ${quoteCallerKeys(unknownKeys)}. Valid: ${[...ATTACHMENT_KEYS].join(', ')}`);
     }
 
     // Pick the source BEFORE validating anything else, so a caller that named two sources
@@ -1347,7 +1347,7 @@ export function coerceBodyEdits(value: unknown): BodyEdit[] | undefined {
     const obj = item as Record<string, unknown>;
     const unknownKeys = Object.keys(obj).filter((k) => !BODY_EDIT_KEYS.has(k));
     if (unknownKeys.length > 0) {
-      throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: find, replace`);
+      throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${i}] has unknown key(s): ${quoteCallerKeys(unknownKeys)}. Valid: find, replace`);
     }
     for (const key of ['find', 'replace'] as const) {
       if (typeof obj[key] !== 'string') {
@@ -1424,7 +1424,7 @@ export function coerceParticipants(value: unknown): ParticipantSpec[] | undefine
     const obj = item as Record<string, unknown>;
     const unknownKeys = Object.keys(obj).filter(k => !PARTICIPANT_KEYS.has(k));
     if (unknownKeys.length > 0) {
-      throw new InvalidInputError(`participants[${i}] has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...PARTICIPANT_KEYS].join(', ')}`);
+      throw new InvalidInputError(`participants[${i}] has unknown key(s): ${quoteCallerKeys(unknownKeys)}. Valid: ${[...PARTICIPANT_KEYS].join(', ')}`);
     }
     if (typeof obj.email !== 'string' || obj.email.trim() === '') {
       throw new InvalidInputError(`participants[${i}] is missing a non-empty 'email'.`);
@@ -1633,7 +1633,7 @@ export function coerceContactName(value: unknown): ContactNameSpec | undefined {
   const unknownKeys = Object.keys(obj).filter((k) => !CONTACT_NAME_KEYS.has(k));
   if (unknownKeys.length > 0) {
     throw new InvalidInputError(
-      `name has unknown key(s): ${unknownKeys.join(', ')}. Valid: ${[...CONTACT_NAME_KEYS].join(', ')}`,
+      `name has unknown key(s): ${quoteCallerKeys(unknownKeys)}. Valid: ${[...CONTACT_NAME_KEYS].join(', ')}`,
     );
   }
 
