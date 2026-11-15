@@ -23,12 +23,12 @@
    export FASTMAIL_DOWNLOAD_DIR="/path/to/your/downloads"
    # Optional (opt-in): enable attaching LOCAL files to outgoing mail. Unset, every such
    # attempt fails. Files are confined to this directory, resolved independently of
-   # FASTMAIL_DOWNLOAD_DIR (see "Sending attachments"). Restart the server after setting it.
+   # FASTMAIL_DOWNLOAD_DIR (see "Sending attachments" in docs/reference/email.md). Restart the server after setting it.
    export FASTMAIL_ATTACH_DIR="/path/to/attachable/files"
    # Optional (opt-in, separate from the one above): allow attaching content ALREADY in
    # the account (a blobId, or one part of an existing message). FASTMAIL_ATTACH_DIR does
    # not govern these. Only "true" or "1" enables it. Restart the server after setting it.
-   # See the security note in "Sending attachments".
+   # See the security note in "Sending attachments" in docs/reference/email.md.
    export FASTMAIL_ALLOW_BLOB_ATTACH="true"
    # Optional: IANA timezone (e.g. America/New_York) for email dates, calendar window
    # dates, and create_calendar_event's default zone. Defaults to the server host's zone.
@@ -37,7 +37,7 @@
    export FASTMAIL_TIMEZONE="America/New_York"
    # Optional (opt-in, experimental): the snooze tools. They need a second setting,
    # FASTMAIL_WEB_COOKIE, which is a whole Fastmail web login rather than a scoped
-   # token: read "Experimental: snooze" below before setting either. Left commented out
+   # token: read "Experimental: snooze" in docs/reference/tools.md before setting either. Left commented out
    # so that copying this block does not turn the tools on without their cookie.
    # export FASTMAIL_EXPERIMENTAL_SNOOZE="1"
    ```

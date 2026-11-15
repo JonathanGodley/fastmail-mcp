@@ -35,10 +35,9 @@
 // README TOOL LIST CONTRACT - what counts as a tool listed in README.md:
 //
 //   A backticked tool name inside a table row (a line starting with `|`) under the
-//   `## Tools` heading, before the next `## ` heading. Names in a prose line there (the
-//   experimental snooze tools) and backticked names anywhere else in the README are
-//   mentions, and are not counted. The line stating "has N tools" under the same heading
-//   is checked against the TOOLS count.
+//   `## Tools` heading, before the next `## ` heading. Names in a prose line there and
+//   backticked names anywhere else in the README are mentions, and are not counted. The
+//   line stating "has N tools" under the same heading is checked against the TOOLS count.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,8 +47,8 @@ import { fileURLToPath } from 'node:url';
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_FILE = join(SRC_DIR, 'index.ts');
-const README_FILE = join(SRC_DIR, '..', 'docs', 'reference', 'tools.md');
-const REPO_README_FILE = join(SRC_DIR, '..', 'README.md');
+const TOOLS_REFERENCE_FILE = join(SRC_DIR, '..', 'docs', 'reference', 'tools.md');
+const README_FILE = join(SRC_DIR, '..', 'README.md');
 
 const TOOLS_HEADING = /^## Available Tools \((\d+) Total\)\s*$/;
 
@@ -100,7 +99,7 @@ function collectAvailabilityGroups(): string[][] {
 }
 
 function collectDocumentedToolNames(): { names: string[]; headingCount: number } {
-  const lines = readLines(README_FILE);
+  const lines = readLines(TOOLS_REFERENCE_FILE);
   const headingIndex = lines.findIndex((l) => TOOLS_HEADING.test(l));
   assert.notEqual(
     headingIndex,
@@ -118,14 +117,14 @@ function collectDocumentedToolNames(): { names: string[]; headingCount: number }
       inSubsection = true;
       continue;
     }
-    if (!inSubsection) continue; // the "Most Popular Tools" teaser above the first `###`
+    if (!inSubsection) continue; // a bullet above the first `###` is not an entry
     const match = /^- \*\*([a-z][a-z0-9_]*)\*\*:/.exec(line);
     if (match) names.push(match[1]);
   }
   return { names, headingCount };
 }
 
-describe('README tool inventory', () => {
+describe('docs/reference/tools.md tool inventory', () => {
   it('documents every tool the server ships', () => {
     const shipped = collectShippedToolNames();
     // A floor, so a scan that has stopped matching fails here rather than passing
@@ -222,7 +221,7 @@ describe('README tool inventory', () => {
 });
 
 function collectReadmeToolList(): { names: string[]; statedCount: number | undefined } {
-  const lines = readLines(REPO_README_FILE);
+  const lines = readLines(README_FILE);
   const heading = lines.findIndex((l) => /^## Tools\s*$/.test(l));
   assert.notEqual(heading, -1, 'could not find a `## Tools` heading in README.md');
 

@@ -574,7 +574,7 @@ function collectReadmeToolEntries(): Map<string, string> {
 // Matched on the backticked name anywhere in the entry, deliberately loosely: the point is
 // that the parameter is MENTIONED, and a stricter shape (a position in the `- Parameters:`
 // line, a required/optional tag) would make ordinary prose edits fail for no gain.
-describe('README documents every tool parameter', () => {
+describe('docs/reference/tools.md documents every tool parameter', () => {
   it('mentions each declared parameter in the tool entry that has it', () => {
     const params = collectToolParams();
     const entries = collectReadmeToolEntries();
@@ -770,7 +770,7 @@ describe('archive_email is wired to the strict string-array coercer', () => {
   });
 
   it('serialises counts alongside results, which both descriptions promise', () => {
-    // The tool description and the README both tell a caller the counts sum to the number
+    // The tool description and docs/reference/tools.md both tell a caller the counts sum to the number
     // of distinct ids they passed. A bucket with no entries produces no line, so `counts`
     // has to be in the JSON item; serialising `result.results` alone passes every other
     // test in the repo.

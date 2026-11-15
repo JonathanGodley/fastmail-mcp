@@ -290,7 +290,7 @@ describe('snooze tool surface', () => {
     for (const tool of SNOOZE_TOOLS) assert.match(tool.description, /EXPERIMENTAL: runs on the Fastmail web login's session cookie \(FASTMAIL_WEB_COOKIE\)/);
   });
 
-  it('documents exactly these tools in README\'s experimental section', () => {
+  it('documents exactly these tools in docs/reference/tools.md\'s experimental section', () => {
     const readme = readFileSync(new URL('../docs/reference/tools.md', import.meta.url), 'utf8').replace(/\r/g, '');
     const start = readme.indexOf('\n## Experimental: snooze');
     assert.notEqual(start, -1, 'docs/reference/tools.md has no "## Experimental: snooze" section');

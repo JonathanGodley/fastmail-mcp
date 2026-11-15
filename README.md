@@ -13,7 +13,7 @@ A fork of [MadLlama25/fastmail-mcp](https://github.com/MadLlama25/fastmail-mcp) 
 - **Draft-first compose**: `send_draft` is the only tool that transmits a composed message, but calendar invitations still send mail. See [Calendar invitations send mail](docs/reference/calendar.md#calendar-invitations-send-mail).
 - **Calendar**: attendees, non-destructive event updates, and RFC 5545 date/TZID handling. See [docs/reference/calendar.md](docs/reference/calendar.md).
 - **Local-time email dates**: `date` is in your timezone with a UTC offset, set by `FASTMAIL_TIMEZONE`. See [Email fields](docs/reference/responses.md#email-fields).
-- **Readable text/plain fallback**: an `htmlBody` on its own gets a plain-text part derived from it. See [Message bodies](docs/reference/email.md#message-bodies).
+- **Readable text/plain fallback**: an `htmlBody` on its own gets a plain-text part derived from it when one can be derived. See [Message bodies](docs/reference/email.md#message-bodies).
 - **Faithful draft edits**: `edit_draft` keeps threading headers, attachments and keywords across the recreate. See [Email Tools](docs/reference/tools.md#email-tools).
 - **Compose ergonomics**: `"Name <email>"` is accepted for `from` and for every recipient field. See [Email Tools](docs/reference/tools.md#email-tools).
 - **Outgoing attachments, including embedded images**: local files, `blobId`s or parts of a message, each source opt-in. See [Sending attachments](docs/reference/email.md#sending-attachments).
@@ -117,7 +117,7 @@ The server has 41 tools, listed here by group. Each one's parameters and behavio
 | Calendar | `list_calendars`, `list_calendar_events`, `get_calendar_event`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event` |
 | Account and diagnostics | `list_identities`, `get_mailbox_stats`, `get_account_summary`, `check_function_availability`, `test_bulk_operations` |
 
-Three experimental snooze tools, `list_snoozed_emails`, `snooze_email` and `unsnooze_email`, are off by default and not counted above. See [Experimental: snooze](docs/reference/tools.md#experimental-snooze).
+The experimental snooze tools are off by default and not counted above. See [Experimental: snooze](docs/reference/tools.md#experimental-snooze).
 
 ## Safety notes
 
