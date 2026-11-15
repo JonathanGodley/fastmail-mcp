@@ -159,6 +159,11 @@ export interface DeleteCalendarEventResult {
     written: CalendarZoneWriteInfo;
     /** The whole stored resource before the write, raw. */
     previousICalendar: string;
+    /**
+     * Set when the write landed but the occurrence was not shown gone: the sentence that leads
+     * the result, starting `NOT REMOVED:` or `NOT CONFIRMED:`.
+     */
+    failure?: string;
   };
   brokenCollections?: BrokenCollections;
 }
@@ -413,7 +418,7 @@ export function recurringSeriesRefusal(
     );
   }
   const oneOccurrence = occurrenceRefusal === undefined
-    ? 'To delete ONE occurrence, pass occurrence: the recurrenceId of that occurrence\'s list_calendar_events row, or its start when the row has no recurrenceId. '
+    ? 'To delete ONE occurrence other than the first, pass occurrence: the recurrenceId of that occurrence\'s list_calendar_events row. '
     : `One occurrence of it cannot be deleted here either: ${occurrenceRefusal}. Use the Fastmail web interface to change or delete it. `;
   return new InvalidInputError(
     `${name} is a repeating event, and this server will not delete the whole series. `
@@ -472,36 +477,70 @@ interface OccurrenceSeries {
   zone?: string;
   start: OccurrenceKey;
   overrides: OccurrenceKey[];
-  /** The rule carries COUNT or UNTIL, so the series can run out. */
-  bounded: boolean;
+  /** Every occurrence the master's EXDATEs already exclude, where it can be read. */
+  exclusions: OccurrenceKey[];
+}
+
+/**
+ * The names of the resource's properties, read over the WHOLE text rather than per VEVENT block,
+ * so a component `extractVEventBlocks` cannot see past cannot hide a line from the series gates.
+ * A top-level VTIMEZONE's own lines are left out: its RRULE and RDATE are daylight rules, not
+ * the event's. Undefined when the component markers do not nest, or a VEVENT is anywhere but
+ * directly inside the VCALENDAR, which is the layout that hides lines from the block scan.
+ */
+function resourcePropertyNames(icalData: string): string[] | undefined {
+  const stack: string[] = [];
+  const names: string[] = [];
+  for (const line of unfoldedICalLines(icalData)) {
+    const marker = markerLine(line);
+    const begin = marker && /^BEGIN:(.+)$/.exec(marker);
+    const end = marker && /^END:(.+)$/.exec(marker);
+    if (begin) {
+      if (begin[1] === 'VEVENT' && (stack.length !== 1 || stack[0] !== 'VCALENDAR')) return undefined;
+      stack.push(begin[1]);
+    } else if (end) {
+      if (stack.pop() !== end[1]) return undefined;
+    } else if (!(stack[0] === 'VCALENDAR' && stack[1] === 'VTIMEZONE')) {
+      const name = /^([A-Za-z0-9-]+)[;:]/.exec(line)?.[1];
+      if (name) names.push(name.toUpperCase());
+    }
+  }
+  return stack.length === 0 ? names : undefined;
 }
 
 /**
  * Whether one occurrence of this stored series can be excluded here, or why not.
  *
- * Accepted: exactly one master (no RECURRENCE-ID) carrying exactly one RRULE of its own, plus
- * override blocks. The scans are VEVENT-wide, like `isRecurringSeriesResource`, so
+ * Accepted: exactly one master (no RECURRENCE-ID) carrying the resource's only RRULE, plus
+ * override blocks. The property gates read the whole resource (`resourcePropertyNames`), so
  * an email VALARM's ATTENDEE refuses too. Any ATTENDEE or ORGANIZER refuses because whether a
  * series write may mail attendees is undecided (#114).
  *
  * Returns the reason as a clause of the server's own words with any stored value already echoed.
  */
 function assessOccurrenceSeries(icalData: string): { series: OccurrenceSeries } | { reason: string } {
+  const names = resourcePropertyNames(icalData);
+  if (!names) {
+    return {
+      reason: 'its components are not nested the way iCalendar requires (an event inside another component, or a component '
+        + 'closed out of order), so which event each line belongs to cannot be read',
+    };
+  }
+  const count = (name: string) => names.filter(n => n === name).length;
   const blocks = extractVEventBlocks(icalData);
   const masters = blocks.filter(b => !hasRecurrenceId(b));
-  const overrides = blocks.filter(b => hasRecurrenceId(b));
   const master = masters[0];
-  if (masters.length !== 1 || parseAllICalProperties(master, 'RRULE').length !== 1 || !hasOwnICalProperty(master, 'RRULE')
-    || overrides.some(b => hasICalProperty(b, 'RRULE'))) {
+  const overrides = blocks.filter(b => hasRecurrenceId(b));
+  if (masters.length !== 1 || count('RRULE') !== 1 || !hasOwnICalProperty(master, 'RRULE')) {
     return { reason: 'it is not one series with a single repeat rule (RRULE) on one master event' };
   }
-  if (blocks.some(b => hasICalProperty(b, 'ATTENDEE') || hasICalProperty(b, 'ORGANIZER'))) {
+  if (count('ATTENDEE') + count('ORGANIZER') > 0) {
     return { reason: 'it has attendees or an organizer, and this server writes no repeating event that could mail them' };
   }
-  if (blocks.some(b => hasICalProperty(b, 'RDATE'))) {
+  if (count('RDATE') > 0) {
     return { reason: 'it lists extra occurrence dates (RDATE), which this server cannot verify' };
   }
-  if (blocks.some(b => hasICalProperty(b, 'EXRULE'))) {
+  if (count('EXRULE') > 0) {
     return { reason: 'it excludes occurrences by a rule (EXRULE), which this server cannot verify' };
   }
   const starts = parseAllICalProperties(master, 'DTSTART');
@@ -538,7 +577,17 @@ function assessOccurrenceSeries(icalData: string): { series: OccurrenceSeries } 
     }
     overrideKeys.push(key);
   }
-  const rule = parseICalValue(master, 'RRULE') ?? '';
+  // An EXDATE value list (RFC 5545 section 3.8.5.1) shares one parameter list; each value is read
+  // in it. An unreadable one is skipped: this list only stops a duplicate being written.
+  const exclusions: OccurrenceKey[] = [];
+  for (const line of parseAllICalProperties(master, 'EXDATE')) {
+    const boundary = findValueBoundary(line);
+    if (boundary === -1) continue;
+    for (const value of line.slice(boundary + 1).split(',')) {
+      const key = readOccurrenceKey(`${line.slice(0, boundary)}:${value.trim()}`);
+      if (key) exclusions.push(key);
+    }
+  }
   return {
     series: {
       frame: d.frame,
@@ -547,7 +596,7 @@ function assessOccurrenceSeries(icalData: string): { series: OccurrenceSeries } 
       zone: d.frame === 'zoned' ? d.tzid : undefined,
       start,
       overrides: overrideKeys,
-      bounded: /(?:^|;)\s*(?:COUNT|UNTIL)=/i.test(rule),
+      exclusions,
     },
   };
 }
@@ -574,7 +623,7 @@ function resolveOccurrence(occurrence: string, series: OccurrenceSeries, title: 
   const quoted = `"${echoCallerText(occurrence)}"`;
   const refuse = (why: string) => new InvalidInputError(
     `occurrence ${quoted} does not name an occurrence of "${echoCallerText(title)}": ${why}. Nothing was deleted. `
-    + 'Pass the recurrenceId of the occurrence\'s list_calendar_events row, or its start when the row has no recurrenceId.',
+    + 'Pass the recurrenceId of the occurrence\'s list_calendar_events row.',
   );
   const isDate = /^\d{8}$/.test(serialized);
   if (series.frame === 'date') {
@@ -615,6 +664,19 @@ function expandedHoldsOccurrence(blocks: string[], target: OccurrenceKey): boole
     if (id !== undefined) return sameOccurrence(readOccurrenceKey(id), target);
     const start = parseAllICalProperties(block, 'DTSTART')[0];
     return start !== undefined && sameOccurrence(readOccurrenceKey(start), target);
+  });
+}
+
+/**
+ * Whether an expanded resource holds the series' first instance at `start`. Only a block with no
+ * RECURRENCE-ID counts: the server gives one only to the first instance, and none at all once
+ * that instance is excluded or overridden (measured by scripts/probes/calendar-expand.probe.mjs).
+ */
+function expandedHoldsFirstInstance(blocks: string[], start: OccurrenceKey): boolean {
+  return blocks.some((block) => {
+    if (parseAllICalProperties(block, 'RECURRENCE-ID').length > 0) return false;
+    const dtstart = parseAllICalProperties(block, 'DTSTART')[0];
+    return dtstart !== undefined && sameOccurrence(readOccurrenceKey(dtstart), start);
   });
 }
 
@@ -2613,12 +2675,6 @@ export const DAV_REJECTION_ECHO_LIMIT = 200;
 export const WRITTEN_ZONE_ECHO_LIMIT = 100;
 
 /**
- * The bound on the EXDATE line quoted in a delete-occurrence error (#146). It carries a stored
- * TZID, so it gets `WRITTEN_ZONE_ECHO_LIMIT` plus room for the property name and the value.
- */
-export const EXDATE_ECHO_LIMIT = WRITTEN_ZONE_ECHO_LIMIT + 40;
-
-/**
  * Is this entry of the calendar-home listing BROKEN — i.e. did the server fail to describe it?
  *
  * Covers both forms in tsdav's output: a failed RESPONSE (non-2xx status, no props) and a
@@ -3528,6 +3584,7 @@ export function describeUpdateCalendarEventResult(result: UpdateCalendarEventRes
  * delete_calendar_event's result content (#146): the confirmation sentence, with `brokenNote`
  * appended, and for an excluded occurrence a second item carrying the pre-write resource raw, as
  * data rather than prose (docs/conventions.md, "Writing a record the tool can only partly see").
+ * A write whose outcome was not shown leads with its failure sentence instead of the success one.
  */
 export function deleteCalendarEventContent(
   result: DeleteCalendarEventResult,
@@ -3537,15 +3594,12 @@ export function deleteCalendarEventContent(
   if (!result.occurrence) {
     return [{ type: 'text', text: `Calendar event deleted. ${ids}${brokenNote}` }];
   }
-  const { excluded, written, previousICalendar } = result.occurrence;
-  return [
-    {
-      type: 'text',
-      text: `One occurrence deleted from a repeating event; the rest of the series is unchanged. ${ids}. `
-        + `Excluded occurrence: ${excluded}, ${describeCalendarZoneWrite(written)}.${brokenNote}`,
-    },
-    { type: 'text', text: toolJson({ previousICalendar }) },
-  ];
+  const { excluded, written, previousICalendar, failure } = result.occurrence;
+  const text = failure !== undefined
+    ? `${failure} ${ids}.${brokenNote}`
+    : `One occurrence deleted from a repeating event; the rest of the series is unchanged. ${ids}. `
+      + `Excluded occurrence: ${excluded}, ${describeCalendarZoneWrite(written)}.${brokenNote}`;
+  return [{ type: 'text', text }, { type: 'text', text: toolJson({ previousICalendar }) }];
 }
 
 /**
@@ -4501,7 +4555,7 @@ export class CalDAVCalendarClient {
     if (typeof occurrence !== 'string' || occurrence.trim() === '') {
       throw new InvalidInputError(
         `occurrence must be a non-empty string; received ${typeof occurrence === 'string' ? 'a blank string' : Array.isArray(occurrence) ? 'array' : typeof occurrence}. `
-        + 'Nothing was deleted. Pass the recurrenceId of the occurrence\'s list_calendar_events row, or its start when the row has no recurrenceId.',
+        + 'Nothing was deleted. Pass the recurrenceId of the occurrence\'s list_calendar_events row.',
       );
     }
     const resolved = resolveOccurrence(occurrence, series, title);
@@ -4516,7 +4570,20 @@ export class CalDAVCalendarClient {
       );
     }
 
-    const expanded = async (target: OccurrenceKey): Promise<string[]> => {
+    if (series.exclusions.some(key => sameOccurrence(key, resolved.target))) {
+      throw new InvalidInputError(
+        `${quotedOccurrence} of "${echoCallerText(title)}" is already excluded by an EXDATE the series stores, so this server `
+        + 'will not write a second one. Nothing was deleted. Check the series with list_calendar_events.',
+      );
+    }
+
+    // The resource's own response to an expand query over the window around `target`. A
+    // calendar-query answers only the resources with an instance in the window (RFC 4791 section
+    // 7.8), so `absent` is what an empty window looks like, but also what a server spelling the
+    // href differently looks like; callers tell the two apart. `unusable` says why the response
+    // cannot be read.
+    type Expanded = { blocks: string[] } | { absent: true } | { unusable: string };
+    const expanded = async (target: OccurrenceKey): Promise<Expanded> => {
       const objects = await davCall(() => client.fetchCalendarObjects({
         calendar: match.calendar,
         timeRange: occurrenceWindow(target),
@@ -4525,37 +4592,50 @@ export class CalDAVCalendarClient {
       }));
       const wanted = resolveResponseHref(obj.url, match.calendar.url);
       const own = objects.find(o => typeof o.url === 'string' && resolveResponseHref(o.url, match.calendar.url) === wanted);
-      const blocks = own ? extractVEventBlocks(own.data || '') : [];
+      if (!own) return { absent: true };
+      // tsdav drops a calendar-data propstat the server answered with an error, leaving no data.
+      const blocks = typeof own.data === 'string' ? extractVEventBlocks(own.data) : [];
+      if (blocks.length === 0) return { unusable: 'the answer holds the series without any event data' };
       if (blocks.length > CALENDAR_MAX_OCCURRENCES_PER_SERIES) {
-        throw new InvalidInputError(
-          `"${echoCallerText(title)}" expanded to ${blocks.length} occurrences around ${quotedOccurrence}, more than the `
-          + `${CALENDAR_MAX_OCCURRENCES_PER_SERIES} this server will read for one series. Nothing was deleted.`,
-        );
+        return {
+          unusable: `it expanded to ${blocks.length} occurrences, more than the ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} this server will read for one series`,
+        };
       }
-      if (blocks.some(b => hasICalProperty(b, 'RRULE'))) {
-        throw new InvalidInputError(
-          `The calendar server did not expand "${echoCallerText(title)}", so it cannot confirm ${quotedOccurrence} exists. Nothing was deleted.`,
-        );
-      }
-      return blocks;
+      if (blocks.some(b => hasICalProperty(b, 'RRULE'))) return { unusable: 'the calendar server did not expand the series' };
+      return { blocks };
     };
+    const unusableBeforeWrite = (why: string) => new InvalidInputError(
+      `The calendar server's expansion of "${echoCallerText(title)}" around ${quotedOccurrence} cannot be used: ${why}. Nothing was deleted.`,
+    );
 
-    if (!expandedHoldsOccurrence(await expanded(resolved.target), resolved.target)) {
+    const before = await expanded(resolved.target);
+    if ('unusable' in before) throw unusableBeforeWrite(before.unusable);
+    if ('absent' in before || !expandedHoldsOccurrence(before.blocks, resolved.target)) {
       throw new InvalidInputError(
         `${quotedOccurrence} is not a current occurrence of "${echoCallerText(title)}": the calendar server's own expansion of the `
         + 'series has no occurrence there, which is also what an occurrence already deleted looks like. Nothing was deleted. '
-        + 'Pass the recurrenceId of a list_calendar_events row of this series, or its start when the row has no recurrenceId.',
+        + 'Pass the recurrenceId of a list_calendar_events row of this series.',
       );
     }
 
-    // A bounded series must keep an occurrence: a surviving first instance that is not the
-    // target proves the set stays non-empty, whether COUNT or UNTIL bounds it.
-    if (series.bounded && (sameOccurrence(series.start, resolved.target)
-      || !expandedHoldsOccurrence(await expanded(series.start), series.start))) {
+    // The first instance is never removed and must be listed where this server reads the start:
+    // that keeps every series non-empty (a rule can match no date, leaving the start its only
+    // instance), and proves this server resolves the start's zone as the calendar server does,
+    // which a stored VTIMEZONE can contradict. It is also the control read after the write.
+    if (sameOccurrence(series.start, resolved.target)) {
       throw new InvalidInputError(
-        `${quotedOccurrence} cannot be deleted here: "${echoCallerText(title)}" has a fixed number of occurrences or an end date, `
-        + 'and this server only removes an occurrence of such a series while its first occurrence is still in place and is not the one '
-        + 'being removed, so the series can never be left empty. Nothing was deleted. Use the Fastmail web interface to delete it.',
+        `${quotedOccurrence} is the first occurrence of "${echoCallerText(title)}", which this server never removes, so a series `
+        + 'can never be left empty. Nothing was deleted. Use the Fastmail web interface to delete it.',
+      );
+    }
+    const first = await expanded(series.start);
+    if ('unusable' in first) throw unusableBeforeWrite(first.unusable);
+    if ('absent' in first || !expandedHoldsFirstInstance(first.blocks, series.start)) {
+      throw new InvalidInputError(
+        `${quotedOccurrence} cannot be deleted here: the calendar server does not list the first occurrence of "${echoCallerText(title)}" `
+        + 'at the start this server reads from the stored event. This server removes an occurrence only while the first one is in '
+        + 'place, so the series keeps an occurrence and the exclusion is known to name the intended one. Nothing was deleted. '
+        + 'Use the Fastmail web interface to delete it.',
       );
     }
 
@@ -4573,27 +4653,39 @@ export class CalDAVCalendarClient {
     const updateResp = await davCall(() => client.updateCalendarObject({ calendarObject: { ...obj, data } }));
     assertDavOk(updateResp, 'delete one occurrence');
 
-    const quotedLine = `"${describeUntrustedAt(resolved.line, EXDATE_ECHO_LIMIT)}"`;
-    let stillThere: boolean;
+    // From here the write has landed, so every outcome is returned with the recovery copy. Gone
+    // needs positive evidence: the resource's response holding expanded events without the
+    // target, or no response for it beside a second read that finds its first instance.
+    const exclusion = `an exclusion (EXDATE) for ${resolved.display}, ${describeCalendarZoneWrite(resolved.written)}`;
+    let failure: string | undefined;
+    let unconfirmedWhy: string | undefined;
     try {
-      stillThere = expandedHoldsOccurrence(await expanded(resolved.target), resolved.target);
+      const after = await expanded(resolved.target);
+      if ('unusable' in after) {
+        unconfirmedWhy = after.unusable;
+      } else if ('blocks' in after) {
+        if (expandedHoldsOccurrence(after.blocks, resolved.target)) {
+          failure = `NOT REMOVED: the calendar server still lists ${quotedOccurrence} of "${echoCallerText(title)}" after the write. `
+            + `The series now carries ${exclusion}, which may have removed a different occurrence; check the series with list_calendar_events.`;
+        }
+      } else {
+        const control = await expanded(series.start);
+        if (!('blocks' in control && expandedHoldsFirstInstance(control.blocks, series.start))) {
+          unconfirmedWhy = 'the answer does not hold the series, and neither does a second read for its first occurrence';
+        }
+      }
     } catch {
-      throw new Error(
-        `The series "${echoCallerText(title)}" was written with the exclusion ${quotedLine}, but the read that confirms `
-        + `${quotedOccurrence} is gone failed, so the exclusion is unconfirmed. Check the series with list_calendar_events.`,
-      );
+      unconfirmedWhy = 'the read that would confirm it failed';
     }
-    if (stillThere) {
-      throw new Error(
-        `The series "${echoCallerText(title)}" now carries the exclusion ${quotedLine}, but the calendar server still lists `
-        + `${quotedOccurrence}, so the occurrence was not removed.`,
-      );
+    if (unconfirmedWhy !== undefined) {
+      failure = `NOT CONFIRMED: the series "${echoCallerText(title)}" now carries ${exclusion}, but ${unconfirmedWhy}, `
+        + `so whether ${quotedOccurrence} is gone is unknown; check the series with list_calendar_events.`;
     }
 
     return {
       eventId: ownUid(obj) || eventId,
       url: obj.url,
-      occurrence: { excluded: resolved.display, written: resolved.written, previousICalendar },
+      occurrence: { excluded: resolved.display, written: resolved.written, previousICalendar, ...(failure !== undefined && { failure }) },
       brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }

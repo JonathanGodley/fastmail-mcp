@@ -50,7 +50,7 @@ import {
   isBrokenCalendarHomeEntry,
   findBrokenCalendarHomeCollections,
 } from './caldav-client.js';
-import type { CalendarEvent } from './caldav-client.js';
+import type { CalendarEvent, DeleteCalendarEventResult } from './caldav-client.js';
 // The assertion on the login refusal compares against this helper's OWN output rather than a
 // hand-written expectation, so the test cannot drift from the bound the helper enforces.
 import { describeUntrustedAt } from './coerce.js';
@@ -4637,7 +4637,8 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
 
   // The client's measured weekly series (docs/fastmail-action-availability.md), carrying every
   // part the write must leave alone: a VTIMEZONE, a VALARM, an override of ANOTHER occurrence,
-  // an existing EXDATE and an unknown X- property.
+  // an existing EXDATE and an unknown X- property. The VTIMEZONE's own RRULE and RDATE are its
+  // daylight rules, not the event's, so they must not trip the series gates.
   const GOLDEN = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -4646,6 +4647,8 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     'TZID:Australia/Sydney',
     'BEGIN:STANDARD',
     'DTSTART:19700405T030000',
+    'RRULE:FREQ=YEARLY;BYMONTH=4;BYDAY=1SU',
+    'RDATE:19700405T030000',
     'TZOFFSETFROM:+1100',
     'TZOFFSETTO:+1000',
     'END:STANDARD',
@@ -4735,7 +4738,9 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     (client as any).client = mockDAVClient;
     return { client, mockDAVClient };
   }
-  type DAVCalendarObjectLike = { data: string; url: string; etag: string };
+  // `data` is absent when the server answers its calendar-data propstat with an error: tsdav
+  // drops a non-2xx propstat's properties.
+  type DAVCalendarObjectLike = { data?: string; url: string; etag: string };
 
   const assertNothingWritten = (mockDAVClient: ReturnType<typeof makeClient>['mockDAVClient']) => {
     assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0, 'updateCalendarObject was called');
@@ -4819,19 +4824,13 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     { ms: at('2028-08-22T00:00:00Z'), lines: ['RECURRENCE-ID;VALUE=DATE:20280822', 'DTSTART;VALUE=DATE:20280822'] },
   ];
 
-  // A fake that drops every instance once anything is written, so the assertion on the line's
-  // form is the one that answers, not the after-write check.
-  const goneAfterAnyWrite = (instances: Instance[]) => ({
-    expand: (_params: FetchObjectsParams, written: string | undefined) =>
-      written === undefined ? [{ data: expandedBlob(instances), url: EVENT_URL, etag: '"e"' }] : [],
-  });
-
   it('excludes an all-day occurrence with a VALUE=DATE EXDATE', async () => {
-    const { client, mockDAVClient } = makeClient(ALL_DAY, ALL_DAY_INSTANCES, goneAfterAnyWrite(ALL_DAY_INSTANCES));
+    const { client, mockDAVClient } = makeClient(ALL_DAY, ALL_DAY_INSTANCES);
     const result = await client.deleteCalendarEvent(UID, '2027-08-22');
     assert.match(writtenBody(mockDAVClient), /\r\nEXDATE;VALUE=DATE:20270822\r\n/);
     assert.deepEqual(result.occurrence?.written, { kind: 'allday' });
     assert.equal(result.occurrence?.excluded, '2027-08-22');
+    assert.equal(result.occurrence?.failure, undefined);
   });
 
   const UNBOUNDED_UTC = [
@@ -4847,21 +4846,22 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     'END:VCALENDAR',
   ].join('\r\n');
   const UNBOUNDED_INSTANCES: Instance[] = [
-    { ms: at('2026-04-06T10:00:00Z'), lines: ['DTSTART:20260406T100000Z'], exdate: 'EXDATE:20260406T100000Z' },
-    { ms: at('2026-04-13T10:00:00Z'), lines: ['RECURRENCE-ID:20260413T100000Z', 'DTSTART:20260413T100000Z'] },
+    { ms: at('2026-04-06T10:00:00Z'), lines: ['DTSTART:20260406T100000Z'] },
+    { ms: at('2026-04-13T10:00:00Z'), lines: ['RECURRENCE-ID:20260413T100000Z', 'DTSTART:20260413T100000Z'], exdate: 'EXDATE:20260413T100000Z' },
   ];
 
-  it('accepts the first instance of an unbounded series, passed by its start', async () => {
-    const { client, mockDAVClient } = makeClient(UNBOUNDED_UTC, UNBOUNDED_INSTANCES, goneAfterAnyWrite(UNBOUNDED_INSTANCES));
-    const result = await client.deleteCalendarEvent(UID, '2026-04-06T10:00:00Z');
-    assert.match(writtenBody(mockDAVClient), /\r\nEXDATE:20260406T100000Z\r\n/);
+  it('excludes an occurrence of a UTC series with a Z EXDATE', async () => {
+    const { client, mockDAVClient } = makeClient(UNBOUNDED_UTC, UNBOUNDED_INSTANCES);
+    const result = await client.deleteCalendarEvent(UID, '2026-04-13T10:00:00Z');
+    assert.match(writtenBody(mockDAVClient), /\r\nEXDATE:20260413T100000Z\r\n/);
     assert.deepEqual(result.occurrence?.written, { kind: 'utc' });
+    assert.equal(result.occurrence?.failure, undefined);
   });
 
   it('moves the master first when an override is stored before it, keeping every block\'s bytes', async () => {
     const blocks = GOLDEN.split('\r\nBEGIN:VEVENT\r\n');
     const overrideFirst = [blocks[0], blocks[2].replace('\r\nEND:VCALENDAR', ''), blocks[1] + '\r\nEND:VCALENDAR'].join('\r\nBEGIN:VEVENT\r\n');
-    assert.ok(overrideFirst.indexOf('RECURRENCE-ID') < overrideFirst.indexOf('RRULE'), 'the premise: the override comes first');
+    assert.ok(overrideFirst.indexOf('RECURRENCE-ID') < overrideFirst.indexOf('RRULE:FREQ=WEEKLY'), 'the premise: the override comes first');
     const { client, mockDAVClient } = makeClient(overrideFirst, GOLDEN_INSTANCES);
     await client.deleteCalendarEvent(UID, '2026-09-04T23:00:00Z');
     const body = writtenBody(mockDAVClient);
@@ -4931,6 +4931,31 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       });
     }
 
+    // A component the per-block scan cannot see past must not hide a line from the gates.
+    const NESTED = /its components are not nested the way iCalendar requires/;
+    const afterMasterSequence = (lines: string[]) => mutate('SEQUENCE:1\r\nBEGIN:VALARM', ['SEQUENCE:1', ...lines, 'BEGIN:VALARM'].join('\r\n'));
+    for (const [label, stored, reason] of [
+      ['an ORGANIZER and ATTENDEE after a VEVENT nested in an X- component',
+        afterMasterSequence(['BEGIN:X-WRAP', 'BEGIN:VEVENT', 'END:VEVENT', 'END:X-WRAP', 'ORGANIZER:mailto:host@example.com', 'ATTENDEE:mailto:guest@example.com']), NESTED],
+      ['an ATTENDEE after a VEVENT nested in a VALARM',
+        mutate('TRIGGER:-PT15M\r\nEND:VALARM', 'TRIGGER:-PT15M\r\nBEGIN:VEVENT\r\nEND:VEVENT\r\nEND:VALARM\r\nATTENDEE:mailto:guest@example.com'), NESTED],
+      ['an RDATE and a second RRULE after a nested VEVENT',
+        afterMasterSequence(['BEGIN:X-WRAP', 'BEGIN:VEVENT', 'END:VEVENT', 'END:X-WRAP', 'RDATE;TZID=Australia/Sydney:20261003T090000', 'RRULE:FREQ=DAILY']), NESTED],
+      // In the last block, so no later VEVENT opens outside the VCALENDAR: only the order check sees it.
+      ['an ATTENDEE after a stray END:VEVENT in an X- component',
+        mutate('SEQUENCE:1\r\nEND:VEVENT\r\nEND:VCALENDAR', 'SEQUENCE:1\r\nBEGIN:X-WRAP\r\nEND:VEVENT\r\nEND:X-WRAP\r\nATTENDEE:mailto:guest@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR'), NESTED],
+      ['an ATTENDEE in a top-level X- component',
+        mutate('END:VTIMEZONE', 'END:VTIMEZONE\r\nBEGIN:X-WRAP\r\nATTENDEE:mailto:guest@example.com\r\nEND:X-WRAP'), /has attendees or an organizer/],
+      ['an RRULE in a top-level X- component',
+        mutate('END:VTIMEZONE', 'END:VTIMEZONE\r\nBEGIN:X-WRAP\r\nRRULE:FREQ=DAILY\r\nEND:X-WRAP'), /not one series with a single repeat rule/],
+      ['an RDATE in a VTIMEZONE nested in the master',
+        mutate('SEQUENCE:1\r\nBEGIN:VALARM', 'SEQUENCE:1\r\nBEGIN:VTIMEZONE\r\nRDATE;TZID=Australia/Sydney:20261003T090000\r\nEND:VTIMEZONE\r\nBEGIN:VALARM'), /RDATE/],
+    ] as Array<[string, string, RegExp]>) {
+      it(`refuses ${label}`, async () => {
+        await refuses(stored, '2026-09-04T23:00:00Z', reason);
+      });
+    }
+
     it('refuses a frame mismatch either way rather than converting', async () => {
       await refuses(GOLDEN, '2026-09-05', /the series has a time of day, so a date alone does not say which occurrence/);
       await refuses(ALL_DAY, '2027-08-22T00:00:00Z', /the series is all-day, so its occurrences are dates/, ALL_DAY_INSTANCES);
@@ -4987,15 +5012,77 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       assertNothingWritten(unexpanded.mockDAVClient);
     });
 
-    it('refuses the first occurrence of a COUNT series and of an UNTIL series', async () => {
-      await refuses(GOLDEN, '2026-08-21T23:00:00Z', /fixed number of occurrences or an end date/);
+    const FIRST = /is the first occurrence of "[^"]+", which this server never removes/;
+    const FIRST_NOT_LISTED = /the calendar server does not list the first occurrence of "[^"]+" at the start this server reads/;
+
+    it('refuses the first occurrence of any series, bounded or not', async () => {
+      await refuses(GOLDEN, '2026-08-21T23:00:00Z', FIRST);
       const until = mutate('RRULE:FREQ=WEEKLY;COUNT=4', 'RRULE:FREQ=WEEKLY;UNTIL=20260919T135959Z');
-      await refuses(until, '2026-08-21T23:00:00Z', /fixed number of occurrences or an end date/);
+      await refuses(until, '2026-08-21T23:00:00Z', FIRST);
+      await refuses(UNBOUNDED_UTC, '2026-04-06T10:00:00Z', FIRST, UNBOUNDED_INSTANCES);
     });
 
-    it('refuses any occurrence of a bounded series whose first instance is gone', async () => {
-      const firstGone = GOLDEN_INSTANCES.slice(1);
-      await refuses(GOLDEN, '2026-09-04T23:00:00Z', /fixed number of occurrences or an end date/, firstGone);
+    it('refuses the only instance of a rule that matches no date', async () => {
+      // February has no 30th, so the start is the series' only instance.
+      const onlyStart = ALL_DAY.replace('RRULE:FREQ=YEARLY;COUNT=3', 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30');
+      assert.notEqual(onlyStart, ALL_DAY);
+      await refuses(onlyStart, '2026-08-22', FIRST, [{ ...ALL_DAY_INSTANCES[0], exdate: 'EXDATE;VALUE=DATE:20260822' }]);
+    });
+
+    it('refuses any occurrence of a series whose first instance is gone, bounded or not', async () => {
+      await refuses(GOLDEN, '2026-09-04T23:00:00Z', FIRST_NOT_LISTED, GOLDEN_INSTANCES.slice(1));
+      await refuses(UNBOUNDED_UTC, '2026-04-13T10:00:00Z', FIRST_NOT_LISTED, UNBOUNDED_INSTANCES.slice(1));
+    });
+
+    // The stored VTIMEZONE is what the calendar server expands with; this server resolves the
+    // zone with its own data. A disagreement moves the first instance, which the check catches.
+    const zoneDisagreement = (zone: string, rule: string, offset: string) => [
+      'BEGIN:VCALENDAR', 'VERSION:2.0',
+      'BEGIN:VTIMEZONE', `TZID:${zone}`, 'BEGIN:STANDARD', 'DTSTART:19700101T000000',
+      `TZOFFSETFROM:${offset}`, `TZOFFSETTO:${offset}`, 'END:STANDARD', 'END:VTIMEZONE',
+      'BEGIN:VEVENT', `UID:${UID}`, 'DTSTAMP:20260801T000000Z', `DTSTART;TZID=${zone}:20260810T090000`,
+      'DURATION:PT1H', rule, 'SUMMARY:Island call', 'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+
+    it('refuses when the stored zone puts the first instance a day from where this server reads it', async () => {
+      // Kiritimati is UTC+14 to ICU; the stored VTIMEZONE says UTC-10, so the server's instances
+      // fall a day after this server's reading of the start.
+      const kiritimati = zoneDisagreement('Pacific/Kiritimati', 'RRULE:FREQ=WEEKLY', '-1000');
+      await refuses(kiritimati, '2026-08-24T19:00:00Z', FIRST_NOT_LISTED, [
+        { ms: at('2026-08-10T19:00:00Z'), lines: ['DTSTART:20260810T190000Z'] },
+        { ms: at('2026-08-17T19:00:00Z'), lines: ['RECURRENCE-ID:20260817T190000Z', 'DTSTART:20260817T190000Z'] },
+        { ms: at('2026-08-24T19:00:00Z'), lines: ['RECURRENCE-ID:20260824T190000Z', 'DTSTART:20260824T190000Z'], exdate: 'EXDATE;TZID=Pacific/Kiritimati:20260824T090000' },
+      ]);
+    });
+
+    it('takes only the block without a RECURRENCE-ID as the first instance', async () => {
+      // Honolulu is UTC-10 to ICU; the stored VTIMEZONE says UTC+14, so this server's reading of
+      // the start lands on the server's SECOND daily instance, which carries a RECURRENCE-ID.
+      const honolulu = zoneDisagreement('Pacific/Honolulu', 'RRULE:FREQ=DAILY', '+1400');
+      await refuses(honolulu, '2026-08-12T19:00:00Z', FIRST_NOT_LISTED, [
+        { ms: at('2026-08-09T19:00:00Z'), lines: ['DTSTART:20260809T190000Z'] },
+        { ms: at('2026-08-10T19:00:00Z'), lines: ['RECURRENCE-ID:20260810T190000Z', 'DTSTART:20260810T190000Z'] },
+        { ms: at('2026-08-11T19:00:00Z'), lines: ['RECURRENCE-ID:20260811T190000Z', 'DTSTART:20260811T190000Z'], exdate: 'EXDATE;TZID=Pacific/Honolulu:20260812T090000' },
+        { ms: at('2026-08-12T19:00:00Z'), lines: ['RECURRENCE-ID:20260812T190000Z', 'DTSTART:20260812T190000Z'] },
+      ]);
+    });
+
+    it('refuses an occurrence the series already excludes, compared parsed', async () => {
+      // The fake lists it anyway, as a server reading the zone differently could.
+      const listed: Instance[] = [...GOLDEN_INSTANCES, { ms: at('2026-09-11T23:00:00Z'), lines: ['RECURRENCE-ID:20260911T230000Z', 'DTSTART:20260911T230000Z'] }];
+      await refuses(GOLDEN, '2026-09-11T23:00:00Z', /is already excluded by an EXDATE the series stores/, listed);
+      const inList = mutate('EXDATE;TZID=Australia/Sydney:20260912T090000', 'EXDATE;TZID=Australia/Sydney:20260801T090000,20260912T090000');
+      await refuses(inList, '2026-09-12T09:00:00', /is already excluded by an EXDATE the series stores/, listed);
+    });
+
+    it('refuses before the write when the answer holds the resource without calendar data', async () => {
+      const { client, mockDAVClient } = makeClient(GOLDEN, GOLDEN_INSTANCES, { expand: () => [{ data: undefined, url: EVENT_URL, etag: '"e"' }] });
+      await assert.rejects(() => client.deleteCalendarEvent(UID, '2026-09-04T23:00:00Z'), (err: Error) => {
+        assert.ok(isInvalidInput(err));
+        assert.match(err.message, /cannot be used: the answer holds the series without any event data\. Nothing was deleted\./);
+        return true;
+      });
+      assertNothingWritten(mockDAVClient);
     });
 
     it('gives the ambiguity refusal first when the id names two records', async () => {
@@ -5019,33 +5106,93 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
     });
 
-    it('says the series carries the EXDATE when the server still lists the occurrence', async () => {
-      const kept = GOLDEN_INSTANCES.map(i => ({ ...i, exdate: undefined }));
-      const { client, mockDAVClient } = makeClient(GOLDEN, kept);
-      await assert.rejects(() => client.deleteCalendarEvent(UID, '2026-09-04T23:00:00Z'), (err: Error) => {
-        assert.equal(err.name, 'Error', 'a plain Error: the write happened');
-        assert.match(err.message, /now carries the exclusion "EXDATE;TZID=Australia\/Sydney:20260905T090000", but the calendar server still lists occurrence "2026-09-04T23:00:00Z", so the occurrence was not removed\./);
-        return true;
-      });
-      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
-    });
+    const WRITTEN = 'now carries an exclusion \\(EXDATE\\) for 2026-09-05T09:00:00, zone "Australia/Sydney"';
 
-    it('says the exclusion is unconfirmed when the read after the write fails', async () => {
-      let calls = 0;
+    /** Run the golden delete with `after` answering every expand query made after the PUT. */
+    async function afterWrite(after: (params: FetchObjectsParams) => DAVCalendarObjectLike[]) {
+      const queries: string[] = [];
       const { client, mockDAVClient } = makeClient(GOLDEN, GOLDEN_INSTANCES, {
-        expand: (_params, written) => {
-          calls++;
-          if (written !== undefined) throw new Error('Collection query failed: 503 Service Unavailable');
-          return [{ data: expandedBlob(GOLDEN_INSTANCES), url: EVENT_URL, etag: '"e"' }];
+        expand: (params, written) => {
+          if (written !== undefined) {
+            queries.push(params.timeRange!.start);
+            return after(params);
+          }
+          const from = Date.parse(params.timeRange!.start);
+          const to = Date.parse(params.timeRange!.end);
+          return [{ data: expandedBlob(GOLDEN_INSTANCES.filter(i => i.ms >= from && i.ms < to)), url: EVENT_URL, etag: '"e"' }];
         },
       });
-      await assert.rejects(() => client.deleteCalendarEvent(UID, '2026-09-04T23:00:00Z'), (err: Error) => {
-        assert.equal(err.name, 'Error');
-        assert.match(err.message, /was written with the exclusion "EXDATE;TZID=Australia\/Sydney:20260905T090000", but the read that confirms occurrence "2026-09-04T23:00:00Z" is gone failed, so the exclusion is unconfirmed/);
-        return true;
-      });
+      const result = await client.deleteCalendarEvent(UID, '2026-09-04T23:00:00Z');
       assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
-      assert.equal(calls, 3, 'the occurrence, the first instance, then the confirmation');
+      assert.equal(result.occurrence?.previousICalendar, GOLDEN, 'the recovery copy is returned');
+      return { result, queries };
+    }
+    const unconfirmed = (result: DeleteCalendarEventResult, why: RegExp) => {
+      const failure = result.occurrence?.failure ?? '';
+      assert.match(failure, new RegExp(`^NOT CONFIRMED: the series "Planning sync" ${WRITTEN}, but `));
+      assert.match(failure, why);
+      assert.match(failure, /so whether occurrence "2026-09-04T23:00:00Z" is gone is unknown; check the series with list_calendar_events\.$/);
+    };
+
+    it('reports NOT REMOVED, with the recovery copy, when the server still lists the occurrence', async () => {
+      const { result } = await afterWrite(() => [{ data: expandedBlob([GOLDEN_INSTANCES[2]]), url: EVENT_URL, etag: '"e"' }]);
+      assert.equal(
+        result.occurrence?.failure,
+        'NOT REMOVED: the calendar server still lists occurrence "2026-09-04T23:00:00Z" of "Planning sync" after the write. '
+          + 'The series now carries an exclusion (EXDATE) for 2026-09-05T09:00:00, zone "Australia/Sydney", which may have removed a different occurrence; '
+          + 'check the series with list_calendar_events.',
+      );
+    });
+
+    it('reports NOT CONFIRMED when the read after the write fails', async () => {
+      const { result } = await afterWrite(() => { throw new Error('Collection query failed: 503 Service Unavailable'); });
+      unconfirmed(result, /, but the read that would confirm it failed, /);
+    });
+
+    it('reports NOT CONFIRMED when the answer holds the resource without calendar data', async () => {
+      const { result } = await afterWrite(() => [{ data: undefined, url: EVENT_URL, etag: '"e"' }]);
+      unconfirmed(result, /, but the answer holds the series without any event data, /);
+    });
+
+    it('reports NOT CONFIRMED when the answer holds the resource with no event in it', async () => {
+      const { result } = await afterWrite(() => [{ data: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR', url: EVENT_URL, etag: '"e"' }]);
+      unconfirmed(result, /, but the answer holds the series without any event data, /);
+    });
+
+    it('reports NOT CONFIRMED when the answer after the write is unexpanded or over the cap', async () => {
+      const unexpanded = await afterWrite(() => [{ data: expandedBlob([GOLDEN_INSTANCES[0]], ['RRULE:FREQ=WEEKLY;COUNT=4']), url: EVENT_URL, etag: '"e"' }]);
+      unconfirmed(unexpanded.result, /, but the calendar server did not expand the series, /);
+      const dense = Array.from({ length: CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1 }, () => GOLDEN_INSTANCES[0]);
+      const over = await afterWrite(() => [{ data: expandedBlob(dense), url: EVENT_URL, etag: '"e"' }]);
+      unconfirmed(over.result, new RegExp(`, but it expanded to ${CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1} occurrences, more than the ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} `));
+    });
+
+    // An answer without the resource is what a window with no instance looks like (RFC 4791
+    // section 7.8: a calendar-query returns only the resources that match), but also what a
+    // server spelling the href differently looks like. A second read, of the first instance the
+    // series is known to keep, tells them apart.
+    it('reports NOT CONFIRMED when no answer after the write holds the resource', async () => {
+      const empty = await afterWrite(() => []);
+      unconfirmed(empty.result, /, but the answer does not hold the series, and neither does a second read for its first occurrence, /);
+      assert.equal(empty.queries.length, 2, 'the occurrence, then the first instance');
+
+      const elsewhere = await afterWrite((params) => {
+        const from = Date.parse(params.timeRange!.start);
+        const to = Date.parse(params.timeRange!.end);
+        return [{ data: expandedBlob(GOLDEN_INSTANCES.filter(i => i.ms >= from && i.ms < to)), url: CAL_URL + 'Weekly-copy.ics', etag: '"e"' }];
+      });
+      unconfirmed(elsewhere.result, /, but the answer does not hold the series, and neither does a second read for its first occurrence, /);
+    });
+
+    it('confirms an empty window by finding the first instance in a second read', async () => {
+      const { result, queries } = await afterWrite((params) => {
+        const from = Date.parse(params.timeRange!.start);
+        const to = Date.parse(params.timeRange!.end);
+        const live = GOLDEN_INSTANCES.slice(0, 2).filter(i => i.ms >= from && i.ms < to);
+        return live.length === 0 ? [] : [{ data: expandedBlob(live), url: EVENT_URL, etag: '"e"' }];
+      });
+      assert.equal(result.occurrence?.failure, undefined);
+      assert.equal(queries.length, 2);
     });
   });
 
@@ -5072,7 +5219,7 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       await assert.rejects(() => client.deleteCalendarEvent(UID), (err: Error) => {
         assert.ok(isInvalidInput(err));
         assert.match(err.message, /will not delete the whole series/);
-        assert.match(err.message, /To delete ONE occurrence, pass occurrence: the recurrenceId of that occurrence's list_calendar_events row, or its start when the row has no recurrenceId\./);
+        assert.match(err.message, /To delete ONE occurrence other than the first, pass occurrence: the recurrenceId of that occurrence's list_calendar_events row\./);
         return true;
       });
       assertNothingWritten(mockDAVClient);
@@ -5120,6 +5267,17 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
         `One occurrence deleted from a repeating event; the rest of the series is unchanged. Event ID: "${UID}", resource url: "${EVENT_URL}". `
           + 'Excluded occurrence: 2026-09-05T09:00:00, zone "Australia/Sydney". NOTE',
       );
+      assert.deepEqual(JSON.parse(content[1].text), { previousICalendar: GOLDEN });
+    });
+
+    it('a failure after the write leads with the failure, never a success, and still carries the recovery copy', () => {
+      const failure = 'NOT CONFIRMED: the series "Planning sync" now carries an exclusion (EXDATE) for 2026-09-05T09:00:00, zone "Australia/Sydney", but the read that would confirm it failed, so whether occurrence "x" is gone is unknown; check the series with list_calendar_events.';
+      const content = deleteCalendarEventContent({
+        ...base,
+        occurrence: { excluded: '2026-09-05T09:00:00', written: { kind: 'zoned', zone: 'Australia/Sydney' }, previousICalendar: GOLDEN, failure },
+      }, ' NOTE');
+      assert.equal(content.length, 2);
+      assert.equal(content[0].text, `${failure} Event ID: "${UID}", resource url: "${EVENT_URL}". NOTE`);
       assert.deepEqual(JSON.parse(content[1].text), { previousICalendar: GOLDEN });
     });
 

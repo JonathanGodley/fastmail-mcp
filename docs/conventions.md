@@ -860,9 +860,11 @@ delete only `occurrence` does, and only for one occurrence of a series that qual
 pointing a different id at it, passing `occurrence`, or doing the edit in the web client, all
 caller-side changes. `InternalError` would say a bare retry might work, and it never will: the
 event repeats, and it will still repeat next time. The delete-occurrence refusals that come before
-the write are `InvalidInputError` for the same reason; the two failures after it, an occurrence
-still listed and a confirmation read that failed, are plain `Error`s, since the write has happened
-and no change to the arguments undoes it.
+the write are `InvalidInputError` for the same reason. After it nothing is thrown except a refused
+PUT, which is a plain `Error`: once the write has landed, an occurrence still listed or one the
+read could not show gone is returned as a result that leads with `NOT REMOVED:` or
+`NOT CONFIRMED:` and still carries `previousICalendar`, because an error would drop the recovery
+copy of a write that happened.
 
 `assertICalTextLimits` (`src/ical-limits.ts`) follows the same rule from the other end of
 the call chain: it runs in the `create_calendar_event` / `update_calendar_event` handlers,
