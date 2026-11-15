@@ -2143,9 +2143,9 @@ describe('getThread', () => {
     assert.equal(hiddenDraftCount, 0);
   });
 
-  // A thread carrying an active draft reply plus a draft that now lives only in Trash —
-  // the shape every edit_draft leaves behind, since the replaced copy keeps its $draft
-  // keyword. `mailboxes` is what the batch's trailing Mailbox/get returns.
+  // A thread carrying an active draft reply plus a draft that now lives only in Trash,
+  // since a deleted draft keeps its $draft keyword. `mailboxes` is what the batch's
+  // trailing Mailbox/get returns.
   const threadWithTrashedDraftResponse = (mailboxes: any[]) => {
     let callCount = 0;
     return stubRequests(client, async () => {
@@ -2159,7 +2159,7 @@ describe('getThread', () => {
           ['Email/get', { list: [
             { id: 'e1', subject: 'Sent message', keywords: { $seen: true }, mailboxIds: { 'mb-inbox': true } },
             { id: 'e2', subject: 'Active draft reply', keywords: { $draft: true }, mailboxIds: { 'mb-drafts': true } },
-            { id: 'e3', subject: 'Draft replaced by an edit', keywords: { $draft: true }, mailboxIds: { 'mb-trash': true } },
+            { id: 'e3', subject: 'Deleted draft', keywords: { $draft: true }, mailboxIds: { 'mb-trash': true } },
           ] }, 'emails'],
           ['Mailbox/get', { list: mailboxes }, 'mailboxes'],
         ],

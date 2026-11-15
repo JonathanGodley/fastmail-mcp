@@ -4803,7 +4803,7 @@ export class JmapClient {
       return { emails, hiddenDraftCount: 0 };
     }
     const filtered = emails.filter((e: any) => !e.keywords?.$draft);
-    // A draft ONLY in Trash is not counted: every edit_draft leaves one there. With no
+    // A draft ONLY in Trash is not counted: a deleted draft keeps `$draft` there. With no
     // resolvable trash role every draft counts, failing toward over-warning.
     const trashMailboxId = this.findByExactRole(threadMailboxes, 'trash')?.id;
     const isTrashedDraft = (e: any): boolean => {
