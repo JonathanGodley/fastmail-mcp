@@ -231,7 +231,7 @@ threaded into the refusal builders is the combination, not the attach directory 
   hop chain (8 hops on the probe, with internal host names/IPs), spam-filter verdict
   headers, ARC and Authentication-Results sets, and delivery-routing headers. None of this
   is visible in an inline forward, which reproduces only the body under a From/To/Cc/
-  Subject/Date block. `draft_email`'s `asAttachment` description and the README disclose
+  Subject/Date block. `draft_email`'s `asAttachment` description and `docs/reference/tools.md` disclose
   this; it is the caller's deliberate trade for losslessness.
 - **Outgoing size is unbounded by this server on the carry/.eml paths (accepted).**
   Carried originals and the `.eml` are blobId **re-references** never read client-side, so

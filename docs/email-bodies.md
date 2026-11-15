@@ -393,7 +393,7 @@ exception to the omit-empty-fields rule: without it "nothing was quoted" and "th
 wasn't recognized" and "the flag did nothing" are indistinguishable, and a caller cannot
 know whether re-reading verbatim is worth a round trip.
 
-**Accepted residuals** (all documented in the README, all reported through the signal).
+**Accepted residuals** (all documented in `docs/reference/email.md`, all reported through the signal).
 They run in **both directions**: an under-strip returns duplicated bytes, an over-strip
 returns *less than the sender wrote*. Under-strip is the one to prefer at every fork, and
 the marker rules are tuned that way, but the markers are conventions, not syntax, so

@@ -9,8 +9,9 @@ or removed feature, updates two places in the same change, not as a follow-up:
 
 1. the tool's `description` and `inputSchema` in `src/index.ts`, which is what
    MCP clients see;
-2. `README.md`: the tool reference section and any format or feature section the
-   change touches.
+2. the reference under `docs/reference/`: the tool's entry in `tools.md` and any
+   other section there the change touches. Adding or removing a tool also
+   changes the tool list in `README.md`.
 
 ### Response format
 
@@ -175,6 +176,9 @@ that span several tools, or that describe the JMAP/Fastmail platform, live in
   calendar window bounds, free/busy handling, the quote sanitiser, and
   dependency and build notes.
 - `docs/upstream-sync.md`: how this fork merges from upstream.
+
+`docs/reference/` is the user-facing reference for what each tool takes and
+returns; the files listed above are rationale for maintainers.
 
 Read the relevant file before re-deriving a decision, and add a new cross-tool
 decision there rather than in a local note.

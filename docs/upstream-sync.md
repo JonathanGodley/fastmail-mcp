@@ -68,7 +68,7 @@ re-run the gate, and integrate from there.
 | `src/caldav-client.ts` | `--theirs` + surgery | Upstream is ahead here; the fork's `coerce.js` import and error-class discipline are restored after |
 | `src/contacts-calendar.ts` | `--theirs` + surgery | Same, plus the fork's account-routing and `properties` deletions restored |
 | `src/url-validation.ts` | `--theirs` + delete | Upstream already carries the fork's regional-host fix; `validateHttpsUrl` dies with the WebDAV client |
-| `README.md`, `manifest.json` | `--ours` | Rewritten per-phase, never hunk-merged |
+| `README.md`, `manifest.json` | `--ours` | Rewritten per-phase, never hunk-merged; an upstream change to README reference text is ported into `docs/reference/` by hand |
 | `package.json`, `package-lock.json` | `--ours` | Not a union — adopt upstream's real changes by hand, in their owning phase |
 | `.gitignore` | 3-way, not union | The fork's deletion of the `CLAUDE.md` line must survive; upstream's bare `.claude/` must not land (it would kill the skills un-ignore) |
 | `.github/**` | merges clean, then neutralize | Upstream's auto-release trigger is declined; restore this fork's `build-dxt.yml` wholesale |
