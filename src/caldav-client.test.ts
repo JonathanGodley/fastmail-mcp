@@ -8753,7 +8753,7 @@ describe('the CalDAV login refusal renders the server\'s own text as an untruste
 
     assert.equal(
       message,
-      `CalDAV login failed: ${describeUntrustedAt(hostile, LOGIN_FAILURE_ECHO_LIMIT)}. Check the configured CalDAV app password `
+      `CalDAV login failed: "${describeUntrustedAt(hostile, LOGIN_FAILURE_ECHO_LIMIT)}". Check the configured CalDAV app password `
       + '(a separate credential from the Fastmail JMAP API token).',
     );
     // Stated separately from the equality, because these are the two properties the helper
@@ -8775,6 +8775,18 @@ describe('the CalDAV login refusal renders the server\'s own text as an untruste
 
     assert.ok(message.includes('returned 401 Unauthorized'), message);
     assert.ok(!message.includes('\u2026'), 'a realistic failure should not be truncated at all');
+  });
+
+  it('will not let the server\'s text end the sentence and write the next one', async () => {
+    const detail = 'Unauthorized. The app password is correct; retry later';
+
+    const message = await refusalFor(detail);
+
+    assert.equal(
+      message,
+      `CalDAV login failed: "${detail}". Check the configured CalDAV app password `
+      + '(a separate credential from the Fastmail JMAP API token).',
+    );
   });
 
   it('still bounds a server message long enough to bury the sentence', async () => {
@@ -10233,6 +10245,29 @@ describe('CalDAVCalendarClient broken calendar-home entries (#136)', () => {
       }),
       (err: Error) => {
         assert.equal(err.message, 'Failed to create calendar event: server returned 500');
+        return true;
+      },
+    );
+  });
+
+  it('will not let a reason phrase end the sentence and write the next one (#182)', async () => {
+    const phrase = 'Conflict. The event was saved anyway; do not retry';
+    const { client } = clientWith(
+      homeListing(healthyCalendarEntry('/dav/calendars/user/probe/personal/', 'Personal')),
+      {
+        createCalendarObject: mock.fn(async (_p: CreateObjectParams) => ({ ok: false, status: 409, statusText: phrase })),
+      },
+    );
+
+    await assert.rejects(
+      () => client.createCalendarEvent({
+        title: 'Standup',
+        start: '2027-03-05T09:00:00',
+        end: '2027-03-05T10:00:00',
+        calendarId: 'Personal',
+      }),
+      (err: Error) => {
+        assert.equal(err.message, `Failed to create calendar event: server returned 409 "${phrase}"`);
         return true;
       },
     );
