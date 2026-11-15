@@ -12285,6 +12285,100 @@ describe('a stored date value rendered into a refusal (#190)', () => {
   });
 });
 
+// A stored TZID is invitation-authored, and nothing on the way in screens it: VTIMEZONE
+// generation skips a zone it cannot resolve rather than refusing it. So every sentence that
+// prints one renders it through `describeUntrustedAt`, which removes what `echoCallerText`
+// leaves in place: C1 controls such as U+0085, a lone CR, and the bidi overrides (#182).
+describe('a stored TZID printed in a sentence (#182)', () => {
+  const STORED_UID = 'stored-tzid@fixture.invalid';
+  // Each forbidden character spelled as an escape, since most are invisible in source. The
+  // `"` pair is balanced so the TZID parameter still parses.
+  const NEXT_LINE = '\u0085';
+  const RLO = '‮';
+  const LINE_SEPARATOR = ' ';
+  const HOSTILE_TZID = `Fake/Zone${NEXT_LINE}A\rB${RLO}C${LINE_SEPARATOR}D"E"F ${'x'.repeat(120)}`;
+  // What survives the helper: the forbidden characters removed, `"` turned into `'`.
+  const CLEANED_HEAD = "Fake/ZoneABCD'E'F ";
+
+  function updateClient(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function storedEvent(dtstart: string, dtend: string): string {
+    return [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      `UID:${STORED_UID}`, 'DTSTAMP:20260301T000000Z',
+      dtstart, dtend, 'SUMMARY:Stored',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  async function refusalFor(stored: string, fields: { start?: string; end?: string; timeZone?: string }): Promise<string> {
+    const { client, mockDAVClient } = updateClient(stored);
+    try {
+      await client.updateCalendarEvent(STORED_UID, fields);
+    } catch (err) {
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+      return (err as Error).message;
+    }
+    return assert.fail('expected the update to be refused');
+  }
+
+  // `serverQuotes` is how many `"` the server's own sentence carries; any more came from the value.
+  function assertNoneOfTheValuesCharacters(text: string, serverQuotes: number): void {
+    for (const ch of [NEXT_LINE, '\r', RLO, LINE_SEPARATOR]) {
+      assert.ok(!text.includes(ch), `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')} survived: ${JSON.stringify(text)}`);
+    }
+    assert.equal(text.split('"').length - 1, serverQuotes, `a quote from the value survived: ${JSON.stringify(text)}`);
+  }
+
+  it('neutralises and bounds an inherited TZID in the update success sentence', async () => {
+    // No timeZone: the new start inherits the stored zone, which is what the sentence reports.
+    const { client, mockDAVClient } = updateClient(storedEvent(
+      `DTSTART;TZID=${HOSTILE_TZID}:20260320T090000`,
+      `DTEND;TZID=${HOSTILE_TZID}:20260320T100000`,
+    ));
+    const result = await client.updateCalendarEvent(STORED_UID, { start: '2026-03-20T09:30:00' });
+    assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 1);
+    const sentence = describeUpdateCalendarEventResult(result);
+    assertNoneOfTheValuesCharacters(sentence, 0);
+    // WRITTEN_ZONE_ECHO_LIMIT, 100 code points, then a visible marker.
+    assert.equal(sentence, ` (start zone ${CLEANED_HEAD}${'x'.repeat(100 - CLEANED_HEAD.length)}…)`);
+  });
+
+  it('neutralises and bounds a stored TZID in the frame-mismatch refusal', async () => {
+    const message = await refusalFor(
+      storedEvent(`DTSTART;TZID=${HOSTILE_TZID}:20260320T090000`, `DTEND;TZID=${HOSTILE_TZID}:20260320T100000`),
+      { end: '2026-03-20T11:00:00Z' },
+    );
+    assert.match(message, /DTSTART and DTEND must use the same date\/time form/);
+    assertNoneOfTheValuesCharacters(message, 4);
+    assert.ok(
+      message.includes(`is a date-time in time zone ${CLEANED_HEAD}${'x'.repeat(40 - CLEANED_HEAD.length)}… but end`),
+      message,
+    );
+  });
+
+  it('neutralises and bounds a stored TZID in the stranded-zone refusal', async () => {
+    const message = await refusalFor(
+      storedEvent('DTSTART;TZID=Australia/Sydney:20260320T190000', `DTEND;TZID=${HOSTILE_TZID}:20260321T200000`),
+      { start: '2026-03-21T09:00:00', timeZone: 'America/New_York' },
+    );
+    assert.match(message, /would rewrite start into 'America\/New_York'/);
+    assertNoneOfTheValuesCharacters(message, 2);
+    assert.ok(
+      message.includes(`stays in "${CLEANED_HEAD}${'x'.repeat(40 - CLEANED_HEAD.length)}…" untouched`),
+      message,
+    );
+  });
+});
+
 // Every value one of this file's refusals quotes back and that this server did not write goes
 // through the shared echo. What makes that load-bearing here is that none of the guards these
 // particular messages report on is a screen for what a MESSAGE can carry: they test an

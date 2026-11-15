@@ -1754,9 +1754,9 @@ function describeFrame(d: DatePropertyFrame): string {
     case 'zoned':
       // A `default` TZID (#157) was filled in by this server; do not word it as the caller's.
       if (d.tzidSource === 'default') {
-        return `a date-time in the account's configured time zone (${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}), applied because you named none`;
+        return `a date-time in the account's configured time zone (${describeUntrustedAt(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}), applied because you named none`;
       }
-      return `a date-time in time zone ${echoCallerText(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}`;
+      return `a date-time in time zone ${describeUntrustedAt(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}`;
   }
 }
 
@@ -2297,6 +2297,15 @@ export const CALENDAR_UID_ECHO_LIMIT = 320;
  * `Invalid credentials: PROPFIND <url> returned 401 Unauthorized`.
  */
 export const LOGIN_FAILURE_ECHO_LIMIT = 200;
+
+/**
+ * The bound on the zone a calendar write's success sentence names (#182). A stored TZID is
+ * invitation-authored, and Outlook writes Windows display names such as "(UTC+01:00) Belgrade,
+ * Bratislava, Budapest, Ljubljana, Prague" as TZIDs. The success sentence is the only place the
+ * caller learns what was written, so it gets the wider bound; the refusals that name a stored
+ * zone only explain a conflict, so they keep `ZONE_ECHO_LIMIT`.
+ */
+export const WRITTEN_ZONE_ECHO_LIMIT = 100;
 
 /**
  * Is this entry of the calendar-home listing BROKEN — i.e. did the server fail to describe it?
@@ -3132,7 +3141,7 @@ function classifyWrittenLine(formatted: FormattedDateProperty): CalendarZoneWrit
 
 function describeCalendarZoneWrite(info: CalendarZoneWriteInfo): string {
   switch (info.kind) {
-    case 'zoned': return `zone ${info.zone}${etcGmtOffsetNote(info.zone ?? '')}`;
+    case 'zoned': return `zone ${describeUntrustedAt(info.zone, WRITTEN_ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(info.zone ?? '')}`;
     case 'utc': return 'UTC';
     case 'floating': return 'floating (no zone)';
     case 'allday': return 'all-day (no time component)';
@@ -3225,7 +3234,7 @@ function rejectStrandedZoneMismatch(originalVevent: string, updatedSide: 'start'
     // stored tzid is invitation-authored, so it is echoed inside DOUBLE quotes (#190).
     throw new InvalidInputError(
       `timeZone would rewrite ${updatedSide} into '${callerZone}'${etcGmtOffsetNote(callerZone)} while the stored ${strandedLabel} stays ` +
-      `in "${echoCallerText(desc.tzid, ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(desc.tzid)} untouched — silently producing a two-zone event. ` +
+      `in "${describeUntrustedAt(desc.tzid, ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(desc.tzid)} untouched — silently producing a two-zone event. ` +
       `Pass BOTH start and end alongside timeZone (re-send the ${strandedLabel} you are not otherwise ` +
       `moving, unchanged, to keep its wall clock), or omit timeZone.`
     );

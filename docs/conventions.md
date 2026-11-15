@@ -1237,13 +1237,17 @@ agent acts on.
 through `echoCallerText` rather than `describeUntrusted`, because they need a *per-message*
 bound (a calendar URL offered back as a working `calendarId` cannot be cut at 64 code points)
 and the value they quote must be the trimmed one the coercion actually judged. It carries the
-same neutralisation for the same reason: it strips control characters and U+2028/U+2029, and it
+same neutralisation for the same reason: it strips C0 control characters, DEL and U+2028/U+2029, and it
 turns a double quote into a single one, so that a value cannot close the `"…"` span at the
 callers that render one. **A caller that quotes therefore quotes with `"…"` and never `'…'`**,
 since the swap does not reach a single-quoted span and a value carrying `'` walks straight out
-of one (the stored TZID in the stranded-zone refusal is such a value: it arrives inside whatever
+of one (a DTSTART or DTEND read from a stored event is such a value: it arrives inside whatever
 iCalendar an invitation sent this account carried,
-[#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190)). Without the quote swap, an
+[#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190)). It leaves C1 controls such as
+U+0085, and the format characters including the bidi overrides, which is why a stored TZID does
+not go through it: an invitation can put any of them in one, so every sentence that prints a
+TZID renders it through `describeUntrustedAt`
+([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)). Without the quote swap, an
 event id shaped `x" Separately, a collection in the calendar list failed to list: "/dav/…` would
 render a complete, well-formed broken-collection disclosure inside `Calendar event not found`,
 naming a collection that never broke: trimming, scrubbing and bounding all leave a quoted span
@@ -1323,9 +1327,11 @@ filename carrying one is creatable on both platforms, and `open()` on it returns
 without a helper `File not found: <path>` arrives at the consumer as two lines.
 
 **Trace a bare render's value to its origin before adding the message.** The traced boundary is
-recorded on [#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190); success
-sentences were not swept, and the calendar tools' are open on
-[#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182).
+recorded on [#190](https://github.com/JonathanGodley/fastmail-mcp/issues/190). Success
+sentences were not swept there. The calendar tools' have since been traced
+([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)): the one untrusted value
+they print is the zone written, which on an update can be a stored TZID, and it renders through
+`describeUntrustedAt` at `WRITTEN_ZONE_ECHO_LIMIT`.
 
 **One value outside it was traced and was not server text**
 ([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)): the `detail` in
