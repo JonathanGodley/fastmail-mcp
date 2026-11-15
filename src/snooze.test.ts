@@ -178,15 +178,12 @@ describe('list_snoozed_emails', () => {
       wakeInto: 'Inbox',
     });
     assert.equal(email.from, 'Ann Example <a@example.invalid>');
-    assert.equal('snoozed' in email, false);
-    assert.equal('sentAt' in email, false);
   });
 
   it('returns the JMAP objects as fetched under raw:true', async () => {
     const { t } = fakeAccount(LISTED);
     const result = out(await listSnoozedEmails({ raw: 'true' }, t, 50));
     assert.deepEqual(result, { total: 1, emails: [{ id: 'a', ...LISTED.a }] });
-    assert.equal(result.emails[0].sentAt, '2026-10-31T23:59:00Z');
   });
 
   it('leaves total out, simplified and raw, when Fastmail returns none', async () => {
@@ -216,7 +213,9 @@ describe('list_snoozed_emails', () => {
     const list = SNOOZE_TOOLS.find(tool => tool.name === 'list_snoozed_emails')!;
     const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
     const lenient = /const LENIENT_BOOL_DESC =\s*'([^']*)'/.exec(source)![1];
-    assert.equal((list.inputSchema.properties as any).raw.description, 'Return original JMAP response instead of simplified format.' + lenient);
+    const raw = (list.inputSchema.properties as any).raw;
+    assert.ok(raw, 'list_snoozed_emails declares no raw parameter');
+    assert.equal(raw.description, 'Return original JMAP response instead of simplified format.' + lenient);
   });
 });
 

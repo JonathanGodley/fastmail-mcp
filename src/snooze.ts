@@ -157,8 +157,7 @@ export function parseWakeTime(value: unknown, now: Date = new Date(), zone: stri
 
 /**
  * list_snoozed_emails: the Snoozed mailbox, soonest wake first. Each item is the list shape
- * list_emails returns, from the same property set, plus wakeAt and wakeInto; raw:true returns
- * the JMAP objects as fetched, `snoozed` included.
+ * list_emails returns, from the same property set, plus wakeAt and wakeInto.
  */
 export async function listSnoozedEmails(args: any, t: SnoozeTransport, limit: number): Promise<ToolContent> {
   const raw = coerceBool(args?.raw, 'raw') ?? false;
@@ -170,7 +169,7 @@ export async function listSnoozedEmails(args: any, t: SnoozeTransport, limit: nu
   ]);
   const query = result(responses, 0, 'Email/query');
   const list = result(responses, 1, 'Email/get').list ?? [];
-  // calculateTotal is server-discretionary: with no total, say nothing rather than pass off the page size.
+  // calculateTotal is server-discretionary.
   const total = typeof query.total === 'number' ? { total: query.total } : {};
   if (raw) return [{ type: 'text', text: redactedJson({ ...total, emails: list }) }];
   attachMailboxInfo(list, buildMailboxInfoMap([...mb.byId.values()]));
@@ -236,7 +235,7 @@ const EXPERIMENTAL_NOTE =
 export const SNOOZE_TOOLS = [
   {
     name: 'list_snoozed_emails',
-    description: 'List the messages in the Snoozed mailbox, soonest wake time first. Returns { total, emails }; total is omitted when Fastmail does not return it. Each email is the simplified shape list_emails returns (metadata + preview, no bodies; date in local time with a UTC offset), plus wakeAt (UTC, when Fastmail returns it to wakeInto, normally the Inbox, marked unread). Use raw=true for the original JMAP objects, whose `snoozed` property carries the wake time.' + EXPERIMENTAL_NOTE,
+    description: 'List the messages in the Snoozed mailbox, soonest wake time first. Returns { total, emails }; total is omitted when Fastmail does not return it, and then a full page may not be every snoozed message. Each email is the simplified shape list_emails returns (metadata + preview, no bodies; date in local time with a UTC offset; sentAt left out, as on list_emails, and carried by raw=true), plus wakeAt (UTC, when Fastmail returns it to wakeInto, normally the Inbox, marked unread). Use raw=true for the original JMAP objects, whose `snoozed` property carries the wake time.' + EXPERIMENTAL_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
