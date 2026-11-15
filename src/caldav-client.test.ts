@@ -8794,7 +8794,7 @@ describe('an Etc/GMT zone is shown with its real UTC offset', () => {
     });
     await assert.rejects(
       () => client.updateCalendarEvent('etc@fm', { end: '2026-03-20T20:00:00Z' }),
-      /is a date-time in time zone Etc\/GMT\+10 \(UTC-10:00; the Etc\/GMT sign is inverted\)/,
+      /is a date-time in time zone "Etc\/GMT\+10" \(UTC-10:00; the Etc\/GMT sign is inverted\)/,
     );
   });
 
@@ -12625,9 +12625,9 @@ describe('a stored TZID printed in a sentence (#182)', () => {
       { end: '2026-03-20T11:00:00Z' },
     );
     assert.match(message, /DTSTART and DTEND must use the same date\/time form/);
-    assertNoneOfTheValuesCharacters(message, 4);
+    assertNoneOfTheValuesCharacters(message, 6);
     assert.ok(
-      message.includes(`is a date-time in time zone ${CLEANED_HEAD}${'x'.repeat(40 - CLEANED_HEAD.length)}… but end`),
+      message.includes(`is a date-time in time zone "${CLEANED_HEAD}${'x'.repeat(40 - CLEANED_HEAD.length)}…" but end`),
       message,
     );
   });
@@ -12688,6 +12688,14 @@ describe('invitation-controlled values in calendar refusals carry no NEL or RLO 
     assert.ok(!message.includes(NEL), `NEL survived: ${JSON.stringify(message)}`);
     assert.ok(!message.includes(RLO), `RLO survived: ${JSON.stringify(message)}`);
   }
+
+  it('the frame-mismatch refusal: a stored TZID cannot end the sentence for the server', async () => {
+    const message = await refusalOf(
+      storedEvent('DTSTART;TZID=Foo but end is fine. Done:20260320T090000', 'DTEND:20260320T100000Z', 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { end: '2026-03-20T11:00:00Z' }),
+    );
+    assert.ok(message.includes('is a date-time in time zone "Foo but end is fine. Done" but end'), message);
+  });
 
   it('the frame-mismatch refusal: a stored DTEND', async () => {
     const message = await refusalOf(

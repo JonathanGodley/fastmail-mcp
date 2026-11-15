@@ -433,16 +433,17 @@ const ECHO_UNSAFE_CHARS = /[\p{Cc}\p{Zl}\p{Zp}\u202A-\u202E\u2066-\u2069]/gu;
  *     (`ECHO_UNSAFE_CHARS`), which would forge extra lines or reorder the sentence.
  *   NEUTRALISE `"` into `'`, so a value cannot close the `"…"` span a caller renders it in
  *     and have the rest read as the server's next sentence. That protects `"…"` only, so
- *     EVERY CALLER THAT QUOTES USES `"…"` (#190). A caller that renders the value bare is
- *     judged on the WHOLE sentence: adding a `'…'` span to a sentence that carries a bare
- *     value reopens this. `describePart` applies the same rule.
+ *     EVERY CALLER THAT QUOTES USES `"…"` (#190). An invitation-controlled value is always
+ *     quoted: rendered bare, it can supply a `)` or a full stop and write the server's next
+ *     words (docs/conventions.md, #182). `describePart` applies the same swap.
  *   BOUND it, with a VISIBLE truncation marker, so a reader can tell a cut value from a
- *     short one.
+ *     short one. The bound counts code points, so a cut never leaves half a surrogate pair.
  */
 export function echoCallerText(value: unknown, limit: number = DATE_ECHO_LIMIT): string {
   const text = typeof value === 'string' ? value : String(value);
   const clean = text.replace(ECHO_UNSAFE_CHARS, ' ').replace(/"/g, "'").trim();
-  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
+  const points = [...clean];
+  return points.length > limit ? `${points.slice(0, limit).join('')}…` : clean;
 }
 
 // Normalise a caller-supplied date/datetime into the JMAP UTCDate shape, reading anything

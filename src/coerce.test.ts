@@ -2630,6 +2630,13 @@ describe('echoCallerText neutralises C1 controls and bidi overrides, and keeps o
   });
 });
 
+describe('echoCallerText cuts at a whole code point', () => {
+  it('keeps an emoji straddling the bound whole rather than leaving half a surrogate pair', () => {
+    const emoji = String.fromCodePoint(0x1f600);
+    assert.equal(echoCallerText(`${'x'.repeat(59)}${emoji}y`), `${'x'.repeat(59)}${emoji}…`);
+  });
+});
+
 describe('coerceStringArrayStrict unwraps a padded JSON array', () => {
   it('type-checks the elements of a JSON-string array that carries surrounding whitespace', () => {
     rejectsAsInvalidInput(() => coerceStringArrayStrict('  [null]  ', 'ids'), /ids\[0\] must be a string; received null/);

@@ -1825,7 +1825,7 @@ function describeFrame(d: DatePropertyFrame): string {
       if (d.tzidSource === 'default') {
         return `a date-time in the account's configured time zone (${describeUntrustedAt(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}), applied because you named none`;
       }
-      return `a date-time in time zone ${describeUntrustedAt(d.tzid!, ZONE_ECHO_LIMIT)}${etcGmtOffsetNote(d.tzid!)}`;
+      return `a date-time in time zone "${describeUntrustedAt(d.tzid!, ZONE_ECHO_LIMIT)}"${etcGmtOffsetNote(d.tzid!)}`;
   }
 }
 
@@ -1838,8 +1838,7 @@ function describeFrame(d: DatePropertyFrame): string {
  *
  * Every DTSTART/DTEND value these refusals render goes through `echoCallerText` inside DOUBLE
  * quotes (#190): a side the caller left alone is read verbatim from the stored VEVENT, so an
- * invitation wrote it. `describeFrame`'s TZID is echoed BARE, which is inert only because these
- * sentences single-quote nothing; adding a `'...'` span to any of them reopens it.
+ * invitation wrote it. `describeFrame`'s TZID is quoted the same way.
  * `suggestion` needs no echo: `nextDay` constrains it to `^\d{4}-\d{2}-\d{2}$`.
  */
 function validateDateConsistency(start: DatePropertyFrame, end: DatePropertyFrame): void {
@@ -3576,8 +3575,8 @@ export class CalDAVCalendarClient {
           // Invitation-authored values, echoed (#141). The guarantee is no extra LINES, not no
           // attacker prose inside the quotes.
           throw new InvalidInputError(
-            `Refused: repeating event "${echoCallerText(title)}" (id ${echoCallerText(id)}, ` +
-            `calendar ${echoCallerText(calendar)}) expands to ${blocks.length} occurrences in the ` +
+            `Refused: repeating event "${echoCallerText(title)}" (id "${echoCallerText(id)}", ` +
+            `calendar "${echoCallerText(calendar)}") expands to ${blocks.length} occurrences in the ` +
             `range searched for this window, more than the ${CALENDAR_MAX_OCCURRENCES_PER_SERIES} ` +
             'this server will materialise for one series. This is a deliberate limit; narrow the ' +
             'window to list around it. If you have a genuine use for a series this dense, open an ' +
