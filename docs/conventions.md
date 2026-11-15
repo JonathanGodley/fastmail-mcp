@@ -1465,7 +1465,10 @@ instruction the caller cannot act on is worse than none. Paging is carried by th
 rather than by a flag at every call site because a forgotten flag would silently drop a
 promised signal, while a wrong function name is visible in the handler. A paged listing also needs an order the
 server keeps from call to call, or an offset points somewhere different on each page: the
-contacts queries send an explicit sort ending in `uid` for that reason (#94).
+contacts queries send an explicit sort ending in `uid` for that reason (#94), and an email
+`sortBy` other than `date` is followed by `receivedAt` descending whatever `ascending`
+says, so ties read newest first (#223). The order lives in the request, not on the server,
+so a caller paging a sorted listing must repeat `sortBy` and `ascending`.
 
 **The CalDAV calendar listing joins the same discipline, over a different protocol.**
 `list_calendar_events` does not go through JMAP at all, so nothing hands it a server-computed

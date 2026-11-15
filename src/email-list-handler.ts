@@ -1,7 +1,8 @@
-import { coerceBool, coercePosition, coerceStringArrayStrict } from './coerce.js';
+import { InvalidInputError, coerceBool, coercePosition, coerceStringArrayStrict, echoCallerText } from './coerce.js';
 import { parseEmailFields } from './field-projection.js';
 import { buildExclusionNote, formatEmailQueryResult, formatRawQueryResult } from './response-formatters.js';
-import type { JmapClient } from './jmap-client.js';
+import { EMAIL_SORT_VALUES } from './jmap-client.js';
+import type { EmailSortBy, JmapClient } from './jmap-client.js';
 import type { ToolContent } from './contacts-handler.js';
 
 /**
@@ -20,10 +21,29 @@ export interface EmailListClient {
 // exclusion note rides after the JSON on both raw and simplified, so the JSON block stays
 // parseable.
 
+// The trim and case-fold are a backstop for a client that skips the schema's enum, and are not
+// advertised. Absent and null mean the default order; a blank value is refused, not defaulted.
+export function normalizeSortBy(value: unknown): EmailSortBy | undefined {
+  if (value === undefined || value === null) return undefined;
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : undefined;
+  const match = EMAIL_SORT_VALUES.find(v => v.toLowerCase() === text);
+  if (!match) {
+    const received = typeof value === 'string' ? `got: "${echoCallerText(value)}"`
+      : Array.isArray(value) ? 'received an array'
+      : `received ${/^[aeiou]/.test(typeof value) ? 'an' : 'a'} ${typeof value}`;
+    throw new InvalidInputError(
+      `sortBy must be one of ${EMAIL_SORT_VALUES.map(v => `"${v}"`).join(', ')} (${received}). ` +
+      'Omit it for the default order, newest first.',
+    );
+  }
+  return match;
+}
+
 export async function listEmailsTool(args: any, limit: number, client: EmailListClient): Promise<ToolContent> {
   const a = args ?? {};
   const { mailbox } = a;
   const ascending = coerceBool(a.ascending, 'ascending') ?? false;
+  const sortBy = normalizeSortBy(a.sortBy);
   const raw = coerceBool(a.raw, 'raw') ?? false;
   const fields = parseEmailFields(a.fields, { raw });
   const position = coercePosition(a.position, { ascendingHint: true });
@@ -32,6 +52,7 @@ export async function listEmailsTool(args: any, limit: number, client: EmailList
     limit,
     position,
     ascending,
+    sortBy,
     includeTrash: coerceBool(a.includeTrash, 'includeTrash') ?? false,
     includeSpam: coerceBool(a.includeSpam, 'includeSpam') ?? false,
     excludeDrafts: coerceBool(a.excludeDrafts, 'excludeDrafts') ?? false,
@@ -44,6 +65,7 @@ export async function searchEmailsTool(args: any, limit: number, client: EmailLi
   const a = args ?? {};
   const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before } = a;
   const ascending = coerceBool(a.ascending, 'ascending') ?? false;
+  const sortBy = normalizeSortBy(a.sortBy);
   const raw = coerceBool(a.raw, 'raw') ?? false;
   const fields = parseEmailFields(a.fields, { raw });
   const position = coercePosition(a.position, { ascendingHint: true });
@@ -55,9 +77,12 @@ export async function searchEmailsTool(args: any, limit: number, client: EmailLi
     hasAttachment: coerceBool(hasAttachment, 'hasAttachment'),
     isUnread: coerceBool(isUnread, 'isUnread'),
     isPinned: coerceBool(isPinned, 'isPinned'),
+    isAnswered: coerceBool(a.isAnswered, 'isAnswered'),
+    isForwarded: coerceBool(a.isForwarded, 'isForwarded'),
     mailbox, requiredMailboxes, excludeMailboxes,
     after, before, limit, position,
     ascending,
+    sortBy,
     excludeDrafts: coerceBool(a.excludeDrafts, 'excludeDrafts') ?? false,
     includeTrash: coerceBool(a.includeTrash, 'includeTrash') ?? false,
     includeSpam: coerceBool(a.includeSpam, 'includeSpam') ?? false,

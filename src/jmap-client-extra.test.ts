@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, filterTopLevelMailboxes, computeExclusion, readSourceReferences, fillUrlTemplate, decideArchiveBranch } from './jmap-client.js';
+import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, EMAIL_SORT_VALUES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, filterTopLevelMailboxes, computeExclusion, readSourceReferences, fillUrlTemplate, decideArchiveBranch } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError } from './coerce.js';
@@ -2440,6 +2440,95 @@ describe('ascending sort parameter', () => {
     });
   });
 
+  describe('getEmails sortBy (#223)', () => {
+    const visibleQuery = async (opts: Record<string, unknown>) => {
+      stubMailboxes(client);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
+      await client.getEmails({ mailbox: 'mb-inbox', limit: 5, ...opts });
+      return callArguments(makeReq)[0].methodCalls[0][1];
+    };
+
+    for (const sortBy of [undefined, 'date'] as const) {
+      it(`sortBy ${sortBy ?? 'omitted'} sends exactly today's visible query`, async () => {
+        const q = await visibleQuery({ sortBy });
+        assert.deepEqual(q, {
+          accountId: ACCOUNT_ID,
+          filter: { inMailbox: 'mb-inbox' },
+          sort: [{ property: 'receivedAt', isAscending: false }],
+          limit: 5,
+          calculateTotal: true,
+        });
+      });
+    }
+
+    for (const sortBy of ['sentAt', 'size', 'from', 'to', 'subject'] as const) {
+      for (const ascending of [false, true]) {
+        it(`sortBy ${sortBy}, ascending ${ascending} => [${sortBy}, receivedAt desc]`, async () => {
+          const q = await visibleQuery({ sortBy, ascending });
+          assert.deepEqual(q.sort, [
+            { property: sortBy, isAscending: ascending },
+            { property: 'receivedAt', isAscending: false },
+          ]);
+        });
+      }
+    }
+  });
+
+  describe('searchEmails sortBy (#223)', () => {
+    const visibleQuery = async (opts: Record<string, unknown>) => {
+      stubMailboxes(client);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
+      await client.searchEmails({ query: 'test', limit: 10, ...opts });
+      return callArguments(makeReq)[0].methodCalls;
+    };
+
+    for (const sortBy of [undefined, 'date'] as const) {
+      it(`sortBy ${sortBy ?? 'omitted'} sends exactly today's visible query`, async () => {
+        const q = (await visibleQuery({ sortBy }))[0][1];
+        assert.deepEqual({ ...q, filter: 'F' }, {
+          accountId: ACCOUNT_ID,
+          filter: 'F',
+          sort: [{ property: 'receivedAt', isAscending: false }],
+          limit: 10,
+          calculateTotal: true,
+        });
+      });
+    }
+
+    for (const sortBy of ['sentAt', 'size', 'from', 'to', 'subject'] as const) {
+      for (const ascending of [false, true]) {
+        it(`sortBy ${sortBy}, ascending ${ascending} => [${sortBy}, receivedAt desc]`, async () => {
+          const q = (await visibleQuery({ sortBy, ascending }))[0][1];
+          assert.deepEqual(q.sort, [
+            { property: sortBy, isAscending: ascending },
+            { property: 'receivedAt', isAscending: false },
+          ]);
+        });
+      }
+    }
+
+    it('the hidden-count query stays unsorted', async () => {
+      stubMailboxes(client);
+      const makeReq = stubRequests(client, async () => ({
+        methodResponses: [
+          ['Email/query', { ids: [], total: 0 }, 'query'],
+          ['Email/get', { list: [] }, 'emails'],
+          ['Email/query', { ids: [], total: 0 }, 'count'],
+        ],
+      }));
+      await client.searchEmails({ query: 'test', sortBy: 'size' });
+      const batch = callArguments(makeReq)[0].methodCalls;
+      assert.equal(batch.length, 3);
+      assert.equal(batch[2][1].sort, undefined);
+    });
+
+    // The set is what scripts/probes/sort-properties.probe.mjs verified Fastmail accepts
+    // and orders; a value outside it has not been measured.
+    it('offers exactly the six probe-verified sort values', () => {
+      assert.deepEqual([...EMAIL_SORT_VALUES], ['date', 'sentAt', 'size', 'from', 'to', 'subject']);
+    });
+  });
+
 });
 
 // ---------- #10 mailbox-name resolution ----------
@@ -2804,6 +2893,58 @@ describe('searchEmails exclusion + count', () => {
     assert.equal(filter.operator, 'AND');
     assert.ok(filter.conditions.some((c: any) => c.notKeyword === '$seen'));
     assert.ok(filter.conditions.some((c: any) => c.hasKeyword === '$flagged'));
+  });
+
+  for (const [flag, keyword] of [['isAnswered', '$answered'], ['isForwarded', '$forwarded']] as const) {
+    const onKeyword = async (value: boolean | undefined) => {
+      const makeReq = stubRequests(client, async () =>
+        queryResponse({ ids: [], list: [], total: 0 }));
+      await client.searchEmails({ query: 'x', [flag]: value, includeTrash: true, includeSpam: true });
+      const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+      const conds: any[] = filter.operator === 'AND' ? filter.conditions : [filter];
+      return conds.filter((c) => c.hasKeyword === keyword || c.notKeyword === keyword);
+    };
+
+    it(`${flag}:true => one hasKeyword ${keyword}`, async () => {
+      assert.deepEqual(await onKeyword(true), [{ hasKeyword: keyword }]);
+    });
+
+    it(`${flag}:false => one notKeyword ${keyword}`, async () => {
+      assert.deepEqual(await onKeyword(false), [{ notKeyword: keyword }]);
+    });
+
+    it(`${flag} omitted => no condition on ${keyword}`, async () => {
+      assert.deepEqual(await onKeyword(undefined), []);
+    });
+  }
+
+  it('the four keyword flags are four separate conditions in one AND', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }));
+    await client.searchEmails({
+      isUnread: true, isPinned: false, isAnswered: false, isForwarded: true,
+      includeTrash: true, includeSpam: true,
+    });
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+    assert.equal(filter.operator, 'AND');
+    assert.deepEqual(
+      filter.conditions.filter((c: any) => 'hasKeyword' in c || 'notKeyword' in c),
+      [{ notKeyword: '$seen' }, { notKeyword: '$flagged' }, { notKeyword: '$answered' }, { hasKeyword: '$forwarded' }],
+    );
+  });
+
+  // With the default exclusion active a count query runs, and it must narrow by the same
+  // flags, or the withheld count would describe a wider set than the results.
+  it('the hidden-count query carries isAnswered and isForwarded too', async () => {
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }));
+    await client.searchEmails({ isAnswered: true, isForwarded: false });
+    const batch = callArguments(makeReq)[0].methodCalls;
+    assert.equal(batch.length, 3);
+    const countFilter = batch[2][1].filter;
+    const countConds: any[] = countFilter.operator === 'AND' ? countFilter.conditions : [countFilter];
+    assert.ok(countConds.some((c) => c.hasKeyword === '$answered'), 'count query lacks isAnswered');
+    assert.ok(countConds.some((c) => c.notKeyword === '$forwarded'), 'count query lacks isForwarded');
   });
 
   it('hidden = broaderTotal - visibleTotal', async () => {

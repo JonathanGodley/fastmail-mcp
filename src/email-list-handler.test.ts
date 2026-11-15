@@ -63,6 +63,7 @@ describe('listEmailsTool', () => {
       limit: 20,
       position: undefined,
       ascending: false,
+      sortBy: undefined,
       includeTrash: false,
       includeSpam: false,
       excludeDrafts: false,
@@ -79,6 +80,7 @@ describe('listEmailsTool', () => {
       limit: 37,
       position: undefined,
       ascending: false,
+      sortBy: undefined,
       includeTrash: false,
       includeSpam: false,
       excludeDrafts: false,
@@ -95,6 +97,7 @@ describe('listEmailsTool', () => {
       limit: 20,
       position: 8,
       ascending: true,
+      sortBy: undefined,
       includeTrash: true,
       includeSpam: true,
       excludeDrafts: true,
@@ -111,9 +114,40 @@ describe('listEmailsTool', () => {
     assert.equal(opts.excludeDrafts, false);
   });
 
+  it('reads sortBy as absent when null, and matches it trimmed and case-insensitively', async () => {
+    const stub = stubClient();
+    await listEmailsTool({ sortBy: null }, 20, stub.client);
+    await listEmailsTool({ sortBy: ' SIZE ' }, 20, stub.client);
+    await listEmailsTool({ sortBy: 'From' }, 20, stub.client);
+    assert.deepEqual(stub.getEmails.mock.calls.map((c) => c.arguments[0]!.sortBy), [undefined, 'size', 'from']);
+  });
+
+  it('refuses an unsupported sortBy before the query, naming it and listing the values', async () => {
+    for (const value of ['bogus', '', 'receivedAt']) {
+      const stub = stubClient();
+      await assert.rejects(
+        () => listEmailsTool({ sortBy: value }, 20, stub.client),
+        (err: Error) => err.name === 'InvalidInputError'
+          && err.message.startsWith('sortBy must be one of "date", "sentAt", "size", "from", "to", "subject"'),
+        value,
+      );
+      assert.equal(calls(stub), 0, value);
+    }
+  });
+
+  // An echo of ["size"] would read `got: "size"`, a value the same message lists as valid.
+  for (const [value, type] of [[['size'], 'an array'], [{ by: 'size' }, 'an object'], [7, 'a number'], [true, 'a boolean']] as const) {
+    it(`names the type of a non-string sortBy instead of echoing it: ${type}`, async () => {
+      await assert.rejects(
+        () => listEmailsTool({ sortBy: value }, 20, stubClient().client),
+        (err: Error) => err.name === 'InvalidInputError' && err.message.includes(`(received ${type})`) && !err.message.includes('got:'),
+      );
+    });
+  }
+
   it('checks its arguments in a fixed order', async () => {
     await assertCheckOrder(listEmailsTool, [
-      ['ascending', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
+      ['ascending', 'x'], ['sortBy', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
       ['includeTrash', 'x'], ['includeSpam', 'x'], ['excludeDrafts', 'x'],
     ]);
   });
@@ -133,6 +167,8 @@ describe('searchEmailsTool', () => {
       hasAttachment: undefined,
       isUnread: undefined,
       isPinned: undefined,
+      isAnswered: undefined,
+      isForwarded: undefined,
       mailbox: undefined,
       requiredMailboxes: undefined,
       excludeMailboxes: undefined,
@@ -141,6 +177,7 @@ describe('searchEmailsTool', () => {
       limit: 20,
       position: undefined,
       ascending: false,
+      sortBy: undefined,
       excludeDrafts: false,
       includeTrash: false,
       includeSpam: false,
@@ -166,6 +203,8 @@ describe('searchEmailsTool', () => {
       hasAttachment: undefined,
       isUnread: undefined,
       isPinned: undefined,
+      isAnswered: undefined,
+      isForwarded: undefined,
       mailbox: 'Inbox',
       requiredMailboxes: undefined,
       excludeMailboxes: undefined,
@@ -174,6 +213,7 @@ describe('searchEmailsTool', () => {
       limit: 37,
       position: undefined,
       ascending: false,
+      sortBy: undefined,
       excludeDrafts: false,
       includeTrash: false,
       includeSpam: false,
@@ -183,7 +223,7 @@ describe('searchEmailsTool', () => {
   it('coerces stringified flags, position and the mailbox arrays', async () => {
     const stub = stubClient();
     await searchEmailsTool({
-      hasAttachment: 'true', isUnread: 'false', isPinned: '1', ascending: 'true',
+      hasAttachment: 'true', isUnread: 'false', isPinned: '1', isAnswered: '0', isForwarded: 'true', ascending: 'true',
       excludeDrafts: 'true', includeTrash: 'true', includeSpam: 'true', position: '6',
       requiredMailboxes: '["Work","Clients"]', excludeMailboxes: 'Archive',
     }, 20, stub.client);
@@ -197,6 +237,8 @@ describe('searchEmailsTool', () => {
       hasAttachment: true,
       isUnread: false,
       isPinned: true,
+      isAnswered: false,
+      isForwarded: true,
       mailbox: undefined,
       requiredMailboxes: ['Work', 'Clients'],
       excludeMailboxes: ['Archive'],
@@ -205,6 +247,7 @@ describe('searchEmailsTool', () => {
       limit: 20,
       position: 6,
       ascending: true,
+      sortBy: undefined,
       excludeDrafts: true,
       includeTrash: true,
       includeSpam: true,
@@ -222,17 +265,52 @@ describe('searchEmailsTool', () => {
     }
   });
 
+  it('reads sortBy as absent when omitted or null, and matches it trimmed and case-insensitively', async () => {
+    const stub = stubClient();
+    await searchEmailsTool({ sortBy: null }, 20, stub.client);
+    await searchEmailsTool({ sortBy: ' SIZE ' }, 20, stub.client);
+    await searchEmailsTool({ sortBy: 'sentat' }, 20, stub.client);
+    assert.deepEqual(stub.searchEmails.mock.calls.map((c) => c.arguments[0]!.sortBy), [undefined, 'size', 'sentAt']);
+  });
+
+  it('refuses an unsupported sortBy before the query, naming it and listing the values', async () => {
+    for (const value of ['bogus', '', 'receivedAt', 7]) {
+      const stub = stubClient();
+      await assert.rejects(
+        () => searchEmailsTool({ sortBy: value }, 20, stub.client),
+        (err: Error) => err.name === 'InvalidInputError'
+          && err.message.startsWith('sortBy must be one of "date", "sentAt", "size", "from", "to", "subject"'),
+        String(value),
+      );
+      assert.equal(calls(stub), 0, String(value));
+    }
+  });
+
   it('checks its arguments in a fixed order', async () => {
     await assertCheckOrder(searchEmailsTool, [
-      ['ascending', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
+      ['ascending', 'x'], ['sortBy', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
       ['requiredMailboxes', [1]], ['excludeMailboxes', [1]], ['hasAttachment', 'x'],
-      ['isUnread', 'x'], ['isPinned', 'x'], ['excludeDrafts', 'x'], ['includeTrash', 'x'],
+      ['isUnread', 'x'], ['isPinned', 'x'], ['isAnswered', 'x'], ['isForwarded', 'x'],
+      ['excludeDrafts', 'x'], ['includeTrash', 'x'],
       ['includeSpam', 'x'],
     ]);
   });
 
+  // The string "false" is the case a bare `!!` read inverts, and the source-text guard
+  // cannot see a `!!a.x` read, so this is where that mistake goes red.
+  it('reads isAnswered and isForwarded through the lenient boolean, "false" included', async () => {
+    const stub = stubClient();
+    await searchEmailsTool({ isAnswered: 'false', isForwarded: '1' }, 20, stub.client);
+    await searchEmailsTool({ isAnswered: 'TRUE', isForwarded: 0 }, 20, stub.client);
+    const [first, second] = stub.searchEmails.mock.calls.map((c) => c.arguments[0]!);
+    assert.equal(first.isAnswered, false);
+    assert.equal(first.isForwarded, true);
+    assert.equal(second.isAnswered, true);
+    assert.equal(second.isForwarded, false);
+  });
+
   it('names its own argument when refusing a filter flag', async () => {
-    for (const flag of ['hasAttachment', 'isUnread', 'isPinned']) {
+    for (const flag of ['hasAttachment', 'isUnread', 'isPinned', 'isAnswered', 'isForwarded']) {
       const stub = stubClient();
       await assert.rejects(
         () => searchEmailsTool({ [flag]: 'maybe' }, 20, stub.client),

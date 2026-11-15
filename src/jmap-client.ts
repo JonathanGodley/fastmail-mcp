@@ -273,6 +273,11 @@ export const EMAIL_PROPERTIES_COMPACT = [
   'textBody', 'sentAt',
 ] as const;
 
+// Only sorts scripts/probes/sort-properties.probe.mjs measured on Fastmail (#223). Named as the
+// simplified fields are, so `date` is JMAP's `receivedAt`.
+export const EMAIL_SORT_VALUES = ['date', 'sentAt', 'size', 'from', 'to', 'subject'] as const;
+export type EmailSortBy = typeof EMAIL_SORT_VALUES[number];
+
 // VERBOSE: superset with body properties, for verbose mode, getEmailById and getThread's
 // includeBodies mode (#74). The two provenance headers are deliberately VERBOSE-tier, not
 // COMPACT: their values matter only when operating on one draft, so an ordinary thread
@@ -1864,6 +1869,7 @@ export class JmapClient {
     limit?: number;
     position?: number;
     ascending?: boolean;
+    sortBy?: EmailSortBy;
     includeTrash?: boolean;
     includeSpam?: boolean;
     excludeDrafts?: boolean;
@@ -1894,6 +1900,7 @@ export class JmapClient {
       exclusionIntended,
       limit: opts.limit ?? 20,
       ascending: opts.ascending ?? false,
+      sortBy: opts.sortBy,
       mailboxes,
       position: opts.position,
     });
@@ -4547,6 +4554,7 @@ export class JmapClient {
     callerExcludeIds?: string[];
     limit: number;
     ascending: boolean;
+    sortBy?: EmailSortBy;
     mailboxes: any[];
     position?: number;
   }): Promise<QueryResult> {
@@ -4581,7 +4589,10 @@ export class JmapClient {
     const visibleQuery: any = {
       accountId: session.accountId,
       filter: visibleFilter,
-      sort: [{ property: 'receivedAt', isAscending: ascending }],
+      // Tie-break fixed newest-first, not following `ascending` (docs/conventions.md, #223).
+      sort: !opts.sortBy || opts.sortBy === 'date'
+        ? [{ property: 'receivedAt', isAscending: ascending }]
+        : [{ property: opts.sortBy, isAscending: ascending }, { property: 'receivedAt', isAscending: false }],
       limit,
       calculateTotal: true,
     };
@@ -4656,6 +4667,8 @@ export class JmapClient {
     hasAttachment?: boolean;
     isUnread?: boolean;
     isPinned?: boolean;
+    isAnswered?: boolean;
+    isForwarded?: boolean;
     mailbox?: string;
     requiredMailboxes?: string[];
     excludeMailboxes?: string[];
@@ -4664,6 +4677,7 @@ export class JmapClient {
     limit?: number;
     position?: number;
     ascending?: boolean;
+    sortBy?: EmailSortBy;
     excludeDrafts?: boolean;
     includeTrash?: boolean;
     includeSpam?: boolean;
@@ -4697,12 +4711,16 @@ export class JmapClient {
     if (before) base.before = before;
     if (resolvedMailboxId) base.inMailbox = resolvedMailboxId;
 
-    // Each keyword is its own condition (mixed polarities can't share one FilterCondition).
+    // Each keyword is its own condition: a FilterCondition holds at most one hasKeyword and one notKeyword.
     const conds: any[] = [];
     if (filters.isUnread === true) conds.push({ notKeyword: '$seen' });
     else if (filters.isUnread === false) conds.push({ hasKeyword: '$seen' });
     if (filters.isPinned === true) conds.push({ hasKeyword: '$flagged' });
     else if (filters.isPinned === false) conds.push({ notKeyword: '$flagged' });
+    if (filters.isAnswered === true) conds.push({ hasKeyword: '$answered' });
+    else if (filters.isAnswered === false) conds.push({ notKeyword: '$answered' });
+    if (filters.isForwarded === true) conds.push({ hasKeyword: '$forwarded' });
+    else if (filters.isForwarded === false) conds.push({ notKeyword: '$forwarded' });
     if (filters.excludeDrafts) conds.push({ notKeyword: '$draft' });
     // inMailbox is SINGULAR (RFC 8621 §4.4.1): N AND-ed conditions, not an array.
     for (const id of requiredMailboxIds) conds.push({ inMailbox: id });
@@ -4726,6 +4744,7 @@ export class JmapClient {
       callerExcludeIds,
       limit: Math.min(filters.limit || 20, 100),
       ascending: filters.ascending ?? false,
+      sortBy: filters.sortBy,
       mailboxes,
       position: filters.position,
     });
