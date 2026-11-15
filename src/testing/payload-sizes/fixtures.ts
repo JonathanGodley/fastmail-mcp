@@ -17,8 +17,8 @@
 // Every value is invented. Addresses, Message-IDs and UIDs use example.com or a reserved
 // suffix only, because the secret scanner flags any other domain.
 //
-// The JMAP responses are keyed by the call id each client puts in its batch, so a change to a
-// client's batch shows up as a fixture with no answer for the new call, not a silent mismatch.
+// The JMAP responses are keyed by the call id each client puts in its batch (see `answer` in
+// measure.ts).
 
 import type { JmapSession } from '../../jmap-client.js';
 
