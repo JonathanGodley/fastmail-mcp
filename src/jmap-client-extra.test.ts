@@ -2440,6 +2440,40 @@ describe('ascending sort parameter', () => {
     });
   });
 
+  describe('getEmails sortBy (#223)', () => {
+    const visibleQuery = async (opts: Record<string, unknown>) => {
+      stubMailboxes(client);
+      const makeReq = stubRequests(client, async () => QUERY_GET_RESPONSE);
+      await client.getEmails({ mailbox: 'mb-inbox', limit: 5, ...opts });
+      return callArguments(makeReq)[0].methodCalls[0][1];
+    };
+
+    for (const sortBy of [undefined, 'date'] as const) {
+      it(`sortBy ${sortBy ?? 'omitted'} sends exactly today's visible query`, async () => {
+        const q = await visibleQuery({ sortBy });
+        assert.deepEqual(q, {
+          accountId: ACCOUNT_ID,
+          filter: { inMailbox: 'mb-inbox' },
+          sort: [{ property: 'receivedAt', isAscending: false }],
+          limit: 5,
+          calculateTotal: true,
+        });
+      });
+    }
+
+    for (const sortBy of ['sentAt', 'size', 'from', 'to', 'subject'] as const) {
+      for (const ascending of [false, true]) {
+        it(`sortBy ${sortBy}, ascending ${ascending} => [${sortBy}, receivedAt desc]`, async () => {
+          const q = await visibleQuery({ sortBy, ascending });
+          assert.deepEqual(q.sort, [
+            { property: sortBy, isAscending: ascending },
+            { property: 'receivedAt', isAscending: false },
+          ]);
+        });
+      }
+    }
+  });
+
   describe('searchEmails sortBy (#223)', () => {
     const visibleQuery = async (opts: Record<string, unknown>) => {
       stubMailboxes(client);

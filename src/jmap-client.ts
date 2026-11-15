@@ -1869,6 +1869,7 @@ export class JmapClient {
     limit?: number;
     position?: number;
     ascending?: boolean;
+    sortBy?: EmailSortBy;
     includeTrash?: boolean;
     includeSpam?: boolean;
     excludeDrafts?: boolean;
@@ -1899,6 +1900,7 @@ export class JmapClient {
       exclusionIntended,
       limit: opts.limit ?? 20,
       ascending: opts.ascending ?? false,
+      sortBy: opts.sortBy,
       mailboxes,
       position: opts.position,
     });

@@ -63,6 +63,7 @@ describe('listEmailsTool', () => {
       limit: 20,
       position: undefined,
       ascending: false,
+      sortBy: undefined,
       includeTrash: false,
       includeSpam: false,
       excludeDrafts: false,
@@ -79,6 +80,7 @@ describe('listEmailsTool', () => {
       limit: 37,
       position: undefined,
       ascending: false,
+      sortBy: undefined,
       includeTrash: false,
       includeSpam: false,
       excludeDrafts: false,
@@ -95,6 +97,7 @@ describe('listEmailsTool', () => {
       limit: 20,
       position: 8,
       ascending: true,
+      sortBy: undefined,
       includeTrash: true,
       includeSpam: true,
       excludeDrafts: true,
@@ -111,9 +114,30 @@ describe('listEmailsTool', () => {
     assert.equal(opts.excludeDrafts, false);
   });
 
+  it('reads sortBy as absent when null, and matches it trimmed and case-insensitively', async () => {
+    const stub = stubClient();
+    await listEmailsTool({ sortBy: null }, 20, stub.client);
+    await listEmailsTool({ sortBy: ' SIZE ' }, 20, stub.client);
+    await listEmailsTool({ sortBy: 'From' }, 20, stub.client);
+    assert.deepEqual(stub.getEmails.mock.calls.map((c) => c.arguments[0]!.sortBy), [undefined, 'size', 'from']);
+  });
+
+  it('refuses an unsupported sortBy before the query, naming it and listing the values', async () => {
+    for (const value of ['bogus', '', 'receivedAt']) {
+      const stub = stubClient();
+      await assert.rejects(
+        () => listEmailsTool({ sortBy: value }, 20, stub.client),
+        (err: Error) => err.name === 'InvalidInputError'
+          && err.message.startsWith('sortBy must be one of "date", "sentAt", "size", "from", "to", "subject"'),
+        value,
+      );
+      assert.equal(calls(stub), 0, value);
+    }
+  });
+
   it('checks its arguments in a fixed order', async () => {
     await assertCheckOrder(listEmailsTool, [
-      ['ascending', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
+      ['ascending', 'x'], ['sortBy', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
       ['includeTrash', 'x'], ['includeSpam', 'x'], ['excludeDrafts', 'x'],
     ]);
   });

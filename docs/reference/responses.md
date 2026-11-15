@@ -150,7 +150,7 @@ The rules:
 - **Take `nextPosition` from the response** instead of adding up `limit`s yourself. Both usually agree; the response value is the one that accounts for what the server actually did.
 - **Filters apply to every page, server-side**, so paging never changes what matches. On the email tools that includes the default Trash/Spam exclusion, and the withheld-count note describes the **whole match set**, not the page: the same count repeats on every page, so don't sum the notes as you page.
 - **`position: 0` is the same as omitting it.** A negative value is **rejected** (JMAP would read it as counting back from the end; on the email tools, read from the other end with `ascending: true`), as is a fraction or non-numeric text. A stringified `"40"` is accepted, like every other numeric parameter.
-- **Pass the same filters and ordering on every page.** The server keeps no state between calls, so a `nextPosition` from a `search_emails` page sorted by `size` points somewhere else under the default order: repeat `sortBy` and `ascending` with each `position`.
+- **Pass the same filters and ordering on every page.** The server keeps no state between calls, so a `nextPosition` from an email page sorted by `size` points somewhere else under the default order: repeat `sortBy` and `ascending` with each `position`.
 - **A position past the end is not an error.** It returns an empty page next to the real total, so you can see you overshot; on the email and calendar tools the summary also names the position (`Showing 0 of 137 results from position 500.`).
 - **The summary is identical on the `raw` path**, which already carried one; `raw` callers can also read JMAP's own `total`/`position` by querying directly.
 

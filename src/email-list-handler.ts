@@ -40,6 +40,7 @@ export async function listEmailsTool(args: any, limit: number, client: EmailList
   const a = args ?? {};
   const { mailbox } = a;
   const ascending = coerceBool(a.ascending, 'ascending') ?? false;
+  const sortBy = normalizeSortBy(a.sortBy);
   const raw = coerceBool(a.raw, 'raw') ?? false;
   const fields = parseEmailFields(a.fields, { raw });
   const position = coercePosition(a.position, { ascendingHint: true });
@@ -48,6 +49,7 @@ export async function listEmailsTool(args: any, limit: number, client: EmailList
     limit,
     position,
     ascending,
+    sortBy,
     includeTrash: coerceBool(a.includeTrash, 'includeTrash') ?? false,
     includeSpam: coerceBool(a.includeSpam, 'includeSpam') ?? false,
     excludeDrafts: coerceBool(a.excludeDrafts, 'excludeDrafts') ?? false,

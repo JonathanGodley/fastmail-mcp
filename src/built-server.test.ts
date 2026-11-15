@@ -324,10 +324,12 @@ describe('edit_draft advertises the clearFields enum on its array elements', () 
   });
 
   // #223. The schema spreads EMAIL_SORT_VALUES, which no source-text guard can read.
-  it('advertises the sortBy enum on search_emails as the shared value set', async () => {
-    const schema = await toolSchema('search_emails');
-    assert.deepEqual(schema.properties.sortBy?.enum, [...EMAIL_SORT_VALUES]);
-  });
+  for (const tool of ['search_emails', 'list_emails']) {
+    it(`advertises the sortBy enum on ${tool} as the shared value set`, async () => {
+      const schema = await toolSchema(tool);
+      assert.deepEqual(schema.properties.sortBy?.enum, [...EMAIL_SORT_VALUES]);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
