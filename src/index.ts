@@ -12,15 +12,12 @@ import { FastmailAuth, FastmailConfig } from './auth.js';
 import { JmapClient, QueryResult } from './jmap-client.js';
 import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CALENDAR_URL_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
-import { simplifyEmail, setDefaultTimezone } from './email-formatter.js';
+import { setDefaultTimezone } from './email-formatter.js';
 import { buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
-import { parseEmailFields, projectEmail, wantsHtmlBody } from './field-projection.js';
-import { attachDraftBodyHash } from './body-hash.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrusted, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { composeDraftEmail } from './draft-email-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
 import { editDraft } from './edit-draft-handler.js';
-import { assertStripQuotedNotRaw } from './quote-strip.js';
 import { assertICalTextLimits, MAX_ICAL_FIELD_BYTES, MAX_ICAL_PARTICIPANTS, MAX_ICAL_TOTAL_BYTES } from './ical-limits.js';
 import { readThread } from './thread-handler.js';
 import { runBulkReadTest } from './bulk-test-handler.js';
@@ -28,6 +25,7 @@ import { listMailboxes, createMailbox } from './mailbox-handler.js';
 import { createContactTool, getContactTool, updateContactTool, deleteContactTool, listContactsTool, searchContactsTool } from './contacts-handler.js';
 import { listCalendarEventsTool } from './calendar-list-handler.js';
 import { listEmailsTool, searchEmailsTool } from './email-list-handler.js';
+import { getEmailTool } from './email-get-handler.js';
 import { SNOOZE_TOOLS, WebSessionTransport, listSnoozedEmails, snoozeEmail, unsnoozeEmail } from './snooze.js';
 import createDebug from 'debug';
 
@@ -524,7 +522,7 @@ const STATS_MAILBOX_PARAM_DESC =
   'Mailbox to report on (optional, defaults to all mailboxes; a blank value is rejected, so omit it for all). ' + MAILBOX_REF_FORMS;
 
 const LIST_PARENT_PARAM_DESC =
-  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox; a blank value is rejected rather than read as every mailbox. ' + MAILBOX_REF_FORMS;
+  'Restrict the listing to the DIRECT children of this mailbox (grandchildren are not included). Omit to list every mailbox; a blank value is rejected rather than read as every mailbox. Cannot be combined with topLevelOnly. ' + MAILBOX_REF_FORMS;
 
 const CREATE_PARENT_PARAM_DESC =
   'Parent mailbox to nest the new mailbox under. Omit to create it at the top level. ' + MAILBOX_REF_FORMS;
@@ -761,13 +759,17 @@ const TOOLS = [
         // No `properties` projection parameter, deliberately (upstream has one): a narrowed
         // set that dropped id/name/role/parentId would silently break the path column and
         // every path-form lookup. A large-account trim would be a feature to design.
-        description: 'List the mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, path, role, counts). Each mailbox carries `path`, its root-anchored "/"-separated location (e.g. Archive/2026/Receipts), which can be passed straight back to any mailbox parameter. Use parent to list one folder\'s direct children. Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response (no path — raw is untransformed JMAP).',
+        description: 'List the mailboxes in the Fastmail account. Returns simplified format by default with core fields (name, path, role, counts). Each mailbox carries `path`, its root-anchored "/"-separated location (e.g. Archive/2026/Receipts), which can be passed straight back to any mailbox parameter. Use parent to list one folder\'s direct children, or topLevelOnly=true to list only the mailboxes at the top level. Use verbose=true only if you need extra fields like sortOrder or myRights. Use raw=true for original JMAP response (no path — raw is untransformed JMAP).',
         inputSchema: {
           type: 'object',
           properties: {
             parent: {
               type: 'string',
               description: LIST_PARENT_PARAM_DESC,
+            },
+            topLevelOnly: {
+              type: ['boolean', 'string'],
+              description: lenientBool('List only the mailboxes that have no parent (the Inbox\'s children are not included; parent: "inbox" lists them). Cannot be combined with parent.'),
             },
             verbose: {
               type: ['boolean', 'string'],
@@ -2044,39 +2046,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'list_emails':
         return { content: await listEmailsTool(args, clampLimit((args as any).limit, 20, 100), client) };
 
-      case 'get_email': {
-        const { emailId, stripQuoted } = args as any;
-        if (!emailId) {
-          throw new McpError(ErrorCode.InvalidParams, 'emailId is required');
-        }
-        // Same coercion as listEmailsTool. Here `!!` on raw:"false" would also make
-        // assertStripQuotedNotRaw reject a legitimate stripQuoted read.
-        const raw = coerceBool((args as any).raw, 'raw') ?? false;
-        const verbose = coerceBool((args as any).verbose, 'verbose') ?? false;
-        // Validated before the fetch so a typo'd field name costs no round trip.
-        // Selecting bodyHtml implies verbose's includeHtml: without that, projecting a
-        // field the simplifier never emitted would return {} — the trap the parameter
-        // exists to avoid (#69).
-        const fields = parseEmailFields((args as any).fields, { raw });
-        // Rejected before the fetch: raw is unmodified JMAP, so honouring stripQuoted
-        // there would be impossible and ignoring it would be silent (#73).
-        const strip = coerceBool(stripQuoted, 'stripQuoted') ?? false;
-        assertStripQuotedNotRaw(strip, raw);
-        const email = await client.getEmailById(emailId);
-        const simplified = simplifyEmail(email, { includeHtml: verbose || wantsHtmlBody(fields), stripQuoted: strip });
-        // The draft body hash, attached HERE rather than inside simplifyEmail: whether one
-        // can be issued honestly depends on what THIS READ returns, not on the message.
-        // The rules are in attachDraftBodyHash; this is the only tool that calls it.
-        attachDraftBodyHash(email, simplified, { raw, fields, stripQuoted: strip });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: raw ? toolJson(email) : toolJson(projectEmail(simplified, fields)),
-            },
-          ],
-        };
-      }
+      case 'get_email':
+        return { content: await getEmailTool(args, client) };
 
       case 'draft_email': {
         const result = await composeDraftEmail(args, client, getAttachDir(), getAllowBlobAttach());
@@ -2727,7 +2698,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       default:
-        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: "${describeUntrusted(name)}"`);
     }
   } catch (error) {
     // EVERY branch below runs its message through redactBearerTokens, with no exemption:

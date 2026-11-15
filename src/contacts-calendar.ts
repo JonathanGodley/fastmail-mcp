@@ -1,5 +1,6 @@
 import { JmapClient, JmapRequest, QueryResult } from './jmap-client.js';
 import {
+  describeUntrusted,
   InvalidInputError,
   validateClearFields,
   type ContactAddressSpec,
@@ -166,7 +167,7 @@ export class ContactsCalendarClient extends JmapClient {
     // would serialize as a successful empty tool response. InvalidInputError because a wrong
     // id is the caller's to fix (InvalidParams, not InternalError).
     if (!contact) {
-      throw new InvalidInputError(`Contact not found: ${id}`);
+      throw new InvalidInputError(`Contact not found: "${describeUntrusted(id)}"`);
     }
     return contact;
   }
@@ -336,7 +337,7 @@ export class ContactsCalendarClient extends JmapClient {
   private requireReadState(state: string | undefined, id: string, outcome: string): string {
     if (state === undefined) {
       throw new Error(
-        `The server returned no ContactCard state with contact ${id}, so the write could not be guarded ` +
+        `The server returned no ContactCard state with contact "${describeUntrusted(id)}", so the write could not be guarded ` +
           `against a change made since the read; nothing was ${outcome}.`,
       );
     }
@@ -348,7 +349,7 @@ export class ContactsCalendarClient extends JmapClient {
     const entry = response.methodResponses?.[index];
     if (entry?.[0] === 'error' && entry[1]?.type === 'stateMismatch') {
       throw new Error(
-        `The contact ${id} changed since it was read; nothing was ${outcome}. Retry the ${tool} call: ` +
+        `The contact "${describeUntrusted(id)}" changed since it was read; nothing was ${outcome}. Retry the ${tool} call: ` +
           `it re-reads the contact first. The contacts state is account-wide on Fastmail, so a change ` +
           `to any contact in between also causes this refusal.`,
       );
@@ -454,7 +455,7 @@ export class ContactsCalendarClient extends JmapClient {
 
     const { card: previousCard, state: readState } = await this.fetchCard(accountId, id);
     if (!previousCard) {
-      throw new InvalidInputError(`Contact not found: ${id}`);
+      throw new InvalidInputError(`Contact not found: "${describeUntrusted(id)}"`);
     }
 
     const refusedKind = refusedContactKind(previousCard);
@@ -519,7 +520,7 @@ export class ContactsCalendarClient extends JmapClient {
     // whether the KEY is present, never whether the value is truthy.
     if (!result.updated || !Object.prototype.hasOwnProperty.call(result.updated, id)) {
       throw new Error(
-        `The server neither confirmed nor refused the update of contact ${id}: it reported the id in ` +
+        `The server neither confirmed nor refused the update of contact "${describeUntrusted(id)}": it reported the id in ` +
           `neither its updated nor its notUpdated map. Re-read the contact with get_contact to see ` +
           `whether the change was applied.`,
       );
@@ -596,14 +597,14 @@ export class ContactsCalendarClient extends JmapClient {
         // Caller-fixable bad id: InvalidParams. A genuinely unknown id lands HERE (RFC 8620
         // section 5.3 puts it in notDestroyed), which is why an unreadable card below is never
         // reported as not-found: by then the destroy has succeeded, so the id was real.
-        throw new InvalidInputError(`Contact not found: ${id}`);
+        throw new InvalidInputError(`Contact not found: "${describeUntrusted(id)}"`);
       }
       this.throwSingleSetError(err, 'delete contact');
     }
     // Same acknowledgement check as the update: the id must appear in one of the two maps.
     if (!Array.isArray(result.destroyed) || !result.destroyed.includes(id)) {
       throw new Error(
-        `The server neither confirmed nor refused the deletion of contact ${id}: it reported the id in ` +
+        `The server neither confirmed nor refused the deletion of contact "${describeUntrusted(id)}": it reported the id in ` +
           `neither its destroyed list nor its notDestroyed map. Re-read the contact with get_contact to ` +
           `see whether it still exists.`,
       );

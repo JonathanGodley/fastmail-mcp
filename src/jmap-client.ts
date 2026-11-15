@@ -1336,6 +1336,12 @@ export function filterMailboxesByParent(mailboxes: any[], parent?: string): any[
   return list.filter(mb => mb && mb.parentId === parentId);
 }
 
+// The mailboxes at the root, by the same falsy-parentId test buildMailboxPathMap uses, so an
+// orphan (its parent missing from the account) is not top-level and the path column agrees.
+export function filterTopLevelMailboxes(mailboxes: any[]): any[] {
+  return (mailboxes || []).filter(mb => mb && !mb.parentId);
+}
+
 // A mailbox name is a LEAF name: a "/" would be permanently ambiguous against the path form,
 // and is far more likely a caller expressing nesting inline.
 export function assertLeafMailboxName(name: string): void {
@@ -4803,7 +4809,7 @@ export class JmapClient {
       return { emails, hiddenDraftCount: 0 };
     }
     const filtered = emails.filter((e: any) => !e.keywords?.$draft);
-    // A draft ONLY in Trash is not counted: every edit_draft leaves one there. With no
+    // A draft ONLY in Trash is not counted: a deleted draft keeps `$draft` there. With no
     // resolvable trash role every draft counts, failing toward over-warning.
     const trashMailboxId = this.findByExactRole(threadMailboxes, 'trash')?.id;
     const isTrashedDraft = (e: any): boolean => {

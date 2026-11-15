@@ -320,9 +320,9 @@ describe('deleteContactTool', () => {
   it('lets a not-found from the client through unchanged', async () => {
     const { client } = makeClient();
     client.deleteContact = async () => {
-      throw new InvalidInputError('Contact not found: ghost');
+      throw new InvalidInputError('Contact not found: "ghost"');
     };
-    await assert.rejects(() => deleteContactTool({ contactId: 'ghost' }, client), /Contact not found: ghost/);
+    await assert.rejects(() => deleteContactTool({ contactId: 'ghost' }, client), /Contact not found: "ghost"/);
   });
 });
 

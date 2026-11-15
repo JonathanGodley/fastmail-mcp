@@ -1147,6 +1147,10 @@ needs the whitespace. It also scales with the number of JSON *tokens* rather tha
 content, so it costs most on exactly the payloads that are already the largest. Compacting
 removes no field and alters no value (#40).
 
+To measure what a serialisation or output-shape change does to payload size, run
+`npm run payload:sizes` (see `scripts/README.md`): it prints the byte and character change of
+five default tool results against a committed baseline.
+
 **Neither takes an indent argument**, so the seams cannot pretty-print even by accident, and
 TypeScript rejects a second argument to either. The way back to indented output is a handler
 reaching past them for its own `JSON.stringify`, so the drift guard in
@@ -1179,10 +1183,11 @@ error description is caught.
 newline, then the JSON array; the bulk-operations diagnostic wraps its JSON in a heading and a
 follow-up instruction. In both, the prose stays prose and only the JSON is compacted.
 
-Two things outside `src/` stay indented on purpose, because their output is not a tool result:
-`scripts/dump-official-surface.mjs` writes a checked-in JSON document, where indentation is
-what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a human
-running it by hand.
+Three things stay indented on purpose, because their output is not a tool result:
+`scripts/dump-official-surface.mjs` and the payload-size baseline
+(`src/testing/payload-sizes/baseline.json`) are checked-in JSON documents, where indentation
+is what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a
+human running it by hand.
 
 ## Untrusted values in prose: `describeUntrusted`
 
