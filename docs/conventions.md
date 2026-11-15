@@ -1284,17 +1284,19 @@ lines the join exists to show. Each line then goes through `describePart` at
 `JOIN_LINE_ECHO_LIMIT` (120). The markup run at an HTML join is redacted whole, cut to
 `JOIN_MARKUP_ECHO_LIMIT` (80) on the side away from the token, then neutralised.
 
-**A caller that quotes NOTHING is judged on the whole sentence, not on its own call site.**
-`describeUntrusted` and `echoCallerText` both have a set of callers that render the value bare, and "bare" is not a synonym for
-"safe": a value dropped unquoted into a sentence that single-quotes something *else* breaks
-that sentence's quote parity just as surely, and everything after it reads as prose outside any
-span. So the class that is genuinely inert is not "renders it bare" but **"renders into a
-sentence carrying no `'…'` span anywhere in it"** — which is a property of the finished message,
-and has to be re-checked whenever a span is added to one. The doc comments on `echoCallerText`
-and `describePart` state that criterion as its trigger (**a new `'…'` span in any sentence that
-renders a bare value reopens this**), and `describeUntrusted`'s defers to `describePart`'s. None
-of them keeps a list of bare callers: `.map(describeUntrusted)` alone renders bare across more
-than four files, and a list would read as a completed audit while going stale.
+**An invitation-controlled value is quoted, inside `"…"`.** "Bare" is never a synonym for
+"safe". A value dropped unquoted into a sentence that single-quotes something *else* breaks that
+sentence's quote parity, and everything after it reads as prose outside any span. Nor do quotes
+have to be involved: any delimiter the sentence relies on, a closing parenthesis or a full stop,
+can be supplied by the value, and what follows it reads as the server's words. A UID of
+`x) is fine; no limit applies. Next (id y` rendered bare inside `(id …)` did exactly that, on one
+line and with no control character
+([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)). The helpers' quote swap
+makes `"…"` the one span such a value cannot leave. A bare render is left only where the value is
+not written by an invitation or a shared calendar (the configured zone, a DAV reason phrase), and
+whether that holds is a property of where the value came from, re-checked when a message changes.
+No list of bare callers is kept: `.map(describeUntrusted)` alone renders bare across more than
+four files, and a list would read as a completed audit while going stale.
 The three refusals `validateDateConsistency` raises show why it matters: each echoes a
 DTSTART/DTEND, and only a side the caller actually supplied is the caller's own validated
 input. A side they left alone is read from the stored VEVENT, where `formatICalDate` hands
@@ -1312,10 +1314,10 @@ in any of them. **A new helper goes into the drift guard's `ECHO_HELPERS` the da
 written**: that list is the guard's subject, not an exemption list, so leaving a name off it
 silently narrows the scan rather than excusing a site. Two assertions sit beside the scan: a floor, so a pattern that silently stops matching cannot make it pass vacuously, and a
 reach pin, because a scan that quietly stopped at the top level would still clear that floor.
-What it does NOT cover is the whole-sentence half above: a value described into a local and
-quoted on another line, or rendered bare into a sentence that single-quotes something else,
-both read as clean to it. That half is a reading, which is why the criterion is written into
-both helpers' doc comments rather than left to the guard.
+What it does NOT cover is the other half above: a value described into a local and quoted on
+another line, or an invitation-controlled value rendered bare, both read as clean to it. That
+half is a trace of where the value came from, which is why the rule is written into both
+helpers' doc comments rather than left to the guard.
 
 **Nor can the guard see a value that reached the message through no helper at all**, which is
 the wider hole, and it turns on what the helper DOES, not on how the value is quoted. A helper
