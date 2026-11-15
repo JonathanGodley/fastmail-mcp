@@ -3406,7 +3406,7 @@ describe('validateAttendeeEmail', () => {
   });
 
   it('rejects an address carrying a trailing U+200E left-to-right mark', () => {
-    assert.throws(() => validateAttendeeEmail('a@b.example‎'), /illegal/i);
+    assert.throws(() => validateAttendeeEmail('a@b.example\u200E'), /illegal/i);
   });
 
   it('still accepts a plain dotted address', () => {
@@ -4599,7 +4599,7 @@ describe('update_calendar_event / delete_calendar_event refuse a recurring serie
       (err: unknown) => {
         const message = (err as Error).message;
         assert.ok(!/[\u2028\u2029\r\n]/.test(message), `a line separator survived into the refusal: ${JSON.stringify(message)}`);
-        assert.match(message, /^"Weekly Meeting Separately, the series was deleted" is a repeating event/);
+        assert.match(message, /^"Weekly MeetingSeparately, the series was deleted" is a repeating event/);
         return true;
       },
     );
@@ -6570,7 +6570,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
       // #190's rule, applied to this untrusted value. A paragraph separator
       // would otherwise split the refusal into what reads as a second sentence from the server,
       // and an unbounded value would let the caller choose the length of the error.
-      const hostile = `x y${'z'.repeat(400)}`;
+      const hostile = `x\u2029y${'z'.repeat(400)}`;
       const { client } = createClient();
       await assert.rejects(
         () => client.createCalendarEvent({
@@ -6579,7 +6579,7 @@ describe('transparency: busy and free as caller values (#194)', () => {
         }),
         (err: unknown) => {
           assert.ok(err instanceof InvalidInputError, String(err));
-          assert.ok(!err.message.includes(' '), err.message);
+          assert.ok(!err.message.includes('\u2029'), err.message);
           assert.ok(err.message.includes('…'), `the echo must be bounded:\n${err.message}`);
           assert.ok(err.message.length < hostile.length, err.message);
           return true;
@@ -12439,15 +12439,15 @@ describe('a stored date value rendered into a refusal (#190)', () => {
 
 // A stored TZID is invitation-authored, and nothing on the way in screens it: VTIMEZONE
 // generation skips a zone it cannot resolve rather than refusing it. So every sentence that
-// prints one renders it through `describeUntrustedAt`, which removes what `echoCallerText`
-// leaves in place: C1 controls such as U+0085, a lone CR, and the bidi overrides (#182).
+// prints one renders it through `describeUntrustedAt`: a zone name is shown only to be
+// recognised, so it takes the recognise-only helper (#182).
 describe('a stored TZID printed in a sentence (#182)', () => {
   const STORED_UID = 'stored-tzid@fixture.invalid';
-  // Each forbidden character spelled as an escape, since most are invisible in source. The
-  // `"` pair is balanced so the TZID parameter still parses.
-  const NEXT_LINE = '\u0085';
-  const RLO = '‮';
-  const LINE_SEPARATOR = ' ';
+  // Spelled by code point, since each is invisible in source. The `"` pair is balanced so the
+  // TZID parameter still parses.
+  const NEXT_LINE = String.fromCharCode(0x85);
+  const RLO = String.fromCharCode(0x202e);
+  const LINE_SEPARATOR = String.fromCharCode(0x2028);
   const HOSTILE_TZID = `Fake/Zone${NEXT_LINE}A\rB${RLO}C${LINE_SEPARATOR}D"E"F ${'x'.repeat(120)}`;
   // What survives the helper: the forbidden characters removed, `"` turned into `'`.
   const CLEANED_HEAD = "Fake/ZoneABCD'E'F ";
@@ -12530,6 +12530,100 @@ describe('a stored TZID printed in a sentence (#182)', () => {
       message.includes(`stays in "${CLEANED_HEAD}${'x'.repeat(40 - CLEANED_HEAD.length)}…" untouched`),
       message,
     );
+  });
+});
+
+// Every other invitation-controlled value a calendar refusal prints, driven with NEL (a C1 line
+// break) and RLO (a bidi override) through the real path (#182).
+describe('invitation-controlled values in calendar refusals carry no NEL or RLO (#182)', () => {
+  const UID = 'stored-value@fixture.invalid';
+  const NEL = String.fromCharCode(0x85);
+  const RLO = String.fromCharCode(0x202e);
+
+  function clientOver(icalData: string) {
+    const client = new CalDAVCalendarClient({ username: 'test@example.com', password: 'test' });
+    const mockDAVClient = makeMockDAVClient([{ displayName: 'Personal', url: '/cal/personal/' }], {
+      fetchCalendarObjects: mock.fn(async (_params: FetchObjectsParams) => [{ data: icalData, url: '/cal/e.ics', etag: FIXTURE_ETAG }]),
+      updateCalendarObject: mock.fn(async (_params: UpdateObjectParams) => ({ status: 200 })),
+      deleteCalendarObject: mock.fn(async (_params: any) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    return { client, mockDAVClient };
+  }
+
+  function storedEvent(...lines: string[]): string {
+    return [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      `UID:${UID}`, 'DTSTAMP:20260301T000000Z', ...lines,
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+  }
+
+  async function refusalOf(stored: string, run: (c: CalDAVCalendarClient) => Promise<unknown>): Promise<string> {
+    const { client, mockDAVClient } = clientOver(stored);
+    try {
+      await run(client);
+    } catch (err) {
+      assert.equal(mockDAVClient.updateCalendarObject.mock.calls.length, 0);
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.calls.length, 0);
+      return (err as Error).message;
+    }
+    return assert.fail('expected a refusal');
+  }
+
+  function assertNeither(message: string): void {
+    assert.ok(!message.includes(NEL), `NEL survived: ${JSON.stringify(message)}`);
+    assert.ok(!message.includes(RLO), `RLO survived: ${JSON.stringify(message)}`);
+  }
+
+  it('the frame-mismatch refusal: a stored DTEND', async () => {
+    const message = await refusalOf(
+      storedEvent('DTSTART:20260320T090000Z', `DTEND:x${NEL}y${RLO}z`, 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { start: '2026-03-20T09:30:00Z' }),
+    );
+    assert.match(message, /must use the same date\/time form/);
+    assertNeither(message);
+    assert.ok(message.includes('end "x y z"'), message);
+  });
+
+  it('the one-day refusal: a stored date-only DTSTART', async () => {
+    const message = await refusalOf(
+      storedEvent(`DTSTART;VALUE=DATE:2026${NEL}x${RLO}y`, 'DTEND;VALUE=DATE:20260321', 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { end: '2026-03-20' }),
+    );
+    assert.match(message, /DTEND is exclusive/);
+    assertNeither(message);
+    assert.ok(message.includes('one-day event on "2026 x y"'), message);
+  });
+
+  it('the ordering refusal: a stored DTSTART', async () => {
+    const message = await refusalOf(
+      storedEvent(`DTSTART:2026${NEL}x${RLO}yZ`, 'DTEND:20260320T100000Z', 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { end: '2026-03-20T08:00:00Z' }),
+    );
+    assert.match(message, /DTEND must be later than DTSTART/);
+    assertNeither(message);
+    assert.ok(message.includes('start "2026 x yZ"'), message);
+  });
+
+  it('the date-only-start refusal: a stored timed DURATION', async () => {
+    const message = await refusalOf(
+      storedEvent('DTSTART:20260320T090000Z', `DURATION:PT1H${NEL}x${RLO}y`, 'SUMMARY:S'),
+      c => c.updateCalendarEvent(UID, { start: '2026-03-21' }),
+    );
+    assert.match(message, /whole-day DURATION/);
+    assertNeither(message);
+    assert.ok(message.includes('stored DURATION "PT1H x y"'), message);
+  });
+
+  it('the repeating-event refusal: a stored SUMMARY', async () => {
+    const message = await refusalOf(
+      storedEvent('DTSTART:20260406T100000Z', 'DTEND:20260406T110000Z', 'RRULE:FREQ=WEEKLY;COUNT=10', `SUMMARY:Weekly ${NEL}x ${RLO}y`),
+      c => c.deleteCalendarEvent(UID),
+    );
+    assertNeither(message);
+    // A title is shown only to be recognised, so the characters are removed, not spaced.
+    assert.ok(message.startsWith('"Weekly x y" is a repeating event'), message);
   });
 });
 
