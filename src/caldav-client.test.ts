@@ -4858,6 +4858,21 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     assert.equal(result.occurrence?.failure, undefined);
   });
 
+  it('saturates the verification window at the last representable instant on 31 December 9999', async () => {
+    // The window around that day runs 14 hours into year 10000, which has no four-digit form.
+    const lastDay = makeClient(ALL_DAY.replace('DTSTART;VALUE=DATE:20260822', 'DTSTART;VALUE=DATE:99991201').replace('RRULE:FREQ=YEARLY;COUNT=3', 'RRULE:FREQ=DAILY'), [
+      { ms: at('9999-12-01T00:00:00Z'), lines: ['DTSTART;VALUE=DATE:99991201'] },
+      { ms: at('9999-12-31T00:00:00Z'), lines: ['RECURRENCE-ID;VALUE=DATE:99991231', 'DTSTART;VALUE=DATE:99991231'], exdate: 'EXDATE;VALUE=DATE:99991231' },
+    ]);
+    await lastDay.client.deleteCalendarEvent(UID, '9999-12-31');
+    const sent = lastDay.mockDAVClient.fetchCalendarObjects.mock.calls
+      .map(c => (c.arguments[0] as FetchObjectsParams).timeRange?.end)
+      .filter((end): end is string => end !== undefined);
+    assert.ok(sent.length > 0, 'the premise: expand queries were sent');
+    assert.ok(sent.includes('9999-12-31T23:59:59Z'), `the window around 31 December 9999 saturates: ${sent.join(', ')}`);
+    assert.ok(sent.every(end => /^\d{4}-/.test(end)), `every bound keeps a four-digit year: ${sent.join(', ')}`);
+  });
+
   it('moves the master first when an override is stored before it, keeping every block\'s bytes', async () => {
     const blocks = GOLDEN.split('\r\nBEGIN:VEVENT\r\n');
     const overrideFirst = [blocks[0], blocks[2].replace('\r\nEND:VCALENDAR', ''), blocks[1] + '\r\nEND:VCALENDAR'].join('\r\nBEGIN:VEVENT\r\n');
