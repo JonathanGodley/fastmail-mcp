@@ -94,6 +94,86 @@ describe('list_mailboxes handler', () => {
   });
 });
 
+describe('list_mailboxes topLevelOnly', () => {
+  const ROOTED_TREE = [
+    { id: 'mb-projects', name: 'Projects', parentId: null },
+    { id: 'mb-alpha', name: 'Alpha', parentId: 'mb-projects' },
+    { id: 'mb-inbox', name: 'Inbox', role: 'inbox' },
+    { id: 'mb-receipts', name: 'Receipts', parentId: 'mb-inbox' },
+    { id: 'mb-orphan', name: 'Orphan', parentId: 'mb-gone' },
+  ];
+  const CONFLICT =
+    'topLevelOnly cannot be combined with parent: topLevelOnly lists the mailboxes that have no parent, ' +
+    'parent lists one mailbox\'s direct children. Pass one of them.';
+  const rootedClient = () => stubClient({ getMailboxes: async () => ROOTED_TREE });
+  const ids = (content: Array<{ type: 'text'; text: string }>) => parseFirst(content).map((mb: any) => mb.id);
+
+  function countingClient() {
+    const client = { calls: 0, ...rootedClient() };
+    client.getMailboxes = async () => { client.calls++; return ROOTED_TREE; };
+    return client;
+  }
+
+  it('lists every parentless mailbox, with its path', async () => {
+    const listed = parseFirst(await listMailboxes({ topLevelOnly: true }, rootedClient()));
+    assert.deepEqual(listed.map((mb: any) => [mb.id, mb.path]), [['mb-projects', 'Projects'], ['mb-inbox', 'Inbox']]);
+  });
+
+  it('emits no no-path note, though the account holds an orphan', async () => {
+    assert.equal((await listMailboxes({ topLevelOnly: true }, rootedClient())).length, 1);
+  });
+
+  it('reads "true" as the filter and "false" as omitted', async () => {
+    assert.deepEqual(ids(await listMailboxes({ topLevelOnly: 'true' }, rootedClient())), ['mb-projects', 'mb-inbox']);
+    assert.equal(ids(await listMailboxes({ topLevelOnly: 'false' }, rootedClient())).length, 5);
+  });
+
+  it('refuses topLevelOnly with a parent, real or blank, before fetching anything', async () => {
+    for (const parent of ['Projects', '  ']) {
+      const client = countingClient();
+      await assert.rejects(
+        () => listMailboxes({ topLevelOnly: true, parent }, client),
+        (err: Error) => err.name === 'InvalidInputError' && err.message === CONFLICT,
+        JSON.stringify(parent),
+      );
+      assert.equal(client.calls, 0, JSON.stringify(parent));
+    }
+  });
+
+  it('refuses a lenient truthy topLevelOnly with a parent', async () => {
+    for (const topLevelOnly of ['true', 1]) {
+      await assert.rejects(
+        () => listMailboxes({ topLevelOnly, parent: 'Projects' }, rootedClient()),
+        (err: Error) => err.message === CONFLICT,
+        JSON.stringify(topLevelOnly),
+      );
+    }
+  });
+
+  it('reads topLevelOnly: false with a parent as parent alone', async () => {
+    assert.deepEqual(
+      await listMailboxes({ topLevelOnly: false, parent: 'Projects' }, rootedClient()),
+      await listMailboxes({ parent: 'Projects' }, rootedClient()),
+    );
+  });
+
+  it('reads parent: null as absent, so topLevelOnly lists the top level', async () => {
+    assert.deepEqual(ids(await listMailboxes({ topLevelOnly: true, parent: null }, rootedClient())), ['mb-projects', 'mb-inbox']);
+  });
+
+  it('refuses an unreadable topLevelOnly by name before judging it against parent', async () => {
+    await assert.rejects(
+      () => listMailboxes({ topLevelOnly: 'yes', parent: 'Projects' }, rootedClient()),
+      /topLevelOnly must be true or false/,
+    );
+  });
+
+  it('narrows raw to the parentless JMAP objects', async () => {
+    const content = await listMailboxes({ raw: true, topLevelOnly: true }, rootedClient());
+    assert.deepEqual(parseFirst(content), [ROOTED_TREE[0], ROOTED_TREE[2]]);
+  });
+});
+
 describe('create_mailbox handler', () => {
   it('returns the created mailbox with its path in the default shape', async () => {
     const created = parseFirst(await createMailbox({ name: 'Receipts' }, stubClient()));
@@ -140,6 +220,7 @@ describe('mailbox tool boolean flags', () => {
   it('names the parameter when a boolean flag cannot be read', async () => {
     await assert.rejects(() => listMailboxes({ raw: 'yes' }, {} as any), /raw must be true or false/);
     await assert.rejects(() => listMailboxes({ verbose: 'yes' }, {} as any), /verbose must be true or false/);
+    await assert.rejects(() => listMailboxes({ topLevelOnly: 'yes' }, {} as any), /topLevelOnly must be true or false/);
     await assert.rejects(() => createMailbox({ name: 'X', raw: 'yes' }, {} as any), /raw must be true or false/);
     await assert.rejects(() => createMailbox({ name: 'X', verbose: 'yes' }, {} as any), /verbose must be true or false/);
   });

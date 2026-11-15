@@ -1147,6 +1147,10 @@ needs the whitespace. It also scales with the number of JSON *tokens* rather tha
 content, so it costs most on exactly the payloads that are already the largest. Compacting
 removes no field and alters no value (#40).
 
+To measure what a serialisation or output-shape change does to payload size, run
+`npm run payload:sizes` (see `scripts/README.md`): it prints the byte and character change of
+five default tool results against a committed baseline.
+
 **Neither takes an indent argument**, so the seams cannot pretty-print even by accident, and
 TypeScript rejects a second argument to either. The way back to indented output is a handler
 reaching past them for its own `JSON.stringify`, so the drift guard in
@@ -1179,10 +1183,11 @@ error description is caught.
 newline, then the JSON array; the bulk-operations diagnostic wraps its JSON in a heading and a
 follow-up instruction. In both, the prose stays prose and only the JSON is compacted.
 
-Two things outside `src/` stay indented on purpose, because their output is not a tool result:
-`scripts/dump-official-surface.mjs` writes a checked-in JSON document, where indentation is
-what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a human
-running it by hand.
+Three things stay indented on purpose, because their output is not a tool result:
+`scripts/dump-official-surface.mjs` and the payload-size baseline
+(`src/testing/payload-sizes/baseline.json`) are checked-in JSON documents, where indentation
+is what keeps the diffs readable, and `scripts/mcp-harness.mjs` prints to a console for a
+human running it by hand.
 
 ## Untrusted values in prose: `describeUntrusted`
 
@@ -1284,7 +1289,7 @@ lines the join exists to show. Each line then goes through `describePart` at
 `JOIN_LINE_ECHO_LIMIT` (120). The markup run at an HTML join is redacted whole, cut to
 `JOIN_MARKUP_ECHO_LIMIT` (80) on the side away from the token, then neutralised.
 
-**An invitation-controlled value is quoted, inside `"…"`.** "Bare" is never a synonym for
+**In a calendar message, an invitation-controlled value is quoted, inside `"…"`.** "Bare" is never a synonym for
 "safe". A value dropped unquoted into a sentence that single-quotes something *else* breaks that
 sentence's quote parity, and everything after it reads as prose outside any span. Nor do quotes
 have to be involved: any delimiter the sentence relies on, a closing parenthesis or a full stop,
@@ -1294,11 +1299,12 @@ line and with no control character
 ([#182](https://github.com/JonathanGodley/fastmail-mcp/issues/182)). The helpers' quote swap
 makes `"…"` the one span such a value cannot leave. The same holds for text a remote server
 writes: a DAV reason phrase and tsdav's login failure each end a sentence, so a full stop in them
-writes the next one, and both are quoted. A bare render is left only for a value this server
-itself configures (the configured zone), and whether that holds is a property of where the value
-came from, re-checked when a message changes.
-No list of bare callers is kept: `.map(describeUntrusted)` alone renders bare across more than
-four files, and a list would read as a completed audit while going stale.
+writes the next one, and both are quoted. In calendar refusals and confirmations the one bare
+helper render left is the configured zone, which this server itself sets; whether a value may be
+bare is a property of where it came from, re-checked when a message changes. Outside the calendar
+messages bare renders remain, and no list of them is kept: `.map(describeUntrusted)` alone
+renders bare across more than four files, and a list would read as a completed audit while going
+stale.
 The three refusals `validateDateConsistency` raises show why it matters: each echoes a
 DTSTART/DTEND, and only a side the caller actually supplied is the caller's own validated
 input. A side they left alone is read from the stored VEVENT, where `formatICalDate` hands

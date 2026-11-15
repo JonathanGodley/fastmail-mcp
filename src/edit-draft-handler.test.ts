@@ -190,7 +190,7 @@ describe('editDraft — coercion and delegation', () => {
     const { client, calls } = spyClient();
     await assert.rejects(
       () => editDraft({ emailId: 'd1', bodyEdits: [{ find: 'a', with: 'b' }], attachments: [{ path: 'a.pdf' }] }, client, '/attach/root', false),
-      (e: unknown) => e instanceof McpError && /bodyEdits\[0\] has unknown key\(s\): with/.test((e as Error).message),
+      (e: unknown) => e instanceof McpError && /bodyEdits\[0\] has unknown key\(s\): "with"/.test((e as Error).message),
     );
     assert.equal(calls.upload, undefined);
     assert.equal(calls.update, undefined);

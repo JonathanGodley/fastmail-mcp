@@ -1,0 +1,27 @@
+{
+  "list_emails": {
+    "bytes": 10946,
+    "chars": 10928,
+    "sha256": "ec85a56b980af34234fb3f4aef776744b89d365b7a180a61b741ba8b0bdb97de"
+  },
+  "get_email": {
+    "bytes": 1791,
+    "chars": 1775,
+    "sha256": "fce82feffbb7afda7dac22f5283a91912b4089a549bba05c9295c615cc2dd22b"
+  },
+  "get_thread": {
+    "bytes": 2449,
+    "chars": 2447,
+    "sha256": "54705b787e7b150e931b705992c1b89f44f861035a6988df4fa41ee56283bc72"
+  },
+  "list_calendar_events": {
+    "bytes": 4096,
+    "chars": 4084,
+    "sha256": "4e8d97ceafb0d1372423fe94d0839a788b8da775ca09bbff78caaccb7ba95b08"
+  },
+  "list_contacts": {
+    "bytes": 2430,
+    "chars": 2425,
+    "sha256": "d3344b0de1a9784eaadc81a1da4e05cadb454a00b5d6502319bc350e6689aa25"
+  }
+}

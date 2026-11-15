@@ -393,8 +393,8 @@ a part whose Content-ID coincidentally — or deliberately — matches that shap
 accident are 2^-128; a forger has to try. When such a draft is later rebuilt (an `edit_draft`
 that rewrites or clears the body), the classifier treats that part as server-managed, so an
 unreferenced one is **deleted rather than degraded to an attachment**. What a forger achieves
-is therefore the removal of their own content from a draft, and the bytes survive in Trash
-(#65) either way. Accepted at those odds. The same reasoning is
+is therefore the removal of their own content from a draft. Since #229 the edit destroys the
+draft it replaces, so the removed bytes are not recoverable from Trash. Accepted at those odds. The same reasoning is
 why a foreign Content-ID of that shape is **never carried verbatim**: parts pooled onto a
 forward have their Content-ID stripped entirely, so a planted identifier cannot ride into a
 message this server composed.
