@@ -1083,8 +1083,7 @@ export function coercePosition(value: unknown, options?: { ascendingHint?: boole
 }
 
 function echoPosition(value: unknown): string {
-  const text = String(value);
-  return text.length > POSITION_ECHO_LIMIT ? `${text.slice(0, POSITION_ECHO_LIMIT)}...` : text;
+  return describeUntrustedAt(value, POSITION_ECHO_LIMIT);
 }
 
 // Clamp a caller-supplied limit into [1, max], dropping any fractional part (a JMAP limit

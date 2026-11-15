@@ -253,7 +253,7 @@ export function refusedContactKind(card: any): string | undefined {
 /** The shared refusal both write tools raise, so they read as one rule. */
 export function contactKindRefusal(opts: { id: string; kind: string; tool: string; because: string; recovery: string }): string {
   const group = opts.kind === 'group' ? ' (a contact GROUP)' : '';
-  return `Contact ${opts.id} is a card of kind "${describeUntrusted(opts.kind)}"${group}, not a person card, ` +
+  return `Contact "${describeUntrusted(opts.id)}" is a card of kind "${describeUntrusted(opts.kind)}"${group}, not a person card, ` +
     `so ${opts.tool} refuses it: ${opts.because} ${opts.recovery}`;
 }
 

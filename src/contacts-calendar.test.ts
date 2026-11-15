@@ -1080,7 +1080,7 @@ describe('updateContact merge', () => {
         assert.equal(err.name, 'InvalidInputError');
         assert.equal(
           err.message,
-          'Contact O1 is a card of kind "org", not a person card, so update_contact refuses it: ' +
+          'Contact "O1" is a card of kind "org", not a person card, so update_contact refuses it: ' +
             'name/emails/phones/addresses/notes describe a person card, this server can create only individual ' +
             'cards, and group members are not editable here. Edit it in the Fastmail web interface instead.',
         );
@@ -1335,7 +1335,7 @@ describe('deleteContact', () => {
         () => client.deleteContact('K1'),
         (err: Error) => {
           assert.equal(err.name, 'InvalidInputError');
-          assert.ok(err.message.startsWith(`Contact K1 is a card of kind "${kind}", not a person card, so delete_contact`), err.message);
+          assert.ok(err.message.startsWith(`Contact "K1" is a card of kind "${kind}", not a person card, so delete_contact`), err.message);
           assert.match(err.message, /only individual/);
           assert.match(err.message, /so it will not destroy one it could never put back, and the deletedCard echo could not rebuild it either\. Delete it/);
           return true;
