@@ -700,24 +700,20 @@ function isImagePart(part: any): boolean {
   return classifyPartType(part?.type).startsWith('image/');
 }
 
-// A compact fingerprint of the draft an edit replaced, so a caller that edited from a
-// stale copy sees what it overwrote (#65). Sizes, not bodies.
-export interface ReplacedDraftInfo {
-  id: string;
-  subject?: string;
-  to?: string[];
-  cc?: string[];
-  bcc?: string[];
-  replyTo?: string[];
-  textBodySize?: number;
+// The body sizes of the draft an edit SAVED, in chars; `textDerived` when this edit derived
+// the text part from the html.
+export interface SavedBodySizes {
   htmlBodySize?: number;
+  textBodySize?: number;
+  textDerived?: true;
 }
 
 // updateDraft's result. Exactly ONE of destroyedOldDraftId / vanishedOldDraftId /
 // orphanedOldDraftId is always set: the old copy's fate is never left unstated.
 export interface UpdateDraftResult {
   id: string;
-  replacedDraft: ReplacedDraftInfo;
+  // Present only on an edit that wrote or cleared a body.
+  savedBodies?: SavedBodySizes;
   destroyedOldDraftId?: string;
   // The old copy was already gone when the destroy ran (`notFound`).
   vanishedOldDraftId?: string;
@@ -2773,22 +2769,15 @@ export class JmapClient {
 
     Object.assign(emailObject, buildBodyParts({ textBody: textBodyValue, htmlBody: htmlBodyValue }));
 
-    const addressList = (addrs: any): string[] =>
-      (addrs || []).map((a: any) => a?.email).filter((e: any): e is string => typeof e === 'string' && e !== '');
-    const replacedTo = addressList(existingEmail.to);
-    const replacedCc = addressList(existingEmail.cc);
-    const replacedBcc = addressList(existingEmail.bcc);
-    const replacedReplyTo = addressList(existingEmail.replyTo);
-    const replacedDraft: ReplacedDraftInfo = {
-      id: emailId,
-      ...(existingEmail.subject && { subject: existingEmail.subject }),
-      ...(replacedTo.length && { to: replacedTo }),
-      ...(replacedCc.length && { cc: replacedCc }),
-      ...(replacedBcc.length && { bcc: replacedBcc }),
-      ...(replacedReplyTo.length && { replyTo: replacedReplyTo }),
-      ...(existingTextValue !== undefined && { textBodySize: existingTextValue.length }),
-      ...(existingHtmlValue !== undefined && { htmlBodySize: existingHtmlValue.length }),
-    };
+    // The text size is the one thing about the saved draft the caller cannot work out when
+    // this edit derived that part from the html.
+    const savedBodies: SavedBodySizes | undefined = touchesBody
+      ? {
+          ...(!isBlank(htmlBodyValue) && { htmlBodySize: htmlBodyValue!.length }),
+          ...(!isBlank(textBodyValue) && { textBodySize: textBodyValue!.length }),
+          ...(wroteHtml && !wroteText && !isBlank(textBodyValue) && { textDerived: true as const }),
+        }
+      : undefined;
 
     // Create-then-dispose, NOT one combined Email/set. Fastmail silently no-ops an in-place
     // body update, so a recreate is mandatory, and RFC 8620 §6.3 does not make create and
@@ -2934,7 +2923,7 @@ export class JmapClient {
 
     return {
       id: newEmailId,
-      replacedDraft,
+      ...(savedBodies && { savedBodies }),
       ...(destroyedOldDraftId && { destroyedOldDraftId }),
       ...(vanishedOldDraftId && { vanishedOldDraftId }),
       ...(orphanedOldDraftId && { orphanedOldDraftId, orphanedOldDraftReason }),

@@ -9,7 +9,7 @@ import { REJECT_BODY_EDITS_WITH_BODY } from './body-edits.js';
 
 const UPLOADED: any[] = [{ blobId: 'up-1', type: 'application/pdf', name: 'a.pdf', disposition: 'attachment' }];
 
-const RESULT: any = { id: 'draft-new', replacedDraft: { id: 'draft-old' }, destroyedOldDraftId: 'draft-old' };
+const RESULT: any = { id: 'draft-new', destroyedOldDraftId: 'draft-old' };
 
 // uploadAttachments records both capability flags and returns canned parts, so they can be
 // asserted where they land on the update.

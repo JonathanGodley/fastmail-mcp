@@ -2,7 +2,7 @@ import { simplifyEmail } from './email-formatter.js';
 import { projectListEmail } from './field-projection.js';
 import { describeUntrusted, describeUntrustedAt, echoCallerText, parseAddress, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
-import type { ArchiveEmailResult, ArchiveResult, QueryResult, ReplacedDraftInfo, UpdateDraftResult } from './jmap-client.js';
+import type { ArchiveEmailResult, ArchiveResult, QueryResult, SavedBodySizes, UpdateDraftResult } from './jmap-client.js';
 import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
 import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
@@ -61,31 +61,19 @@ export function formatEmailQueryResult(result: QueryResult, options?: { fields?:
   return `${formatQuerySummary(result, { paged: true })}\n${toolJson(simplified)}`;
 }
 
-// The trashed copy holds the full picture.
-const MAX_ECHOED_RECIPIENTS = 5;
 // Wider than describeUntrusted's 64, so an ordinary subject or Message-ID is echoed whole.
 const SUBJECT_ECHO_LIMIT = 256;
 const MESSAGE_ID_ECHO_LIMIT = 256;
-function formatReplacedRecipients(label: string, addresses?: string[]): string | null {
-  if (!addresses?.length) return null;
-  const shown = addresses.slice(0, MAX_ECHOED_RECIPIENTS)
-    .map((a) => describeUntrustedAt(a, RECIPIENT_ADDRESS_ECHO_LIMIT)).join(', ');
-  const extra = addresses.length - MAX_ECHOED_RECIPIENTS;
-  return `${label} ${shown}${extra > 0 ? ` (+${extra} more)` : ''}`;
-}
 
-// The fingerprint of the draft an edit replaced (#65).
-function formatReplacedDraft(replaced: ReplacedDraftInfo): string {
+function formatSavedBodies(saved: SavedBodySizes | undefined): string {
+  if (!saved) return '';
   const parts = [
-    replaced.subject ? `subject "${describeUntrustedAt(replaced.subject, SUBJECT_ECHO_LIMIT)}"` : null,
-    formatReplacedRecipients('to', replaced.to),
-    formatReplacedRecipients('cc', replaced.cc),
-    formatReplacedRecipients('bcc', replaced.bcc),
-    formatReplacedRecipients('replyTo', replaced.replyTo),
-    replaced.htmlBodySize != null ? `htmlBody ${replaced.htmlBodySize} chars` : null,
-    replaced.textBodySize != null ? `textBody ${replaced.textBodySize} chars` : null,
+    saved.htmlBodySize != null ? `htmlBody ${saved.htmlBodySize} chars` : null,
+    saved.textBodySize != null
+      ? `textBody ${saved.textBodySize} chars${saved.textDerived ? ' (derived from the html)' : ''}`
+      : null,
   ].filter(Boolean);
-  return parts.join(', ');
+  return parts.length ? ` Saved: ${parts.join(', ')}.` : '';
 }
 
 // ONE LINE EACH, not a space join: the summaries these ride on can end in an unquoted list
@@ -163,22 +151,18 @@ export function formatBodyHash(result: { bodyHash?: string; bodyHashWithheld?: s
   return '';
 }
 
-// The replaced copy's contents are echoed so a caller that edited from a stale read sees
-// what it overwrote (#65).
+// Deleting the replaced draft is the normal outcome and is not reported; only a delete that
+// did not happen as expected is.
 export function formatEditDraftResult(result: UpdateDraftResult): string {
   // Server/exception text on a RETURNED result, which the CallTool catch never redacts, so it
   // is neutralised here (#134): at the one render site, so a new assignment site in
   // jmap-client.ts is covered without anyone remembering.
   const disposal = result.destroyedOldDraftId
-    ? `The previous draft (id ${result.destroyedOldDraftId}) was permanently deleted.`
+    ? ''
     : result.vanishedOldDraftId
-      ? `WARNING: the previous draft (id ${result.vanishedOldDraftId}) was already gone when this edit went to delete it, so something else replaced or deleted it during the edit. If another client saved this draft, Drafts now holds a second copy without this edit; check with search_emails before editing further.`
-      : `WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be deleted (${describeUntrusted(result.orphanedOldDraftReason ?? 'reason unknown')}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
-  const fingerprint = formatReplacedDraft(result.replacedDraft);
-  const replaced = fingerprint
-    ? ` It contained: ${fingerprint}. If that isn't what you expected to replace, the draft changed since you last read it and this edit overwrote those changes.`
-    : '';
-  return `Draft updated successfully. New Email ID: ${result.id}. ${disposal}${replaced}${formatBodyHash(result)}` +
+      ? ` WARNING: the previous draft (id ${result.vanishedOldDraftId}) was already gone when this edit went to delete it, so something else replaced or deleted it during the edit. If another client saved this draft, Drafts now holds a second copy without this edit; check with search_emails before editing further.`
+      : ` WARNING: the previous draft (id ${result.orphanedOldDraftId}) could NOT be deleted (${describeUntrusted(result.orphanedOldDraftReason ?? 'reason unknown')}), so it remains in place as a duplicate holding the pre-edit content; delete it if you don't want it.`;
+  return `Draft updated successfully. New Email ID: ${result.id}.${disposal}${formatSavedBodies(result.savedBodies)}${formatBodyHash(result)}` +
     `${formatBodyEditsReceipt(result.bodyEdits)}${formatInlineNotes(result.notes)}${formatJoins(result.joins)}`;
 }
 

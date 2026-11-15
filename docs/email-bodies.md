@@ -624,9 +624,10 @@ copy in Trash as an undo was tried and dropped: #229 records why.
   the `trash`-role one is neither shown nor counted (a caller who wants Trash content reads
   Trash). If the `trash` role can't be resolved, every draft is counted — fail toward
   over-warning, never toward missing a real draft reply.
-- **The result echoes back what was replaced** (`replacedDraft`: id, subject,
-  to/cc/bcc/replyTo, and body character counts), so a caller comparing against its own copy
-  sees an unintended overwrite immediately.
+- **The result says nothing about a replaced draft that was deleted as expected**, only
+  about one that was not. On a body edit it reports the saved body sizes (`savedBodies`),
+  marking a text part this edit derived from the html: that part is the one thing about the
+  saved draft the caller did not write and cannot see.
 
 Exactly one of `destroyedOldDraftId` / `vanishedOldDraftId` / `orphanedOldDraftId` is always
 set — the fate of the replaced draft is never left unstated.
@@ -646,7 +647,7 @@ Measured live 2026-11-15 on one throwaway draft, driving the Fastmail web client
 Nothing here detects the fork: the server cannot see an open composer, the session's next
 edit passes its `bodyHash` check because its own copy is unchanged, and matching a second
 draft by subject would misfire on legitimate drafts. Editing one draft through two clients
-at once is left to the user not to do; the tool description says so. Not measured: the same
+at once is left to the user not to do. Not measured: the same
 sequence with the old copy destroyed rather than trashed.
 
 ## Body extraction: matching by MIME type, not list membership

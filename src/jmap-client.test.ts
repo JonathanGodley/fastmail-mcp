@@ -639,34 +639,35 @@ describe('updateDraft', () => {
     assert.match(result.orphanedOldDraftReason!, /network down/);
   });
 
-  // ---- echo-back of the replaced draft (staleness detection, #65) ----
+  // ---- the saved draft's body sizes ----
 
-  it('echoes back what the replaced draft contained', async () => {
-    mockUpdate(client, { ...RICH_DRAFT, bcc: [{ email: 'dan@example.com' }] });
+  it('reports no body sizes on a metadata-only edit', async () => {
+    mockUpdate(client, RICH_DRAFT);
 
     const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
-    assert.deepEqual(result.replacedDraft, {
-      id: 'draft-1',
-      subject: 'Old Subject',              // the PRE-edit subject, not the new one
-      to: ['bob@example.com'],
-      cc: ['carol@example.com'],
-      bcc: ['dan@example.com'],
-      replyTo: ['reply@example.com'],
-      textBodySize: 'The text'.length,
-      htmlBodySize: '<p>The html</p>'.length,
+    assert.equal(result.savedBodies, undefined);
+  });
+
+  it('reports the saved sizes of an html-alone edit, marking the text part as derived', async () => {
+    const makeReq = mockUpdate(client, RICH_DRAFT);
+
+    const html = '<p>A new and rather longer html body</p>';
+    const result = await client.updateDraft('draft-1', { htmlBody: html, bodyHash: hashOf(RICH_DRAFT) });
+    // The size reported is the size of the text part actually sent, not of the old one.
+    const sentText = draftFromCall(makeReq).bodyValues.text.value;
+    assert.notEqual(sentText.length, 'The text'.length);
+    assert.deepEqual(result.savedBodies, {
+      htmlBodySize: html.length,
+      textBodySize: sentText.length,
+      textDerived: true,
     });
   });
 
-  it('omits echo-back fields the replaced draft did not have', async () => {
-    const bare = { ...EXISTING_DRAFT, subject: undefined, cc: [] };
-    mockUpdate(client, bare);
+  it('reports a text-only edit as text alone, not derived', async () => {
+    mockUpdate(client, EXISTING_DRAFT);
 
-    const result = await client.updateDraft('draft-1', { subject: 'New Subject' });
-    assert.deepEqual(result.replacedDraft, {
-      id: 'draft-1',
-      to: ['bob@example.com'],
-      textBodySize: 'Old body'.length,     // html was never present on this draft
-    });
+    const result = await client.updateDraft('draft-1', { textBody: 'A new body', bodyHash: hashOf(EXISTING_DRAFT) });
+    assert.deepEqual(result.savedBodies, { textBodySize: 'A new body'.length });
   });
 
   it('merges fields — preserves existing values for unspecified fields', async () => {
