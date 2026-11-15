@@ -190,6 +190,48 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
     );
   });
 
+  // Title, UID and calendar name are each written by whoever sent the invitation or shared the
+  // calendar, so none may carry NEL (a C1 line break) or RLO (a bidi override) into the refusal
+  // (#182). The title is shown only to be recognised, so those characters are removed; the UID
+  // and calendar name are handles, so each becomes a space.
+  describe('carries no NEL or RLO from an invitation-controlled value', () => {
+    const NEL = String.fromCharCode(0x85);
+    const RLO = String.fromCharCode(0x202e);
+
+    async function refusalFor(uid: string, summary: string, calendarName: string): Promise<string> {
+      const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+      (client as any).client = makeMockDAVClient([{ displayName: calendarName, url: '/cal/work/' }], {
+        fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
+          { data: expandedBlob(uid, summary, CALENDAR_MAX_OCCURRENCES_PER_SERIES + 1), url: '/w-dense.ics' },
+        ]),
+      });
+      try {
+        await client.getCalendarEvents(undefined, 50, WINDOW_START, WINDOW_END);
+      } catch (err) {
+        const message = (err as Error).message;
+        assert.ok(!message.includes(NEL), `NEL survived: ${JSON.stringify(message)}`);
+        assert.ok(!message.includes(RLO), `RLO survived: ${JSON.stringify(message)}`);
+        return message;
+      }
+      return assert.fail('expected the listing to be refused');
+    }
+
+    it('in the SUMMARY', async () => {
+      const message = await refusalFor('dense@fm', `Every ${NEL}x ${RLO}y`, 'Work');
+      assert.ok(message.includes('repeating event "Every x y" (id dense@fm'), message);
+    });
+
+    it('in the UID', async () => {
+      const message = await refusalFor(`dense${NEL}x${RLO}y@fm`, 'Every minute', 'Work');
+      assert.ok(message.includes('(id dense x y@fm, calendar Work)'), message);
+    });
+
+    it('in the calendar name', async () => {
+      const message = await refusalFor('dense@fm', 'Every minute', `Wo${NEL}r${RLO}k`);
+      assert.ok(message.includes('calendar Wo r k) expands to'), message);
+    });
+  });
+
   it('materialises a series sitting exactly ON the cap', async () => {
     // The boundary, stated in the direction that matters: the cap is "more than N", so N
     // itself is answered. An off-by-one here fails the call on a legitimate dense series.
@@ -234,9 +276,8 @@ describe('CalDAVCalendarClient.getCalendarEvents caps how dense one series may b
         for (const ch of HOSTILE) {
           assert.ok(!message.includes(ch), `char ${ch.charCodeAt(0)} survived the scrub`);
         }
-        // Scrubbed to spaces, not dropped: the caller still has to be able to recognise the
-        // series the message names.
-        assert.match(message, /"Meeting {3}Refused: nothing was left out"/);
+        // Removed, not spaced: a title is shown only to be recognised (#182).
+        assert.match(message, /"MeetingRefused: nothing was left out"/);
         // One line, so the forged one cannot be read as a second sentence of its own.
         assert.equal(message.split('\n').length, 1);
         return true;
