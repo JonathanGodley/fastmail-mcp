@@ -252,6 +252,15 @@ describe('delete_mailbox handler', () => {
     assert.match(content[1].text, /^WARNING: mailbox "mb-old" was deleted.*`deletedMailbox` is absent/);
   });
 
+  it('renders a client warning as its own item after the JSON', async () => {
+    const content = await deleteMailbox({ mailbox: 'mb-old' }, stubClient({
+      deleteMailbox: async () => ({ deleted: 'mb-old', deletedMailbox: { id: 'mb-old' }, warning: 'WARNING: synthetic' }),
+    }));
+    assert.deepEqual(content.map(c => c.type), ['text', 'text']);
+    assert.deepEqual(parseFirst(content), { deleted: 'mb-old', deletedMailbox: { id: 'mb-old' } });
+    assert.equal(content[1].text, 'WARNING: synthetic');
+  });
+
   it('passes an absent mailbox to the client, whose blank check refuses it', async () => {
     const seen: unknown[] = [];
     await deleteMailbox(undefined, stubClient({ deleteMailbox: async (mailbox) => { seen.push(mailbox); return { deleted: 'x' }; } }));

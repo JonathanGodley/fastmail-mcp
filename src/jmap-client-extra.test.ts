@@ -5380,7 +5380,21 @@ describe('deleteMailbox', () => {
 
   it('refuses a mailbox whose totalEmails is absent, failing closed', async () => {
     const { totalEmails: _total, ...noCount } = OLD;
-    await assertRefused([PROJECTS, noCount], 'mb-old', 'input', /did not report how many messages.*never deletes mail\.$/);
+    await assertRefused([PROJECTS, noCount], 'mb-old', 'input', /did not report a valid message count.*never deletes mail\.$/);
+  });
+
+  it('refuses a totalEmails that is negative or not a whole number, failing closed', async () => {
+    for (const totalEmails of [-1, 1.5]) {
+      await assertRefused([PROJECTS, { ...OLD, totalEmails }], 'mb-old', 'input', /did not report a valid message count/);
+    }
+  });
+
+  it('refuses a reference matching no mailbox after the read alone', async () => {
+    client = makeClient();
+    const makeReq = stubDelete();
+    await assert.rejects(() => client.deleteMailbox('Nowhere'), InvalidInputError);
+    assert.equal(makeReq.mock.callCount(), 1);
+    assert.equal(setWasSent(makeReq), false);
   });
 
   it('refuses a mailbox with a child and points at list_mailboxes, never at deleting the child', async () => {
@@ -5469,8 +5483,8 @@ describe('deleteMailbox', () => {
       assert.equal(
         err.message,
         'The mailboxes changed since they were read, so mailbox "Projects/Old" (id "mb-old") was not deleted; nothing was deleted. ' +
-          'Retry the delete_mailbox call: it re-reads them first. Any change to any mailbox, including new mail arriving, ' +
-          'can cause this refusal.',
+          'Retry the delete_mailbox call: it re-reads them first. The change may be unrelated to this mailbox, such as new ' +
+          'mail arriving.',
       );
       return true;
     });
@@ -5499,6 +5513,64 @@ describe('deleteMailbox', () => {
       assert.match(err.message, /neither confirmed nor refused.*list_mailboxes/);
       return true;
     });
+  });
+
+  it('reports a malformed notDestroyed entry as a refusal with a fallback reason', async () => {
+    for (const entry of [null, 'oops']) {
+      client = makeClient();
+      stubDelete({ set: ids => ['Mailbox/set', { notDestroyed: { [ids[0]]: entry } }, 'deleteMailbox'] });
+      await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+        assert.ok(!(err instanceof InvalidInputError), JSON.stringify(entry));
+        assert.equal(err.message, 'Failed to delete mailbox: unknown - the server gave no error details', JSON.stringify(entry));
+        return true;
+      });
+    }
+  });
+
+  it('reports an id both destroyed and not destroyed as a contradictory answer', async () => {
+    stubDelete({ set: ids => ['Mailbox/set', { destroyed: ids, notDestroyed: { [ids[0]]: { type: 'forbidden' } } }, 'deleteMailbox'] });
+    await assert.rejects(() => client.deleteMailbox('mb-old'), (err: Error) => {
+      assert.ok(!(err instanceof InvalidInputError));
+      assert.match(err.message, /contradictory: it both confirmed and refused it\. Call list_mailboxes/);
+      return true;
+    });
+  });
+
+  it('treats an echo for a different id as no echo', async () => {
+    stubDelete({ echo: [{ ...OLD_AS_DESTROYED, id: 'mb-other' }] });
+    assert.deepEqual(await client.deleteMailbox('mb-old'), { deleted: 'mb-old' });
+  });
+
+  it('picks the echo by id when the in-batch read returns several', async () => {
+    stubDelete({ echo: [{ ...OLD_AS_DESTROYED, id: 'mb-other' }, OLD_AS_DESTROYED] });
+    assert.deepEqual(await client.deleteMailbox('mb-old'), { deleted: 'mb-old', deletedMailbox: OLD_AS_DESTROYED });
+  });
+
+  it('warns when the echo shows the destroyed mailbox held mail', async () => {
+    const echoed = { ...OLD_AS_DESTROYED, totalEmails: 4 };
+    stubDelete({ echo: [echoed] });
+    assert.deepEqual(await client.deleteMailbox('mb-old'), {
+      deleted: 'mb-old',
+      deletedMailbox: echoed,
+      warning:
+        'WARNING: the server destroyed mailbox "Projects/Old" (id "mb-old"), which at the moment of the destroy held 4 messages. ' +
+        'Its mail may have been removed with it; check Trash and the Fastmail web interface.',
+    });
+  });
+
+  it('warns when the echo shows the destroyed mailbox had a role', async () => {
+    stubDelete({ echo: [{ ...OLD_AS_DESTROYED, role: 'archive', totalEmails: 2 }] });
+    const result = await client.deleteMailbox('mb-old');
+    assert.match(result.warning ?? '', /held 2 messages and had the role "archive"\. Its mail may have been removed/);
+    client = makeClient();
+    stubDelete({ echo: [{ ...OLD_AS_DESTROYED, role: 'archive' }] });
+    assert.match((await client.deleteMailbox('mb-old')).warning ?? '', /moment of the destroy had the role "archive"\./);
+  });
+
+  it('gives no warning when the echo omits totalEmails and role', async () => {
+    const { totalEmails: _t, role: _r, ...bare } = OLD_AS_DESTROYED;
+    stubDelete({ echo: [bare] });
+    assert.deepEqual(await client.deleteMailbox('mb-old'), { deleted: 'mb-old', deletedMailbox: bare });
   });
 });
 

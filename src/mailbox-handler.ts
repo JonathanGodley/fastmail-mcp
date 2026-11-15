@@ -9,7 +9,7 @@ import { coerceBool, describeUntrusted, InvalidInputError, toolJson } from './co
 export interface MailboxClient {
   getMailboxes(): Promise<any[]>;
   createMailbox(input: { name: string; parent?: string }): Promise<{ mailbox: any; created: any; path?: string }>;
-  deleteMailbox(mailbox: string): Promise<{ deleted: string; deletedMailbox?: any }>;
+  deleteMailbox(mailbox: string): Promise<{ deleted: string; deletedMailbox?: any; warning?: string }>;
 }
 
 export type ToolContent = Array<{ type: 'text'; text: string }>;
@@ -80,7 +80,7 @@ export async function createMailbox(args: any, client: MailboxClient): Promise<T
  * mailbox returned is the echo, which is always the untransformed JMAP object.
  */
 export async function deleteMailbox(args: any, client: MailboxClient): Promise<ToolContent> {
-  const { deleted, deletedMailbox } = await client.deleteMailbox(args?.mailbox);
+  const { deleted, deletedMailbox, warning } = await client.deleteMailbox(args?.mailbox);
 
   const content: ToolContent = [{ type: 'text', text: toolJson({ deleted, deletedMailbox }) }];
   if (deletedMailbox === undefined) {
@@ -92,5 +92,6 @@ export async function deleteMailbox(args: any, client: MailboxClient): Promise<T
         'destroy, so `deletedMailbox` is absent and its name and parent cannot be read back here.',
     });
   }
+  if (warning) content.push({ type: 'text', text: warning });
   return content;
 }

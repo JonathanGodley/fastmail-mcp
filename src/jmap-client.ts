@@ -1881,7 +1881,7 @@ export class JmapClient {
    * `deletedMailbox` is read inside the destroy batch, so it is the mailbox as destroyed. Its
    * absence after a confirmed destroy is not a failure: the delete has happened.
    */
-  async deleteMailbox(input: string): Promise<{ deleted: string; deletedMailbox?: any }> {
+  async deleteMailbox(input: string): Promise<{ deleted: string; deletedMailbox?: any; warning?: string }> {
     const ref = requireNonEmpty(input, 'mailbox', 'pass the id, role, name or path of the mailbox to delete');
 
     const session = await this.getSession();
@@ -1910,8 +1910,8 @@ export class JmapClient {
     const blockers: string[] = [];
     const remedies: string[] = [];
     const total = target.totalEmails;
-    if (typeof total !== 'number') {
-      blockers.push('the server did not report how many messages it holds, so it cannot be shown to be empty');
+    if (!Number.isInteger(total) || total < 0) {
+      blockers.push('the server did not report a valid message count for it, so it cannot be shown to be empty');
     } else if (total > 0) {
       blockers.push(`it holds ${total} ${total === 1 ? 'message' : 'messages'}`);
       remedies.push(
@@ -1955,23 +1955,55 @@ export class JmapClient {
     if (setEntry?.[0] === 'error' && setEntry[1]?.type === 'stateMismatch') {
       throw new Error(
         `The mailboxes changed since they were read, so ${label} was not deleted; nothing was deleted. Retry the ` +
-          'delete_mailbox call: it re-reads them first. Any change to any mailbox, including new mail arriving, ' +
-          'can cause this refusal.',
+          'delete_mailbox call: it re-reads them first. The change may be unrelated to this mailbox, such as new ' +
+          'mail arriving.',
       );
     }
     const result = this.getMethodResult(response, 1);
-    if (result.notDestroyed?.[id]) {
-      this.throwSingleSetError(result.notDestroyed[id], 'delete mailbox');
+    const confirmed = Array.isArray(result.destroyed) && result.destroyed.includes(id);
+    const refused = !!result.notDestroyed && typeof result.notDestroyed === 'object' &&
+      Object.prototype.hasOwnProperty.call(result.notDestroyed, id);
+    if (confirmed && refused) {
+      throw new Error(
+        `The server's answer on deleting ${label} was contradictory: it both confirmed and refused it. ` +
+          'Call list_mailboxes to see whether it still exists.',
+      );
     }
-    if (!Array.isArray(result.destroyed) || !result.destroyed.includes(id)) {
+    if (refused) {
+      const entry = result.notDestroyed[id];
+      this.throwSingleSetError(
+        entry && typeof entry === 'object' && typeof entry.type === 'string'
+          ? entry
+          : { type: 'unknown', description: 'the server gave no error details' },
+        'delete mailbox',
+      );
+    }
+    if (!confirmed) {
       throw new Error(
         `The server neither confirmed nor refused the deletion of ${label}: it reported the id in neither its ` +
           'destroyed list nor its notDestroyed map. Call list_mailboxes to see whether it still exists.',
       );
     }
 
-    const deletedMailbox = this.readListResultIfPresent(response, 0)[0];
-    return deletedMailbox ? { deleted: id, deletedMailbox } : { deleted: id };
+    // An echo for another id is no echo of this mailbox.
+    const deletedMailbox = this.readListResultIfPresent(response, 0).find(mb => mb?.id === id);
+    if (!deletedMailbox) return { deleted: id };
+    // The only sign that a server ignored both the checks above and its own refusals.
+    const unsafe: string[] = [];
+    if (deletedMailbox.totalEmails !== undefined && deletedMailbox.totalEmails !== 0) {
+      unsafe.push(`held ${describeUntrusted(deletedMailbox.totalEmails)} messages`);
+    }
+    if (deletedMailbox.role !== undefined && deletedMailbox.role !== null) {
+      unsafe.push(`had the role "${describeUntrusted(deletedMailbox.role)}"`);
+    }
+    if (unsafe.length === 0) return { deleted: id, deletedMailbox };
+    return {
+      deleted: id,
+      deletedMailbox,
+      warning:
+        `WARNING: the server destroyed ${label}, which at the moment of the destroy ${unsafe.join(' and ')}. ` +
+        'Its mail may have been removed with it; check Trash and the Fastmail web interface.',
+    };
   }
 
   // With no explicit `mailbox`, applies the same default Trash/Spam exclusion and hidden
