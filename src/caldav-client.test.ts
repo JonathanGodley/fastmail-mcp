@@ -1440,7 +1440,7 @@ describe('CalDAVCalendarClient event lookup', () => {
   // `etagWithheldFrom` does the same for the `getetag` propstat.
   type StoredObject = {
     data?: string; url: string; etag?: string;
-    withheldFrom?: 'query' | 'fetch'; withheldAs?: unknown; etagWithheldFrom?: 'query' | 'fetch';
+    withheldFrom?: 'query' | 'fetch' | 'both'; withheldAs?: unknown; etagWithheldFrom?: 'query' | 'fetch';
   };
 
   function eventIcal(uid: string, summary = 'Meeting'): string {
@@ -1478,7 +1478,7 @@ describe('CalDAVCalendarClient event lookup', () => {
       const objects = byCalendarUrl[(params.calendar as { url?: string })?.url ?? ''] ?? [];
       const answer = (path: 'query' | 'fetch') => ({ withheldFrom, withheldAs, etagWithheldFrom, ...o }: StoredObject) => ({
         ...o,
-        ...(withheldFrom === path ? { data: withheldAs } : {}),
+        ...(withheldFrom === path || withheldFrom === 'both' ? { data: withheldAs } : {}),
         ...(etagWithheldFrom === path ? { etag: undefined } : {}),
       }) as DAVCalendarObject;
       const objectUrls = (params as { objectUrls?: string[] }).objectUrls;
@@ -2382,6 +2382,29 @@ describe('CalDAVCalendarClient event lookup', () => {
     });
     await client.deleteCalendarEvent(SELF_URL);
     assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 1);
+  });
+
+  // Read whole without an etag by the UID query: not a record this server could not read, so the
+  // url fetch's data-less answer for it is not a refusal, and with nothing resolved it is absent.
+  it('does not refuse a record the UID query read whole without an etag that the url fetch could not', async () => {
+    const { client } = makeLookupClient(twoCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e"', etagWithheldFrom: 'query', withheldFrom: 'fetch' }],
+    });
+    await assert.rejects(() => client.deleteCalendarEvent(SELF_URL), (err: Error) => {
+      assert.equal(err.message, `Calendar event not found: "${SELF_URL}"`);
+      return true;
+    });
+  });
+
+  // Unreadable to both paths: one record, named once.
+  it('names a record both paths could not read once', async () => {
+    const { client } = makeLookupClient(twoCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e"', withheldFrom: 'both' }],
+    });
+    await assert.rejects(() => client.deleteCalendarEvent(SELF_URL), (err: Error) => {
+      assert.equal(err.message, unreadableRetryText(SELF_URL, 'delete', `"Personal" ("${SELF_URL}")`));
+      return true;
+    });
   });
 
   it('keeps server-authored names and urls on one line in the unreadable refusal', async () => {
