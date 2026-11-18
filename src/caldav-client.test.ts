@@ -36,6 +36,7 @@ import {
   describeCreateCalendarEventResult,
   describeUpdateCalendarEventResult,
   buildEtcGmtZoneNote,
+  buildMalformedStructureNote,
   unwrapDisplayName,
   BROKEN_COLLECTION_PATH_ECHO_LIMIT,
   CALENDAR_URL_ECHO_LIMIT,
@@ -5700,6 +5701,100 @@ describe('update and whole-event delete refuse a VEVENT nested inside the stored
     const { c, m } = client(SERIES);
     await assert.rejects(() => c.updateCalendarEvent(UID, { title: 'New' }), refusal('write to'));
     nothingWritten(m);
+  });
+});
+
+describe('the read tools flag an event whose data is not well formed (#237)', () => {
+  const CAL_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
+  const NOTE = '\n\nNote: an event marked `malformedStructure` has data that is not well formed, so the details '
+    + 'shown for it may be incomplete, including whether it repeats, who is invited and whether it blocks '
+    + 'the calendar. The Fastmail web interface shows it whole.';
+  const event = (uid: string, inside: string[] = []) => [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', `UID:${uid}`, 'DTSTAMP:20270101T000000Z',
+    'DTSTART:20270104T090000Z', 'DTEND:20270104T100000Z', `SUMMARY:${uid}`, ...inside, 'END:VEVENT', 'END:VCALENDAR',
+  ].join('\r\n');
+  // The layouts the writes refuse, from the #237 block above, with the series rule the nesting hides.
+  const NESTED = ['BEGIN:X-WRAP', 'BEGIN:VEVENT', 'END:VEVENT', 'END:X-WRAP', 'RRULE:FREQ=WEEKLY'];
+  const STRAY = ['BEGIN:X-WRAP', 'END:VEVENT', 'END:X-WRAP'];
+  const PARAMETERISED = ['BEGIN;X-P=1:X-WRAP', 'END;X-P=1:X-WRAP'];
+
+  /** A listing server: `expanded` answers the window query, `stored` the follow-up multiget. */
+  function listingClient(expanded: Array<{ url: string; data: string }>, stored: Record<string, string> = {}) {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: CAL_URL }], {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => withEtags(expanded)),
+      calendarMultiGet: mock.fn(async (params: { objectUrls?: string[] }) => (params.objectUrls ?? []).map(href => ({
+        href,
+        props: { getetag: '"e"', calendarData: { _cdata: stored[new URL(href, CAL_URL).href] ?? event('stored@fm') } },
+      }))),
+    });
+    return client;
+  }
+  const list = (client: CalDAVCalendarClient) =>
+    client.getCalendarEvents(undefined, 50, '2027-01-04T00:00:00Z', '2027-01-05T00:00:00Z');
+
+  // The stored answer is well formed, so only the check on the listing's own payload can flag it.
+  it('flags a listed row whose payload is not well formed, and states the note once', async () => {
+    const result = await list(listingClient([
+      { url: CAL_URL + 'nested.ics', data: event('nested@fm', NESTED) },
+      { url: CAL_URL + 'stray.ics', data: event('stray@fm', STRAY) },
+      { url: CAL_URL + 'fine.ics', data: event('fine@fm') },
+    ]));
+    const byId = Object.fromEntries(result.events.map(e => [e.id, e]));
+    assert.equal(byId['nested@fm'].malformedStructure, true);
+    assert.equal(byId['stray@fm'].malformedStructure, true);
+    assert.equal('malformedStructure' in byId['fine@fm'], false);
+    const text = formatCalendarEventList(result);
+    assert.equal(text.split('Note: an event marked `malformedStructure`').length - 1, 1, text);
+    assert.ok(text.endsWith(NOTE), text);
+  });
+
+  it('flags the event get_calendar_event returns when its stored data is not well formed', async () => {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    (client as any).client = makeMockDAVClient([{ displayName: 'Personal', url: CAL_URL }], {
+      fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [{ data: event('nested@fm', NESTED), url: CAL_URL + 'nested.ics', etag: '"e"' }]),
+    });
+    const { event: read } = await client.getCalendarEventById('nested@fm');
+    assert.equal(read.malformedStructure, true);
+    assert.equal(buildMalformedStructureNote([read]), NOTE);
+  });
+
+  it('flags each layout the writes refuse, and not an ordinary event with sub-components', () => {
+    const flagged = (data: string) => parseCalendarObject({ data, url: CAL_URL + 'x.ics' }).malformedStructure;
+    for (const [label, data] of [
+      ['an event nested inside a component', event('a@fm', NESTED)],
+      ['a component closed out of order', event('b@fm', STRAY)],
+      ['a BEGIN or END line carrying parameters', event('c@fm', PARAMETERISED)],
+      ['no VCALENDAR wrapper', event('d@fm').replace('BEGIN:VCALENDAR\r\n', '').replace('\r\nEND:VCALENDAR', '')],
+      ['an unclosed component', event('e@fm', ['BEGIN:X-OPEN'])],
+    ]) assert.equal(flagged(data), true, label);
+    const ordinary = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0',
+      'BEGIN:VTIMEZONE', 'TZID:Australia/Sydney', 'BEGIN:STANDARD', 'DTSTART:19700405T030000',
+      'TZOFFSETFROM:+1100', 'TZOFFSETTO:+1000', 'END:STANDARD', 'END:VTIMEZONE',
+      'BEGIN:VEVENT', 'UID:ok@fm', 'DTSTART;TZID=Australia/Sydney:20270104T090000', 'SUMMARY:Ok',
+      'BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT15M', 'END:VALARM',
+      'BEGIN:X-EXTRA', 'X-NOTE:kept', 'END:X-EXTRA',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    assert.equal(flagged(ordinary), undefined);
+  });
+
+  // A lone unmarked block is settled from the stored record, which is what carries the nesting
+  // when the server's expansion comes back clean.
+  it('flags a row whose stored record is not well formed when the expansion is', async () => {
+    const result = await list(listingClient(
+      [{ url: CAL_URL + 'nested.ics', data: event('nested@fm') }],
+      { [CAL_URL + 'nested.ics']: event('nested@fm', NESTED) },
+    ));
+    assert.equal(result.events[0].malformedStructure, true);
+  });
+
+  it('does not flag the placeholder row for a record with no readable event', () => {
+    const row = parseCalendarObject({ data: 'BEGIN:VCALENDAR\r\nBEGIN:X-OPEN\r\nEND:VCALENDAR', url: CAL_URL + 'x.ics' });
+    assert.equal(row.title, 'Untitled');
+    assert.equal('malformedStructure' in row, false);
+    assert.equal(buildMalformedStructureNote([row]), '');
   });
 });
 

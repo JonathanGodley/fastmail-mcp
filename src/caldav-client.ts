@@ -91,6 +91,10 @@ export interface CalendarEvent {
   // `Transparency` union, because the account can hold tokens this server never writes.
   // Always present from `get_calendar_event`; listed rows carry it only when not busy.
   transparency?: string;
+  // Set when the payload this row was read from fails `walkICalComponents`, the structure the
+  // writes refuse (#237): fields read block by block may be missing. `buildMalformedStructureNote`
+  // owns the wording. Never on the "Untitled" placeholder, which already reads nothing.
+  malformedStructure?: true;
 }
 
 // `total` is how many matched before the page was cut, since a capped page read as the whole
@@ -1493,6 +1497,18 @@ export function parseCalendarObjects(
     }];
   }
 
+  const events = parseVEventBlocks(obj, blocks, options);
+  if (typeof obj.data === 'string' && !walkICalComponents(obj.data)) {
+    for (const event of events) event.malformedStructure = true;
+  }
+  return events;
+}
+
+function parseVEventBlocks(
+  obj: DAVCalendarObject,
+  blocks: string[],
+  options?: { includeParticipants?: boolean; expanded?: boolean; configuredZone?: string; includeDefaultTransparency?: boolean },
+): CalendarEvent[] {
   if (options?.expanded) {
     const events = blocks.map(b => parseVEvent(obj, b, options));
     if (blockCountProvesSeries(blocks)) {
@@ -3002,6 +3018,8 @@ async function settleAmbiguousRecurrence(
     if (extractVEventBlocks(ical).length === 0) continue;
     answered.add(url);
     if (readsAsRecurringSeries(ical)) for (const row of entry.rows) row.isRecurring = true;
+    // The listing checked the server's expansion; this is the stored record (#237).
+    if (!walkICalComponents(ical)) for (const row of entry.rows) row.malformedStructure = true;
   }
 
   if (answered.size < undecided.size) {
@@ -3659,6 +3677,14 @@ export function buildEtcGmtZoneNote(events: CalendarEvent[]): string {
   if (zones.size === 0) return '';
   const offsets = [...zones].map(z => `${z} is UTC${etcGmtUtcOffset(z)}`);
   return `\n\nNote: ${offsets.join(' and ')}; an Etc/GMT name carries the POSIX sign, the inverse of the offset.`;
+}
+
+/** The trailing note a calendar read carries when any event it returns is `malformedStructure` (#237). */
+export function buildMalformedStructureNote(events: CalendarEvent[]): string {
+  if (!events.some(e => e.malformedStructure)) return '';
+  return '\n\nNote: an event marked `malformedStructure` has data that is not well formed, so the details '
+    + 'shown for it may be incomplete, including whether it repeats, who is invited and whether it blocks '
+    + 'the calendar. The Fastmail web interface shows it whole.';
 }
 
 // The sentence create_calendar_event appends, from the written result only (#157).

@@ -2501,6 +2501,15 @@ with no parseable VEVENT produces (`{ id, url, title: 'Untitled' }`). It is not 
 nothing was read out of. The tool description and `docs/reference/tools.md` carve it out by name rather than
 claiming the field is decided on literally every row.
 
+A row marked `malformedStructure` is the other row whose absences make no claim (#237). Its
+payload fails `walkICalComponents`, so the block-by-block read may have missed the very lines
+an absence would deny. This is not the second meaning for absence refused above: the row says
+so in its own field, and `buildMalformedStructureNote` states once, in a trailing note, what
+that field means, as `buildEtcGmtZoneNote` does for its rows. `parseCalendarObjects` checks
+the payload it parses; `settleAmbiguousRecurrence` checks the stored record it re-reads. A
+multi-block expansion of a series stored malformed is never re-read, so it is not marked on
+the listing; `get_calendar_event`, which reads the stored record, marks it.
+
 ## Local-time formatting and the U+202F trap
 
 Date rendering for humans (`toLocalIso` and `formatReplyDate` in
