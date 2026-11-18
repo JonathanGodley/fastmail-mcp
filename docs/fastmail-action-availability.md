@@ -24,15 +24,15 @@ Every tool in this server acts on a **message**. The client's unit of action is 
 setting*: with conversation grouping on the toolbar acts on the whole conversation, with it off the
 toolbar acts on a single message. Neither is the client's behaviour - each account is configured one
 way or the other, so there is no default mode to treat as canonical and no way to infer which one a
-caller is looking at. Both were measured on the same three-message thread, on 16 August 2026.
+caller is looking at. Both were measured on the same thread, on 16 August 2026.
 
-**Grouped.** Every message filed in `{Inbox, "Pending Orders"}`, archived with one click on the
-thread. All three came back filed in `{"Pending Orders"}` alone: none kept an Inbox membership, and
+**Grouped.** Every message filed in the Inbox and one user label, archived with one click on the
+thread. Every message came back filed in that label alone: none kept an Inbox membership, and
 **none gained Archive**.
 
-**Individual.** The same thread restored to `{Inbox, "Pending Orders"}`, with a single message
-archived. That message came back `{"Pending Orders"}`; the other two were left in
-`{Inbox, "Pending Orders"}`, untouched.
+**Individual.** The same thread restored to the Inbox plus that label, with a single message
+archived. That message came back in the label alone; the others were left in the Inbox plus the
+label, untouched.
 
 Three things follow.
 
@@ -90,8 +90,8 @@ unmeasured, and is not to be inferred from the `snoozed` row (see "Extending thi
 `src/jmap-client.ts` cites this table as the evidence that its refusal set is exactly the set
 that was measured.
 
-**Role mailboxes are not uniformly exclusive.** Two real messages on this account are filed in both
-`snoozed` and `sent`, so "which refusal applies" is a live case rather than a hypothetical. Inbox
+**Role mailboxes are not uniformly exclusive.** Messages filed in both `snoozed` and `sent` were
+observed on this account, so "which refusal applies" is a live case rather than a hypothetical. Inbox
 and Trash are the two that do behave exclusively.
 
 When a message is in two refusing roles, this server picks the first in the fixed order
@@ -110,7 +110,7 @@ only `Inbox ×`.
 
 But **the client cannot produce that state**. Fastmail's own Delete is a whole-value replace: the
 same message, deleted from the client, came back as `roles: ["trash"]` with the Inbox membership
-gone. Trash is a folder in Fastmail's model, not a label. Corroboration: all 37 messages then in the
+gone. Trash is a folder in Fastmail's model, not a label. Corroboration: every message then in the
 Inbox carried `roles: ["inbox"]` and nothing else.
 
 So the toolbar shown for Inbox + Trash is the Inbox view's *default*, not a considered answer, and
@@ -167,12 +167,12 @@ settle whether a grouped account applies a picker choice to every message in the
 
 | Message is filed in | Archive does | Evidence |
 | --- | --- | --- |
-| Inbox + a label | Inbox removed, label kept, **Archive not added** | a newsletter went `{Inbox, Gmail}` → `{Gmail}`, keywords unchanged |
-| Inbox only | **Moves to Archive** | Inbox 43→42, Inbox-only 31→30, Archive 15843→15844 |
+| Inbox + a label | Inbox removed, label kept, **Archive not added** | a newsletter went from the Inbox plus a user label to that label alone, keywords unchanged |
+| Inbox only | **Moves to Archive** | the Inbox and Inbox-only counts each fell by one, and the Archive count rose by one |
 | A label only, no Inbox | **Nothing**; the UI says "already archived" | re-archiving changed no mailbox and no count |
 
 Account-wide corroboration for the first row: `Email/query` for "in Archive AND in at least one
-other mailbox" returns **0 of 15,843**. Fastmail never creates an Archive-plus-label message.
+other mailbox" matches **none of the Archive's messages**. Fastmail never creates an Archive-plus-label message.
 
 **Mode dependence.** Fastmail's own MCP describes the operation as "in folders mode the emails are
 moved to the Archive folder; in labels mode the Inbox label is removed and any user-applied labels
@@ -523,7 +523,7 @@ read.
 **Dated, not permanent.** One account, one day. A task list that a CalDAV to-do app creates later
 would change the answer, so re-run the probe rather than cite this as settled. **What it does not
 cover** is any other account, and a task collection renamed away from `DEFAULT_TASK_CALENDAR_NAME`:
-none was present here, so whether such a collection still declares `VTODO` was not measured.
+none was identifiable here, so whether such a collection still declares `VTODO` was not measured.
 
 ## Authoring: what a reply prefills as recipients
 
