@@ -9945,10 +9945,10 @@ describe('parseCalendarObjects', () => {
     // only the first block here would report one event where the window holds three.
     const occurrence = (date: string) => [
       'BEGIN:VEVENT',
-      'UID:payday@fm',
+      'UID:fortnightly@fm',
       `DTSTART;VALUE=DATE:${date}`,
       `RECURRENCE-ID;VALUE=DATE:${date}`,
-      'SUMMARY:Pay Day',
+      'SUMMARY:Fortnightly event',
       'END:VEVENT',
     ].join('\r\n');
     const data = [
@@ -9959,11 +9959,11 @@ describe('parseCalendarObjects', () => {
       'END:VCALENDAR',
     ].join('\r\n');
 
-    const events = parseCalendarObjects({ data, url: '/cal/payday.ics' }, { expanded: true });
+    const events = parseCalendarObjects({ data, url: '/cal/fortnightly.ics' }, { expanded: true });
 
     // The same blob read WITHOUT the flag also yields three: no block lacks a RECURRENCE-ID,
     // so the unexpanded path sees a resource of detached overrides and emits each of them.
-    assert.equal(parseCalendarObjects({ data, url: '/cal/payday.ics' }).length, 3);
+    assert.equal(parseCalendarObjects({ data, url: '/cal/fortnightly.ics' }).length, 3);
 
     assert.equal(events.length, 3);
     assert.deepEqual(events.map(e => e.start), ['2027-03-05', '2027-03-19', '2027-04-02']);
@@ -9972,7 +9972,7 @@ describe('parseCalendarObjects', () => {
       assert.equal(e.isRecurring, true);
       // An expanded occurrence has no rule of its own; the server already applied it.
       assert.equal(e.recurrenceRule, undefined);
-      assert.equal(e.title, 'Pay Day');
+      assert.equal(e.title, 'Fortnightly event');
     }
   });
 
