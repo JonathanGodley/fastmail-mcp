@@ -332,6 +332,7 @@ try {
   }
 
   // The same request through the call production makes, classified as production classifies it.
+  // Mirrors `findCalendarObjectByUID`'s url fetch and `isAddressedResourceMissing` in src/caldav-client.ts.
   let productionOutcome;
   try {
     const objects = await client.fetchCalendarObjects({ calendar, objectUrls: [missingHref] });
