@@ -2,7 +2,7 @@ import { InvalidInputError, coerceBool, coercePosition, coerceStringArrayStrict,
 import { parseEmailFields } from './field-projection.js';
 import { buildExclusionNote, formatEmailQueryResult, formatRawQueryResult } from './response-formatters.js';
 import { EMAIL_SORT_VALUES } from './jmap-client.js';
-import type { EmailSortBy, JmapClient } from './jmap-client.js';
+import type { EmailSortBy, JmapClient, KeywordFilters } from './jmap-client.js';
 import type { ToolContent } from './contacts-handler.js';
 
 /**
@@ -39,6 +39,16 @@ export function normalizeSortBy(value: unknown): EmailSortBy | undefined {
   return match;
 }
 
+// No `?? false` here: absent or null must stay undefined, which adds no condition.
+function readKeywordFilters(a: any): KeywordFilters {
+  return {
+    isUnread: coerceBool(a.isUnread, 'isUnread'),
+    isPinned: coerceBool(a.isPinned, 'isPinned'),
+    isAnswered: coerceBool(a.isAnswered, 'isAnswered'),
+    isForwarded: coerceBool(a.isForwarded, 'isForwarded'),
+  };
+}
+
 export async function listEmailsTool(args: any, limit: number, client: EmailListClient): Promise<ToolContent> {
   const a = args ?? {};
   const { mailbox } = a;
@@ -53,6 +63,7 @@ export async function listEmailsTool(args: any, limit: number, client: EmailList
     position,
     ascending,
     sortBy,
+    ...readKeywordFilters(a),
     includeTrash: coerceBool(a.includeTrash, 'includeTrash') ?? false,
     includeSpam: coerceBool(a.includeSpam, 'includeSpam') ?? false,
     excludeDrafts: coerceBool(a.excludeDrafts, 'excludeDrafts') ?? false,
@@ -63,7 +74,7 @@ export async function listEmailsTool(args: any, limit: number, client: EmailList
 
 export async function searchEmailsTool(args: any, limit: number, client: EmailListClient): Promise<ToolContent> {
   const a = args ?? {};
-  const { query, from, to, cc, bcc, subject, hasAttachment, isUnread, isPinned, mailbox, after, before } = a;
+  const { query, from, to, cc, bcc, subject, hasAttachment, mailbox, after, before } = a;
   const ascending = coerceBool(a.ascending, 'ascending') ?? false;
   const sortBy = normalizeSortBy(a.sortBy);
   const raw = coerceBool(a.raw, 'raw') ?? false;
@@ -75,10 +86,7 @@ export async function searchEmailsTool(args: any, limit: number, client: EmailLi
   const result = await client.searchEmails({
     query, from, to, cc, bcc, subject,
     hasAttachment: coerceBool(hasAttachment, 'hasAttachment'),
-    isUnread: coerceBool(isUnread, 'isUnread'),
-    isPinned: coerceBool(isPinned, 'isPinned'),
-    isAnswered: coerceBool(a.isAnswered, 'isAnswered'),
-    isForwarded: coerceBool(a.isForwarded, 'isForwarded'),
+    ...readKeywordFilters(a),
     mailbox, requiredMailboxes, excludeMailboxes,
     after, before, limit, position,
     ascending,

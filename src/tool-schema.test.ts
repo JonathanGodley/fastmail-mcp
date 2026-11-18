@@ -1536,6 +1536,52 @@ describe('the listed paged tools declare position', () => {
   });
 });
 
+const KEYWORD_FLAGS = ['isUnread', 'isPinned', 'isAnswered', 'isForwarded'];
+const KEYWORD_FLAG_TOOLS = ['list_emails', 'search_emails'];
+
+describe('list_emails and search_emails take the same keyword filters', () => {
+  it('declares all four on both tools', () => {
+    const params = collectToolParams();
+    const missing = KEYWORD_FLAG_TOOLS.flatMap((tool) =>
+      KEYWORD_FLAGS.filter((flag) => !params.get(tool)?.has(flag)).map((flag) => `${tool}.${flag}`));
+    assert.deepEqual(missing, [], `these keyword filters are missing from the schema: ${missing.join(', ')}`);
+  });
+});
+
+// The isAnswered/isForwarded descriptions say the mark is per stored copy "(see the tool
+// description)", so every tool declaring them has to carry KEYWORD_MARK_CAVEAT in its own.
+describe('the per-stored-copy caveat is in every tool description that points to it', () => {
+  it('appends KEYWORD_MARK_CAVEAT to list_emails and search_emails, and it still says so', () => {
+    const lines = readLines('index.ts');
+    const def = lines.findIndex((l) => l === 'const KEYWORD_MARK_CAVEAT =');
+    assert.notEqual(def, -1, 'could not find `const KEYWORD_MARK_CAVEAT =` in src/index.ts');
+    assert.match(
+      lines[def + 1],
+      /isAnswered\/isForwarded test a mark kept per stored copy/,
+      'KEYWORD_MARK_CAVEAT no longer says the mark is kept per stored copy, which is what the ' +
+        'isAnswered/isForwarded parameter descriptions send a caller to the tool description for',
+    );
+
+    const declaring = [...collectToolParams()]
+      .filter(([, declared]) => declared.has('isAnswered') || declared.has('isForwarded'))
+      .map(([tool]) => tool)
+      .sort();
+    assert.deepEqual(declaring, KEYWORD_FLAG_TOOLS, 'the tools declaring isAnswered/isForwarded changed; check each carries the caveat');
+
+    const missing: string[] = [];
+    for (const tool of declaring) {
+      const nameLine = lines.findIndex((l) => l === `        name: '${tool}',`);
+      let description: string | undefined;
+      for (let i = nameLine + 1; i < lines.length && !lines[i].includes('inputSchema:'); i++) {
+        if (lines[i].trim().startsWith('description:')) { description = lines[i]; break; }
+      }
+      assert.ok(description, `could not find the tool description of ${tool} in src/index.ts`);
+      if (!description.includes('+ KEYWORD_MARK_CAVEAT +')) missing.push(tool);
+    }
+    assert.deepEqual(missing, [], `these tool descriptions do not carry KEYWORD_MARK_CAVEAT: ${missing.join(', ')}`);
+  });
+});
+
 // No surface says a {{signature}} expansion withholds the body hash (#214); one that did would
 // send a caller to a read it does not need. Each file is checked to carry `bodyHash` at all, so
 // a wrong path cannot pass empty.

@@ -8,8 +8,8 @@
 //   that are actually in that window?
 //
 // The two halves of #64 failed at different layers (no expand was requested, and the parser
-// read only the first VEVENT), and either alone reproduces the symptom (1-10 March 2027
-// returned a single event dated 2020-08-28), so only the end-to-end path proves both are
+// read only the first VEVENT), and either alone reproduces the symptom (a 1-10 March 2027
+// window returned an event dated years before it), so only the end-to-end path proves both are
 // closed.
 //
 // This spawns the BUILT server (dist/index.js) through the shared MCP harness and asserts on

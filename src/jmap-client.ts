@@ -278,6 +278,27 @@ export const EMAIL_PROPERTIES_COMPACT = [
 export const EMAIL_SORT_VALUES = ['date', 'sentAt', 'size', 'from', 'to', 'subject'] as const;
 export type EmailSortBy = typeof EMAIL_SORT_VALUES[number];
 
+export interface KeywordFilters {
+  isUnread?: boolean;
+  isPinned?: boolean;
+  isAnswered?: boolean;
+  isForwarded?: boolean;
+}
+
+// One condition per keyword: a FilterCondition holds at most one hasKeyword and one notKeyword.
+function keywordConditions(f: KeywordFilters): any[] {
+  const conds: any[] = [];
+  if (f.isUnread === true) conds.push({ notKeyword: '$seen' });
+  else if (f.isUnread === false) conds.push({ hasKeyword: '$seen' });
+  if (f.isPinned === true) conds.push({ hasKeyword: '$flagged' });
+  else if (f.isPinned === false) conds.push({ notKeyword: '$flagged' });
+  if (f.isAnswered === true) conds.push({ hasKeyword: '$answered' });
+  else if (f.isAnswered === false) conds.push({ notKeyword: '$answered' });
+  if (f.isForwarded === true) conds.push({ hasKeyword: '$forwarded' });
+  else if (f.isForwarded === false) conds.push({ notKeyword: '$forwarded' });
+  return conds;
+}
+
 // VERBOSE: superset with body properties, for verbose mode, getEmailById and getThread's
 // includeBodies mode (#74). The two provenance headers are deliberately VERBOSE-tier, not
 // COMPACT: their values matter only when operating on one draft, so an ordinary thread
@@ -2019,7 +2040,7 @@ export class JmapClient {
 
   // With no explicit `mailbox`, applies the same default Trash/Spam exclusion and hidden
   // count as searchEmails.
-  async getEmails(opts: {
+  async getEmails(opts: KeywordFilters & {
     mailbox?: string;
     limit?: number;
     position?: number;
@@ -2035,7 +2056,7 @@ export class JmapClient {
     const base: any = {};
     if (resolvedMailboxId) base.inMailbox = resolvedMailboxId;
 
-    const conds: any[] = [];
+    const conds: any[] = keywordConditions(opts);
     if (opts.excludeDrafts) conds.push({ notKeyword: '$draft' });
 
     // searchEmails has its OWN copy of this line; change both when what counts as an
@@ -4726,7 +4747,6 @@ export class JmapClient {
     const allExcludeIds = [...exclusion.excludeIds, ...callerExcludeIds];
     if (allExcludeIds.length > 0) base.inMailboxOtherThan = allExcludeIds;
 
-    // One condition per keyword: a FilterCondition allows only one hasKeyword/notKeyword.
     const combine = (b: any, c: any[], bEmpty: boolean) =>
       c.length === 0 ? b
       : (bEmpty && c.length === 1) ? c[0]
@@ -4812,7 +4832,7 @@ export class JmapClient {
     return result;
   }
 
-  async searchEmails(filters: {
+  async searchEmails(filters: KeywordFilters & {
     query?: string;
     from?: string;
     to?: string;
@@ -4820,10 +4840,6 @@ export class JmapClient {
     bcc?: string;
     subject?: string;
     hasAttachment?: boolean;
-    isUnread?: boolean;
-    isPinned?: boolean;
-    isAnswered?: boolean;
-    isForwarded?: boolean;
     mailbox?: string;
     requiredMailboxes?: string[];
     excludeMailboxes?: string[];
@@ -4866,16 +4882,7 @@ export class JmapClient {
     if (before) base.before = before;
     if (resolvedMailboxId) base.inMailbox = resolvedMailboxId;
 
-    // Each keyword is its own condition: a FilterCondition holds at most one hasKeyword and one notKeyword.
-    const conds: any[] = [];
-    if (filters.isUnread === true) conds.push({ notKeyword: '$seen' });
-    else if (filters.isUnread === false) conds.push({ hasKeyword: '$seen' });
-    if (filters.isPinned === true) conds.push({ hasKeyword: '$flagged' });
-    else if (filters.isPinned === false) conds.push({ notKeyword: '$flagged' });
-    if (filters.isAnswered === true) conds.push({ hasKeyword: '$answered' });
-    else if (filters.isAnswered === false) conds.push({ notKeyword: '$answered' });
-    if (filters.isForwarded === true) conds.push({ hasKeyword: '$forwarded' });
-    else if (filters.isForwarded === false) conds.push({ notKeyword: '$forwarded' });
+    const conds: any[] = keywordConditions(filters);
     if (filters.excludeDrafts) conds.push({ notKeyword: '$draft' });
     // inMailbox is SINGULAR (RFC 8621 §4.4.1): N AND-ed conditions, not an array.
     for (const id of requiredMailboxIds) conds.push({ inMailbox: id });
