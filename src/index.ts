@@ -446,6 +446,17 @@ const INCLUDE_SPAM_DESC =
 const ASCENDING_DESC =
   lenientBool('Sort ascending instead of descending (default: false). The default is newest first for date/sentAt, largest first for size, and Z to A for from/to/subject; true reverses it. Messages with an equal key stay newest first either way.');
 
+// Shared by list_emails and search_emails. Both tool descriptions must carry
+// KEYWORD_MARK_CAVEAT, because the isAnswered/isForwarded descriptions point to it.
+const IS_UNREAD_DESC = lenientBool('true = only unread; false = only read');
+const IS_PINNED_DESC = lenientBool('true = only pinned/flagged; false = only un-pinned');
+const IS_ANSWERED_DESC =
+  lenientBool('true = only messages marked replied-to ($answered); false = only messages without that mark. false is not "awaiting my reply": it also matches your own sent mail, drafts and newsletters, so pair it with mailbox:"inbox". The mark is per stored copy (see the tool description).');
+const IS_FORWARDED_DESC =
+  lenientBool('true = only messages marked forwarded ($forwarded); false = only messages without that mark. The mark is per stored copy (see the tool description).');
+const KEYWORD_MARK_CAVEAT =
+  'isAnswered/isForwarded test a mark kept per stored copy: replying marks only the copy replied to, so other copies of that message (a duplicate delivery, a copy in another folder) and earlier messages in the thread still match isAnswered:false, and a reply sent by something that never sets the mark on this mailbox is not recorded (any client on this account that sets IMAP \\Answered does set it).';
+
 const SORT_BY_DESC =
   'What to order results by (default: "date", the received time shown as `date`). "sentAt" is the send time the sender claims; it is returned only when named in fields. "size" is the whole message in bytes. "from"/"to" compare the first address\'s display name, or the address when it has none, ignoring case. "subject" uses the server\'s own subject ordering, which ignores leading Re:/Fwd:; the exact collation is the server\'s. A message with no From, To or Subject sorts as empty for that sort. Direction comes from ascending.';
 
@@ -841,7 +852,7 @@ const TOOLS = [
       },
       {
         name: 'list_emails',
-        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. ' + SCOPE_RELIABILITY_CONTRACT + ' One mailbox is all this tool scopes to: to intersect several mailboxes or exclude some, use search_emails (requiredMailboxes / excludeMailboxes) with no query. Pass a small limit (e.g. 10) for a quick "what\'s new" look; a larger one to work through a folder. Results come newest first; sortBy orders them by sentAt, size, from, to or subject instead, e.g. sortBy:"size" with a mailbox for the largest messages in that folder. This is not an arrivals feed: "all mailboxes" means every folder except Trash and Spam, so Sent copies, drafts and custom folders come back alongside newly received mail — pass mailbox:"inbox" for delivered mail only. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LIST_SENT_AT_DESC + ' ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        description: 'List recent emails across all mailboxes (or one, via mailbox). Trash and Spam are excluded by default (set includeTrash/includeSpam to include them); drafts are included (set excludeDrafts to omit them). Set mailbox to scope to a single mailbox (incl. Trash/Spam), which ignores the default exclusion. isUnread, isPinned, isAnswered and isForwarded narrow the results to mail with or without those marks, as on search_emails; each is ANDed with mailbox and with the default exclusion, so the withheld-count note counts only matching mail. ' + KEYWORD_MARK_CAVEAT + ' ' + SCOPE_RELIABILITY_CONTRACT + ' One mailbox is all this tool scopes to: to intersect several mailboxes or exclude some, use search_emails (requiredMailboxes / excludeMailboxes) with no query. Pass a small limit (e.g. 10) for a quick "what\'s new" look; a larger one to work through a folder. Results come newest first; sortBy orders them by sentAt, size, from, to or subject instead, e.g. sortBy:"size" with a mailbox for the largest messages in that folder. This is not an arrivals feed: "all mailboxes" means every folder except Trash and Spam, so Sent copies, drafts and custom folders come back alongside newly received mail — pass mailbox:"inbox" for delivered mail only. Returns simplified format (metadata + preview, no bodies). Use raw=true for original JMAP response. For email bodies, use get_email. The date field is rendered in local time with a UTC offset (e.g. 2026-03-02T08:00:00+10:00), not UTC; raw=true returns the canonical JMAP UTC time. ' + LIST_SENT_AT_DESC + ' ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -863,6 +874,22 @@ const TOOLS = [
               type: 'string',
               enum: [...EMAIL_SORT_VALUES],
               description: SORT_BY_DESC,
+            },
+            isUnread: {
+              type: ['boolean', 'string'],
+              description: IS_UNREAD_DESC,
+            },
+            isPinned: {
+              type: ['boolean', 'string'],
+              description: IS_PINNED_DESC,
+            },
+            isAnswered: {
+              type: ['boolean', 'string'],
+              description: IS_ANSWERED_DESC,
+            },
+            isForwarded: {
+              type: ['boolean', 'string'],
+              description: IS_FORWARDED_DESC,
             },
             excludeDrafts: {
               type: ['boolean', 'string'],
@@ -1091,8 +1118,9 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        // One search tool (#12): anything new is a parameter on this tool.
-        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion; requiredMailboxes/excludeMailboxes scope across several mailboxes at once. isAnswered/isForwarded test a mark kept per stored copy: replying marks only the copy replied to, so other copies of that message (a duplicate delivery, a copy in another folder) and earlier messages in the thread still match isAnswered:false, and a reply sent by something that never sets the mark on this mailbox is not recorded (any client on this account that sets IMAP \\Answered does set it). ' + SEARCH_SCOPE_RELIABILITY_CONTRACT + ` Recovery example: if a search returns a "2 ${excludedCountPhrase('Trash/Spam')}" note, re-run with includeTrash:true (or mailbox:"trash") to find the deleted message.` + ' Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LIST_SENT_AT_DESC + ' ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). Results come newest first; sortBy orders them by sentAt, size, from, to or subject instead, e.g. sortBy:"size" for the largest messages first. limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
+        // One search tool (#12): a new filter is a parameter here. list_emails carries only
+        // the four keyword flags.
+        description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion; requiredMailboxes/excludeMailboxes scope across several mailboxes at once. ' + KEYWORD_MARK_CAVEAT + ' ' + SEARCH_SCOPE_RELIABILITY_CONTRACT + ` Recovery example: if a search returns a "2 ${excludedCountPhrase('Trash/Spam')}" note, re-run with includeTrash:true (or mailbox:"trash") to find the deleted message.` + ' Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LIST_SENT_AT_DESC + ' ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). Results come newest first; sortBy orders them by sentAt, size, from, to or subject instead, e.g. sortBy:"size" for the largest messages first. limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',
           properties: {
@@ -1126,19 +1154,19 @@ const TOOLS = [
             },
             isUnread: {
               type: ['boolean', 'string'],
-              description: lenientBool('true = only unread; false = only read'),
+              description: IS_UNREAD_DESC,
             },
             isPinned: {
               type: ['boolean', 'string'],
-              description: lenientBool('true = only pinned/flagged; false = only un-pinned'),
+              description: IS_PINNED_DESC,
             },
             isAnswered: {
               type: ['boolean', 'string'],
-              description: lenientBool('true = only messages marked replied-to ($answered); false = only messages without that mark. false is not "awaiting my reply": it also matches your own sent mail, drafts and newsletters, so pair it with mailbox:"inbox". The mark is per stored copy (see the tool description).'),
+              description: IS_ANSWERED_DESC,
             },
             isForwarded: {
               type: ['boolean', 'string'],
-              description: lenientBool('true = only messages marked forwarded ($forwarded); false = only messages without that mark. The mark is per stored copy (see the tool description).'),
+              description: IS_FORWARDED_DESC,
             },
             mailbox: {
               type: 'string',

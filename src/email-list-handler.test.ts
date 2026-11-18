@@ -64,6 +64,10 @@ describe('listEmailsTool', () => {
       position: undefined,
       ascending: false,
       sortBy: undefined,
+      isUnread: undefined,
+      isPinned: undefined,
+      isAnswered: undefined,
+      isForwarded: undefined,
       includeTrash: false,
       includeSpam: false,
       excludeDrafts: false,
@@ -81,6 +85,10 @@ describe('listEmailsTool', () => {
       position: undefined,
       ascending: false,
       sortBy: undefined,
+      isUnread: undefined,
+      isPinned: undefined,
+      isAnswered: undefined,
+      isForwarded: undefined,
       includeTrash: false,
       includeSpam: false,
       excludeDrafts: false,
@@ -91,6 +99,7 @@ describe('listEmailsTool', () => {
     const stub = stubClient();
     await listEmailsTool({
       ascending: 'true', includeTrash: 'TRUE', includeSpam: '1', excludeDrafts: 'true', position: '8',
+      isUnread: 'false', isPinned: '1', isAnswered: '0', isForwarded: 'true',
     }, 20, stub.client);
     assert.deepEqual(stub.getEmails.mock.calls[0].arguments, [{
       mailbox: undefined,
@@ -98,6 +107,10 @@ describe('listEmailsTool', () => {
       position: 8,
       ascending: true,
       sortBy: undefined,
+      isUnread: false,
+      isPinned: true,
+      isAnswered: false,
+      isForwarded: true,
       includeTrash: true,
       includeSpam: true,
       excludeDrafts: true,
@@ -148,6 +161,7 @@ describe('listEmailsTool', () => {
   it('checks its arguments in a fixed order', async () => {
     await assertCheckOrder(listEmailsTool, [
       ['ascending', 'x'], ['sortBy', 'x'], ['raw', 'x'], ['fields', 'nope'], ['position', -1],
+      ['isUnread', 'x'], ['isPinned', 'x'], ['isAnswered', 'x'], ['isForwarded', 'x'],
       ['includeTrash', 'x'], ['includeSpam', 'x'], ['excludeDrafts', 'x'],
     ]);
   });
@@ -296,29 +310,13 @@ describe('searchEmailsTool', () => {
     ]);
   });
 
-  // The string "false" is the case a bare `!!` read inverts, and the source-text guard
-  // cannot see a `!!a.x` read, so this is where that mistake goes red.
-  it('reads isAnswered and isForwarded through the lenient boolean, "false" included', async () => {
+  it('names its own argument when refusing hasAttachment', async () => {
     const stub = stubClient();
-    await searchEmailsTool({ isAnswered: 'false', isForwarded: '1' }, 20, stub.client);
-    await searchEmailsTool({ isAnswered: 'TRUE', isForwarded: 0 }, 20, stub.client);
-    const [first, second] = stub.searchEmails.mock.calls.map((c) => c.arguments[0]!);
-    assert.equal(first.isAnswered, false);
-    assert.equal(first.isForwarded, true);
-    assert.equal(second.isAnswered, true);
-    assert.equal(second.isForwarded, false);
-  });
-
-  it('names its own argument when refusing a filter flag', async () => {
-    for (const flag of ['hasAttachment', 'isUnread', 'isPinned', 'isAnswered', 'isForwarded']) {
-      const stub = stubClient();
-      await assert.rejects(
-        () => searchEmailsTool({ [flag]: 'maybe' }, 20, stub.client),
-        (err: Error) => err.name === 'InvalidInputError' && err.message.startsWith(`${flag} must be true or false`),
-        flag,
-      );
-      assert.equal(calls(stub), 0, flag);
-    }
+    await assert.rejects(
+      () => searchEmailsTool({ hasAttachment: 'maybe' }, 20, stub.client),
+      (err: Error) => err.name === 'InvalidInputError' && err.message.startsWith('hasAttachment must be true or false'),
+    );
+    assert.equal(calls(stub), 0);
   });
 });
 
@@ -393,7 +391,10 @@ describe('listEmailsTool and searchEmailsTool', () => {
       });
 
       it('rejects an uncoercible flag naming it', async () => {
-        for (const flag of ['ascending', 'raw', 'includeTrash', 'includeSpam', 'excludeDrafts']) {
+        for (const flag of [
+          'ascending', 'raw', 'includeTrash', 'includeSpam', 'excludeDrafts',
+          'isUnread', 'isPinned', 'isAnswered', 'isForwarded',
+        ]) {
           const stub = stubClient();
           await assert.rejects(
             () => run({ [flag]: 'maybe' }, 20, stub.client),
@@ -402,6 +403,22 @@ describe('listEmailsTool and searchEmailsTool', () => {
           );
           assert.equal(calls(stub), 0, flag);
         }
+      });
+
+      // The string "false" is the case a bare `!!` read inverts, and the source-text guard
+      // cannot see a `!!a.x` read, so this is where that mistake goes red.
+      it('reads the keyword filters through the lenient boolean, "false" included', async () => {
+        const stub = stubClient();
+        await run({ isUnread: 'false', isPinned: '1', isAnswered: 'false', isForwarded: 'TRUE' }, 20, stub.client);
+        await run({ isUnread: 'TRUE', isPinned: 0, isAnswered: '1', isForwarded: 'false' }, 20, stub.client);
+        const sent = [...stub.getEmails.mock.calls, ...stub.searchEmails.mock.calls].map((c) => c.arguments[0]!);
+        assert.equal(sent.length, 2);
+        const pick = ({ isUnread, isPinned, isAnswered, isForwarded }: typeof sent[number]) =>
+          ({ isUnread, isPinned, isAnswered, isForwarded });
+        assert.deepEqual(sent.map(pick), [
+          { isUnread: false, isPinned: true, isAnswered: false, isForwarded: true },
+          { isUnread: true, isPinned: false, isAnswered: true, isForwarded: false },
+        ]);
       });
     });
   }
