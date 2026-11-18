@@ -1488,7 +1488,7 @@ export function parseCalendarObjects(
 ): CalendarEvent[] {
   // `blocks` lets the listing path, which counts blocks first (CALENDAR_MAX_OCCURRENCES_PER_SERIES),
   // pass its extraction through: one walk of a large payload, one definition of a block.
-  const blocks = options?.blocks ?? extractAllVEvents(obj.data || '');
+  const blocks = options?.blocks ?? extractAllVEvents(typeof obj.data === 'string' ? obj.data : '');
   if (blocks.length === 0) {
     return [{
       id: obj.url || '',
@@ -3721,8 +3721,7 @@ export function buildEtcGmtZoneNote(events: CalendarEvent[]): string {
 export function buildMalformedStructureNote(events: CalendarEvent[]): string {
   if (!events.some(e => e.malformedStructure)) return '';
   return '\n\nNote: an event marked `malformedStructure` has data that is not well formed, so the details '
-    + 'shown for it may be incomplete, including whether it repeats, who is invited and whether it blocks '
-    + 'the calendar. The Fastmail web interface shows it whole.';
+    + 'shown for it may be incomplete.';
 }
 
 // The sentence create_calendar_event appends, from the written result only (#157).
@@ -4071,7 +4070,8 @@ export class CalDAVCalendarClient {
       const undecided = new Map<string, UndecidedResource>();
       for (const obj of objects) {
         // ONE structural extraction per resource, counted here and handed to the parser.
-        const blocks = extractVEventBlocks(obj.data || '');
+        // Not a string for an empty calendar-data element; see isReadableHit.
+        const blocks = extractVEventBlocks(typeof obj.data === 'string' ? obj.data : '');
         if (blocks.length > CALENDAR_MAX_OCCURRENCES_PER_SERIES) {
           // THE CALL FAILS on the first such resource, rather than burying the omission under a
           // complete-looking listing. Title and id come from the first block, without a parse.

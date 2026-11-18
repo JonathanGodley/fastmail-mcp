@@ -2495,8 +2495,8 @@ field left off: absence of `isRecurring` is the tool's statement that an event d
 repeat, so a row that silently loses the field reports a repeating event as a one-off inside a
 response that looks complete — and the caller most likely to be asking is asking whether a
 slot is free. A failed follow-up is the same class of failure as the expanded fetch itself
-failing, and is reported the same way rather than through a new output field that would give
-absence a second meaning. "Incomplete" includes a response that arrives carrying no readable
+failing, and is reported the same way rather than by leaving the field off rows that say
+nothing about why. "Incomplete" includes a response that arrives carrying no readable
 VEVENT — an empty `<C:calendar-data/>` or an empty VCALENDAR. Component markers are read in
 any case (RFC 5545 §3.1), so a lower-cased payload is readable. `readsAsRecurringSeries`,
 the position-aware test this path uses (`isRecurringSeriesResource` serves only the
@@ -2504,7 +2504,7 @@ update/delete refusal), answers false for both, and false on this
 path is a positive claim about the calendar rather than the fail-closed refusal it is on the
 write path.
 
-The one row that carries no recurrence claim in either direction is the placeholder a resource
+One row that carries no recurrence claim in either direction is the placeholder a resource
 with no parseable VEVENT produces (`{ id, url, title: 'Untitled' }`). It is not set to
 `isRecurring: false`: "does not repeat" would be as unfounded as "does", said about a record
 nothing was read out of. The tool description and `docs/reference/tools.md` carve it out by name rather than
@@ -2512,8 +2512,8 @@ claiming the field is decided on literally every row.
 
 A row marked `malformedStructure` is the other row whose absences make no claim (#237). Its
 payload fails `walkICalComponents`, so the block-by-block read may have missed the very lines
-an absence would deny. This is not the second meaning for absence refused above: the row says
-so in its own field, and `buildMalformedStructureNote` states once, in a trailing note, what
+an absence would deny. This is not the silent absence refused above: the row says so in its
+own field, and `buildMalformedStructureNote` states once, in a trailing note, what
 that field means, as `buildEtcGmtZoneNote` does for its rows. `parseCalendarObjects` checks
 the payload it parses; `settleAmbiguousRecurrence` checks the stored record it re-reads. A
 multi-block expansion of a series stored malformed is never re-read, so it is not marked on

@@ -5863,8 +5863,7 @@ describe('update and whole-event delete refuse a VEVENT nested inside the stored
 describe('the read tools flag an event whose data is not well formed (#237)', () => {
   const CAL_URL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
   const NOTE = '\n\nNote: an event marked `malformedStructure` has data that is not well formed, so the details '
-    + 'shown for it may be incomplete, including whether it repeats, who is invited and whether it blocks '
-    + 'the calendar. The Fastmail web interface shows it whole.';
+    + 'shown for it may be incomplete.';
   const event = (uid: string, inside: string[] = []) => [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', `UID:${uid}`, 'DTSTAMP:20270101T000000Z',
     'DTSTART:20270104T090000Z', 'DTEND:20270104T100000Z', `SUMMARY:${uid}`, ...inside, 'END:VEVENT', 'END:VCALENDAR',
@@ -5923,6 +5922,8 @@ describe('the read tools flag an event whose data is not well formed (#237)', ()
       ['a BEGIN or END line carrying parameters', event('c@fm', PARAMETERISED)],
       ['no VCALENDAR wrapper', event('d@fm').replace('BEGIN:VCALENDAR\r\n', '').replace('\r\nEND:VCALENDAR', '')],
       ['an unclosed component', event('e@fm', ['BEGIN:X-OPEN'])],
+      // Every marker nests; only the end of the data shows the VCALENDAR still open.
+      ['no END:VCALENDAR', event('f@fm').replace('\r\nEND:VCALENDAR', '')],
     ]) assert.equal(flagged(data), true, label);
     const ordinary = [
       'BEGIN:VCALENDAR', 'VERSION:2.0',
@@ -5944,6 +5945,23 @@ describe('the read tools flag an event whose data is not well formed (#237)', ()
       { [CAL_URL + 'nested.ics']: event('nested@fm', NESTED) },
     ));
     assert.equal(result.events[0].malformedStructure, true);
+  });
+
+  // tsdav makes an empty `<c:calendar-data/>` into `{}`, which is no payload to read.
+  it('gives a resource whose payload is not a string the placeholder row', async () => {
+    const placeholder = { id: CAL_URL + 'empty.ics', url: CAL_URL + 'empty.ics', title: 'Untitled' };
+    const result = await list(listingClient([
+      { url: CAL_URL + 'empty.ics', data: {} as unknown as string },
+      { url: CAL_URL + 'fine.ics', data: event('fine@fm') },
+    ])).catch((err: unknown) => assert.fail(`the listing threw: ${err}`));
+    assert.deepEqual(result.events.find(e => e.url === CAL_URL + 'empty.ics'), placeholder);
+    let row: unknown;
+    try {
+      row = parseCalendarObject({ data: {} as unknown as string, url: CAL_URL + 'empty.ics' });
+    } catch (err) {
+      assert.fail(`the parse threw: ${err}`);
+    }
+    assert.deepEqual(row, placeholder);
   });
 
   it('does not flag the placeholder row for a record with no readable event', () => {
