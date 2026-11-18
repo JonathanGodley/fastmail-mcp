@@ -502,6 +502,24 @@ Two consequences for any probe at this host that reads a status code:
 **What this does not settle** is the proxy's routing table. Which prefixes reach the backend was not
 enumerated — only that `/dav/` does, and that two root paths do not.
 
+## The platform: what a task collection declares
+
+This server tells a task collection from an event calendar by its display name alone
+(`DEFAULT_TASK_CALENDAR_NAME`); #197 asks whether the collection's declared component set would be
+the better signal.
+
+**Measured on 16 November 2026** by `scripts/probes/calendar-component-set.probe.mjs` — raw
+`PROPFIND` over bare `fetch`, one account, read-only. Every calendar collection in the calendar home
+declared `VEVENT` only in `CALDAV:supported-calendar-component-set`, and none carried the display
+name `DEFAULT_TASK_CALENDAR_NAME`. The only other entries were the scheduling inbox and outbox.
+
+**Documented by Fastmail, not measured.** Fastmail's help centre (fastmail.help article
+1500000279841, read 19 November 2026) says the backend supports `VTODO` and `VJOURNAL` for a
+compatible CalDAV client, that this is not thoroughly tested, and that there is no frontend support.
+
+**So what a Fastmail task collection declares is `unmeasured`.** The account measured had none to
+read.
+
 ## Authoring: what a reply prefills as recipients
 
 Reading the client's pixels again, this time on the **mobile** app and against a compose form rather
