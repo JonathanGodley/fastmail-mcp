@@ -57,11 +57,19 @@ export default async function* reporter(source) {
 
 const current = { target: null, original: null, child: null };
 
-// tsx runs the tests in a grandchild, which a plain kill() on Windows would orphan.
+// tsx runs the tests in a child node process of its own, with inherited stdio, and relays
+// only SIGINT and SIGTERM to it. Killing tsx alone with SIGKILL would orphan that process,
+// still running and still holding our pipes. So off Windows the child leads its own process
+// group (spawned detached) and the whole group is killed; on Windows taskkill /T kills the tree.
+const DETACHED = process.platform !== 'win32';
 function killTree(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-  else child.kill('SIGKILL');
+  try {
+    if (DETACHED) process.kill(-child.pid, 'SIGKILL');
+    else spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+  } catch {
+    // The group is already gone.
+  }
 }
 
 function runTest(testFile, pattern, timeoutMs) {
@@ -72,7 +80,7 @@ function runTest(testFile, pattern, timeoutMs) {
     // NODE_TEST_CONTEXT, inherited when this runs under a test, would make the child report
     // to a parent runner in its own protocol instead of through this reporter.
     const { NODE_TEST_CONTEXT, ...env } = process.env;
-    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env });
+    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env, detached: DETACHED });
     current.child = child;
     let stdout = '';
     let stderr = '';
@@ -80,6 +88,10 @@ function runTest(testFile, pattern, timeoutMs) {
     child.stderr.on('data', (b) => { stderr += b; });
     const timer = setTimeout(() => {
       killTree(child);
+      // Should anything survive the kill and hold a pipe, it must not keep this process alive.
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.unref();
       current.child = null;
       done({ timedOut: true });
     }, timeoutMs);
