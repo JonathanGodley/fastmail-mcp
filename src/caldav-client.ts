@@ -1498,7 +1498,7 @@ export function parseCalendarObjects(
   }
 
   const events = parseVEventBlocks(obj, blocks, options);
-  if (typeof obj.data === 'string' && !walkICalComponents(obj.data)) {
+  if (!walkICalComponents(obj.data)) {
     for (const event of events) event.malformedStructure = true;
   }
   return events;
