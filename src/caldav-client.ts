@@ -2908,16 +2908,16 @@ interface CalendarObjectMatch {
  * as this url, so the writes refuse rather than act on the addressed one. `addressedUid` is the
  * addressed record's UID only where that UID reaches it alone; otherwise no id does.
  *
- * Two lists only the writes read (#239). `unreadable`: records the id's lookup was handed with
- * no event data, which could be another copy, so the writes refuse. `noEtag`: copies read whole
- * and carrying the exact UID but no entity tag, so they count as copies but are never acted on.
+ * `unreadable` (#239) is read by the writes only: every hit for the id that `isReadableHit`
+ * rejects, which the writes refuse. `addressedUid` is set beside it on the url path, by the same
+ * reach rule as `collision`.
  */
 interface CalendarObjectLookup {
   matches: CalendarObjectMatch[];
   addressed: boolean;
   collision?: { addressedUid: string | undefined };
-  unreadable: CalendarEventCopy[];
-  noEtag: CalendarEventCopy[];
+  unreadable: UnreadableHit[];
+  addressedUid?: string;
   brokenCollections: BrokenCollections;
 }
 
@@ -3069,7 +3069,7 @@ function readCalendarData(res: DAVResponse): string | undefined {
 
 /** A resource's own UID, trimmed as the lookup compares it; undefined when it has none. */
 function ownUid(obj: DAVCalendarObject): string | undefined {
-  return parseICalValue(extractVEvent(obj.data || '') ?? '', 'UID')?.trim();
+  return parseICalValue(extractVEvent(typeof obj.data === 'string' ? obj.data : '') ?? '', 'UID')?.trim();
 }
 
 /**
@@ -3092,28 +3092,32 @@ function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
  * must not be relaxed for a read-only caller.
  */
 function isResolvedCalendarObject(obj: DAVCalendarObject): boolean {
-  if (typeof obj.etag !== 'string' || obj.etag.trim().length === 0) return false;
-  return isReadWholeExceptEtag(obj);
-}
-
-/** `isResolvedCalendarObject` without the etag: a copy that was read and could be checked. */
-function isReadWholeExceptEtag(obj: DAVCalendarObject): boolean {
   if (typeof obj.url !== 'string' || obj.url.trim().length === 0) return false;
-  if (!hasEventData(obj)) return false;
+  if (typeof obj.etag !== 'string' || obj.etag.trim().length === 0) return false;
+  if (typeof obj.data !== 'string' || obj.data.length === 0) return false;
   return extractVEventBlocks(obj.data).length > 0;
 }
 
 /**
- * Did the server hand this object over with its payload? tsdav leaves `data` undefined when the
- * `calendar-data` propstat failed and makes it `{}` for an empty element (#239).
+ * The writes' rule for a hit the server matched to the id (#239): READABLE only with its data
+ * as a string (tsdav leaves it undefined for a failed `calendar-data` propstat and makes it `{}`
+ * for an empty element), a VEVENT in it with a UID, its url and its etag. Update and delete
+ * refuse on any other hit.
  */
-function hasEventData(obj: DAVCalendarObject): obj is DAVCalendarObject & { data: string } {
-  return typeof obj.data === 'string' && obj.data.length > 0;
+function isReadableHit(obj: DAVCalendarObject): boolean {
+  const uid = isResolvedCalendarObject(obj) ? ownUid(obj) : undefined;
+  return uid !== undefined && uid !== '';
 }
 
-/** A record a lookup met but could not read, as the refusal names it. */
-function unreadableCopy(calendar: DAVCalendar, obj: DAVCalendarObject): CalendarEventCopy {
-  return { calendar: calendarLabel(calendar), url: typeof obj.url === 'string' ? obj.url : '' };
+/** A hit a lookup could not read, as the refusal names it. */
+interface UnreadableHit extends CalendarEventCopy {
+  /** The url the caller passed, fetched and not returned whole. */
+  addressed: boolean;
+  /**
+   * The hit sits at its calendar's own url: tsdav's stand-in for an answer it could not parse,
+   * so it is not a record.
+   */
+  wholeAnswer: boolean;
 }
 
 /**
@@ -3495,36 +3499,70 @@ export function ambiguousEventIdError(
 }
 
 /**
- * The refusal update and delete raise, before any other check, when the lookup met a matching
- * record it could not read (#239): it may be another copy, and the server's case-insensitive
- * UID match means it cannot be counted or dismissed. An InvalidInputError when a readable copy
- * can be addressed by url instead; a plain Error when no argument could help.
+ * The refusal update and delete raise on `CalendarObjectLookup.unreadable` (#239): the first
+ * check either makes on the lookup's result, so the handlers' argument checks, the eventId's own
+ * checks and any failed request come first. An InvalidInputError where it offers a handle that
+ * reaches a readable record; a plain Error, asking for a retry, otherwise.
+ *
+ * The handle is a readable copy's url only where nothing came back for the id's url form (a url
+ * as eventId makes the UID query ask for that url, so the unreadable hit is not met again), and
+ * the addressed record's own UID only where that record was read whole and the UID reaches it
+ * alone. A record the caller's url addresses that did not come back whole gets no handle: no other
+ * record is a way to it.
  */
 function refuseUnreadableMatches(eventId: string, action: 'update' | 'delete', lookup: CalendarObjectLookup): void {
-  const { unreadable, matches, addressed, brokenCollections } = lookup;
+  const { unreadable, matches, addressed, addressedUid, brokenCollections } = lookup;
   if (unreadable.length === 0) return;
-  const one = unreadable.length === 1;
-  const lead = `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" matched `
-    + (one
-      ? 'a record that the calendar server returned without its event data'
-      : `${unreadable.length} records that the calendar server returned without their event data`)
-    + `: ${describeEventCopies(unreadable)}. This server cannot read ${one ? 'it' : 'them'}, so it cannot tell whether `
-    + (one ? 'it is the event you mean or another copy of it' : 'they are the event you mean or other copies of it')
-    + `, and will not ${action} anything for this id. Nothing was changed.`;
-  // A url as eventId makes the UID query ask for that url, so this record is not met again.
-  if (!addressed && matches.length > 0) {
+  const records = (hits: UnreadableHit[]) => hits.filter(h => !h.wholeAnswer);
+  const answers = (hits: UnreadableHit[]) => hits.filter(h => h.wholeAnswer);
+  const atUrl = unreadable.filter(h => h.addressed);
+  const byUid = unreadable.filter(h => !h.addressed);
+  const parts: string[] = [];
+  if (records(atUrl).length > 0) {
+    parts.push('The record at that url came back missing its event data, an event with a UID, '
+      + `or its entity tag: ${describeEventCopies(records(atUrl))}.`);
+  }
+  if (answers(atUrl).length > 0) {
+    parts.push(`The answer from ${describeCalendars(answers(atUrl))} for that url could not be read.`);
+  }
+  const matched = records(byUid);
+  if (matched.length === 1) {
+    parts.push('It matched a record that came back missing its url, its event data, an event with a UID, '
+      + `or its entity tag: ${describeEventCopies(matched)}.`);
+  } else if (matched.length > 1) {
+    parts.push(`It matched ${matched.length} records, each of which came back missing its url, its event data, `
+      + `an event with a UID, or its entity tag: ${describeEventCopies(matched)}.`);
+  }
+  if (answers(byUid).length > 0) {
+    parts.push(`The answer from ${describeCalendars(answers(byUid))} to the search for it could not be read.`);
+  }
+  const lead = `This server will not ${action} anything for the event id `
+    + `"${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}". Nothing was changed. ${parts.join(' ')}`;
+  const broken = describeBrokenCollections(brokenCollections);
+  if (atUrl.length === 0 && !addressed && matches.length > 0) {
     throw new InvalidInputError(
-      `${lead} To act on a copy this server could read, pass its url as eventId: ${describeEventCopies(matchesToCopies(matches))}. `
-      + `The Fastmail web interface can still change or delete the record${one ? '' : 's'} it could not read.`
-      + describeBrokenCollections(brokenCollections),
+      `${lead} To act on a copy this server could read, pass its url as eventId: `
+      + `${describeEventCopies(matchesToCopies(matches))}.${broken}`,
     );
   }
-  throw new Error(
-    `${lead} Retry the call; a failure that persists is the calendar server not returning `
-    + (one ? "that record's data, and the Fastmail web interface can still change or delete it."
-      : "those records' data, and the Fastmail web interface can still change or delete them.")
-    + describeBrokenCollections(brokenCollections),
-  );
+  if (atUrl.length === 0 && addressed && addressedUid !== undefined) {
+    throw new InvalidInputError(
+      `${lead} To act on the record at that url, ${describeEventCopies(matchesToCopies(matches.slice(0, 1)))}, `
+      + `pass its own UID "${echoCallerText(addressedUid, CALENDAR_UID_ECHO_LIMIT)}" as eventId; it reaches that `
+      + `record alone.${broken}`,
+    );
+  }
+  throw new Error(`${lead} Retry the call: this refusal lifts if what was missing comes back. A record stored `
+    + `without it cannot be updated or deleted through this server.${broken}`);
+}
+
+/** The calendars whose answer is described, each echoed as `describeEventCopies` echoes one. */
+function describeCalendars(hits: UnreadableHit[]): string {
+  const names = hits.slice(0, AMBIGUOUS_COPY_LIST_CAP)
+    .map(h => `"${echoCallerText(h.calendar, AMBIGUOUS_COPY_URL_ECHO_LIMIT)}"`)
+    .join(', ');
+  const more = hits.length > AMBIGUOUS_COPY_LIST_CAP ? `, …and ${hits.length - AMBIGUOUS_COPY_LIST_CAP} more` : '';
+  return `${hits.length === 1 ? 'the calendar' : 'the calendars'} ${names}${more}`;
 }
 
 /**
@@ -4140,7 +4178,7 @@ export class CalDAVCalendarClient {
     // No early exit: a UID is unique per collection, not per account (#101).
     const uidHolders = async (uid: string) => {
       const holders: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject }> = [];
-      // Matched by the server, but with no data the exact check below cannot run (#239).
+      // Matched by the server, but the exact check below cannot dismiss what it cannot read (#239).
       const unreadableHolders: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject }> = [];
       for (const calendar of selectable) {
         const objects = await davCall(() => client.fetchCalendarObjects({
@@ -4149,7 +4187,7 @@ export class CalDAVCalendarClient {
           urlFilter: calendarResourceUrlFilter(calendar.url),
         }));
         for (const obj of objects) {
-          if (!hasEventData(obj)) unreadableHolders.push({ calendar, obj });
+          if (!isReadableHit(obj)) unreadableHolders.push({ calendar, obj });
           // LOAD-BEARING: the server matches case-insensitively; see `uidEqualsFilter`.
           else if (ownUid(obj) === uid) holders.push({ calendar, obj });
         }
@@ -4157,14 +4195,10 @@ export class CalDAVCalendarClient {
       return { holders, unreadableHolders };
     };
 
-    const unreadable: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject }> = [];
-    const noEtag: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject }> = [];
+    const unreadable: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject; fromUrlFetch: boolean }> = [];
     const byUid = await uidHolders(wanted);
-    for (const { calendar, obj } of byUid.holders) {
-      if (isResolvedCalendarObject(obj)) collect(calendar, obj);
-      else if (isReadWholeExceptEtag(obj)) noEtag.push({ calendar, obj });
-    }
-    unreadable.push(...byUid.unreadableHolders);
+    for (const { calendar, obj } of byUid.holders) collect(calendar, obj);
+    for (const hit of byUid.unreadableHolders) unreadable.push({ ...hit, fromUrlFetch: false });
 
     // The URL form; see resolveEventUrlTargets.
     for (const { calendar, objectUrl } of urlTargets) {
@@ -4186,56 +4220,72 @@ export class CalDAVCalendarClient {
         continue;
       }
       for (const obj of objects) {
-        if (hasEventData(obj)) collect(calendar, obj);
-        else unreadable.push({ calendar, obj });
+        // Resolved is enough for the read; the writes also need its UID.
+        collect(calendar, obj);
+        if (!isReadableHit(obj)) unreadable.push({ calendar, obj, fromUrlFetch: true });
       }
     }
 
-    // One entry per resource; one that a path read whole is not a second copy.
-    const readKeys = new Set([...matches.map(m => m.object.url), ...noEtag.map(h => h.obj.url)].map(addressComparisonKey));
-    const toCopies = (list: Array<{ calendar: DAVCalendar; obj: DAVCalendarObject }>, exclude: Set<string>) => {
-      const copies: CalendarEventCopy[] = [];
-      for (const { calendar, obj } of list) {
-        const copy = unreadableCopy(calendar, obj);
-        const key = addressComparisonKey(copy.url);
-        if (exclude.has(key)) continue;
-        exclude.add(key);
-        copies.push(copy);
+    // One entry per resource, and one that a path read whole is not a second copy. A blank url
+    // names no resource, so each such entry counts on its own.
+    const byKey = new Map<string, UnreadableHit | null>(
+      matches.filter(m => isReadableHit(m.object)).map(m => [addressComparisonKey(m.object.url), null]),
+    );
+    const unreadableHits: UnreadableHit[] = [];
+    for (const { calendar, obj, fromUrlFetch } of unreadable) {
+      const url = typeof obj.url === 'string' ? obj.url : '';
+      const key = url.trim() === '' ? undefined : addressComparisonKey(url);
+      if (key !== undefined && byKey.has(key)) {
+        const met = byKey.get(key);
+        if (met && fromUrlFetch) met.addressed = true;
+        continue;
       }
-      return copies;
-    };
-    const unreadableCopies = toCopies(unreadable, new Set(readKeys));
-    const noEtagCopies = toCopies(noEtag, new Set(matches.map(m => addressComparisonKey(m.object.url))));
+      const hit: UnreadableHit = {
+        calendar: calendarLabel(calendar),
+        url,
+        addressed: fromUrlFetch,
+        wholeAnswer: key !== undefined && key === addressComparisonKey(calendar.url),
+      };
+      if (key !== undefined) byKey.set(key, hit);
+      unreadableHits.push(hit);
+    }
 
     // The addressed copy LEADS (see CalendarObjectLookup); every other order is untouched.
     const addressedIndex = matches.findIndex(m => addressedHrefs.has(addressComparisonKey(m.object.url)));
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
+    const addressed = addressedIndex !== -1;
 
-    let collision: CalendarObjectLookup['collision'];
-    // A no-etag copy here holds the caller's string as its exact UID, so it collides too.
-    if (addressedIndex !== -1 && (matches.slice(1).some(m => ownUid(m.object) === wanted) || noEtagCopies.length > 0)) {
-      // Offer the addressed record's UID only where it reaches that record alone: not absent,
-      // not this same string, not another resource's url, and not held by any other record,
-      // read or unreadable.
+    // The addressed record's UID, only where it reaches that record alone: not absent, not this
+    // same string, not another resource's url, read whole by its own query, and held by no other
+    // record, read or unreadable.
+    const uidReachingAddressed = async (): Promise<string | undefined> => {
       const uid = ownUid(matches[0].object);
+      if (uid === undefined || uid === '' || uid === wanted) return undefined;
       const addressedKey = addressComparisonKey(matches[0].object.url);
-      const elsewhere = (obj: DAVCalendarObject) => addressComparisonKey(typeof obj.url === 'string' ? obj.url : '') !== addressedKey;
-      let reachesAlone = uid !== undefined && uid !== '' && uid !== wanted
-        && resolveEventUrlTargets(uid, selectable).every(t => addressComparisonKey(t.objectUrl) === addressedKey);
-      if (reachesAlone) {
-        const others = await uidHolders(uid!);
-        reachesAlone = !others.holders.some(h => isReadWholeExceptEtag(h.obj) && elsewhere(h.obj))
-          && !others.unreadableHolders.some(h => elsewhere(h.obj));
+      if (!resolveEventUrlTargets(uid, selectable).every(t => addressComparisonKey(t.objectUrl) === addressedKey)) {
+        return undefined;
       }
-      collision = { addressedUid: reachesAlone ? uid : undefined };
-    }
+      const elsewhere = (obj: DAVCalendarObject) => addressComparisonKey(typeof obj.url === 'string' ? obj.url : '') !== addressedKey;
+      const others = await uidHolders(uid);
+      const alone = others.holders.some(h => !elsewhere(h.obj))
+        && !others.holders.some(h => elsewhere(h.obj))
+        && !others.unreadableHolders.some(h => elsewhere(h.obj));
+      return alone ? uid : undefined;
+    };
+
+    const collides = addressed && matches.slice(1).some(m => ownUid(m.object) === wanted);
+    // Wanted beside an unreadable hit only where the addressed record itself was read whole.
+    const offersUid = addressed && unreadableHits.length > 0 && !unreadableHits.some(h => h.addressed);
+    const reachingUid = collides || offersUid ? await uidReachingAddressed() : undefined;
+    const collision = collides ? { addressedUid: reachingUid } : undefined;
+    const addressedUid = offersUid ? reachingUid : undefined;
 
     return {
       matches,
-      addressed: addressedIndex !== -1,
+      addressed,
       collision,
-      unreadable: unreadableCopies,
-      noEtag: noEtagCopies,
+      unreadable: unreadableHits,
+      addressedUid,
       brokenCollections,
     };
   }
@@ -4429,7 +4479,7 @@ export class CalDAVCalendarClient {
     // to the one resource it resolved.
     const lookup = await this.findCalendarObjectByUID(eventId);
     refuseUnreadableMatches(eventId, 'update', lookup);
-    const { matches, addressed, collision, noEtag, brokenCollections } = lookup;
+    const { matches, addressed, collision, brokenCollections } = lookup;
     const obj = matches[0]?.object;
     if (!obj) {
       throw eventNotFoundError(eventId, brokenCollections);
@@ -4437,7 +4487,7 @@ export class CalDAVCalendarClient {
 
     // Before the repeating-series refusal and all argument validation; see ambiguousEventIdError
     // (#101). `addressed` keeps the url escape hatch open.
-    const copies = [...matchesToCopies(matches), ...noEtag];
+    const copies = matchesToCopies(matches);
     if (!addressed && copies.length > 1) {
       throw ambiguousEventIdError(eventId, 'update', copies, brokenCollections);
     }
@@ -4680,7 +4730,7 @@ export class CalDAVCalendarClient {
     // Proceeds on the copy it found, as update does (#136).
     const lookup = await this.findCalendarObjectByUID(eventId);
     refuseUnreadableMatches(eventId, 'delete', lookup);
-    const { matches, addressed, collision, noEtag, brokenCollections } = lookup;
+    const { matches, addressed, collision, brokenCollections } = lookup;
     const match = matches[0];
     const obj = match?.object;
     if (!obj) {
@@ -4688,7 +4738,7 @@ export class CalDAVCalendarClient {
     }
 
     // Same rule and order as update's; see ambiguousEventIdError (#101).
-    const copies = [...matchesToCopies(matches), ...noEtag];
+    const copies = matchesToCopies(matches);
     if (!addressed && copies.length > 1) {
       throw ambiguousEventIdError(eventId, 'delete', copies, brokenCollections);
     }

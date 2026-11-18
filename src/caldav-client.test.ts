@@ -1514,26 +1514,27 @@ describe('CalDAVCalendarClient event lookup', () => {
   /** A call's rejection, or undefined when it resolved, so a no-write assertion can run first. */
   const outcome = (call: Promise<unknown>) => call.then(() => undefined, (err: unknown) => err as Error);
 
-  // The refusal for a matching record the server returned without its data (#239), written out
+  // The refusal for a record matched to the id that did not come back whole (#239), written out
   // in full so each test pins the whole text.
-  function unreadableLead(id: string, action: string, copies: string, count = 1): string {
-    return count === 1
-      ? `The event id "${id}" matched a record that the calendar server returned without its event data: ${copies}. `
-        + 'This server cannot read it, so it cannot tell whether it is the event you mean or another copy of it, '
-        + `and will not ${action} anything for this id. Nothing was changed.`
-      : `The event id "${id}" matched ${count} records that the calendar server returned without their event data: ${copies}. `
-        + 'This server cannot read them, so it cannot tell whether they are the event you mean or other copies of it, '
-        + `and will not ${action} anything for this id. Nothing was changed.`;
-  }
-  const unreadableRetryText = (id: string, action: string, copies: string, count = 1) => unreadableLead(id, action, copies, count)
-    + (count === 1
-      ? " Retry the call; a failure that persists is the calendar server not returning that record's data, and the Fastmail web interface can still change or delete it."
-      : " Retry the call; a failure that persists is the calendar server not returning those records' data, and the Fastmail web interface can still change or delete them.");
-  const unreadableUrlText = (id: string, action: string, copies: string, readable: string, count = 1) => unreadableLead(id, action, copies, count)
-    + ` To act on a copy this server could read, pass its url as eventId: ${readable}.`
-    + (count === 1
-      ? ' The Fastmail web interface can still change or delete the record it could not read.'
-      : ' The Fastmail web interface can still change or delete the records it could not read.');
+  const unreadableLead = (id: string, action: string) =>
+    `This server will not ${action} anything for the event id "${id}". Nothing was changed.`;
+  const MISSING = 'its event data, an event with a UID, or its entity tag';
+  const matchedPart = (copies: string, count = 1) => count === 1
+    ? ` It matched a record that came back missing its url, ${MISSING}: ${copies}.`
+    : ` It matched ${count} records, each of which came back missing its url, ${MISSING}: ${copies}.`;
+  const RETRY = ' Retry the call: this refusal lifts if what was missing comes back. A record stored without it cannot be updated or deleted through this server.';
+  const unreadableRetryText = (id: string, action: string, copies: string, count = 1) =>
+    unreadableLead(id, action) + matchedPart(copies, count) + RETRY;
+  const unreadableUrlText = (id: string, action: string, copies: string, readable: string, count = 1) =>
+    unreadableLead(id, action) + matchedPart(copies, count)
+    + ` To act on a copy this server could read, pass its url as eventId: ${readable}.`;
+  /** The record the caller's url addresses came back incomplete: no handle at all. */
+  const unreadableAtUrlText = (id: string, action: string, copy: string) => unreadableLead(id, action)
+    + ` The record at that url came back missing ${MISSING}: ${copy}.` + RETRY;
+  /** The addressed record was read whole and its own UID reaches it alone. */
+  const unreadableUidText = (id: string, action: string, copies: string, addressed: string, uid: string) =>
+    unreadableLead(id, action) + matchedPart(copies)
+    + ` To act on the record at that url, ${addressed}, pass its own UID "${uid}" as eventId; it reaches that record alone.`;
 
   // Not "Calendar event not found": that answers about the account, for a call that never named
   // an event.
@@ -1610,15 +1611,16 @@ describe('CalDAVCalendarClient event lookup', () => {
 
   // tsdav's delete runs its headers through `cleanupFalsy`, so an object with no etag is sent
   // with no If-Match at all and the resource is destroyed UNCONDITIONALLY — whatever it has
-  // become since it was read. A resource the server did not describe fully is therefore not a
-  // resolved copy at all, on any of the three tools.
-  it('does not resolve a copy the server returned without an etag', async () => {
+  // become since it was read. So the writes refuse it (#239), and the read skips it.
+  it('refuses to write a copy the server returned without an etag, which the read skips', async () => {
     const noEtag: Record<string, StoredObject[]> = {
       [PERSONAL_URL]: [{ data: eventIcal('noetag@fm'), url: PERSONAL_URL + 'noetag.ics' }],
     };
     const { client, mockDAVClient } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], noEtag);
-    await assert.rejects(() => client.deleteCalendarEvent('noetag@fm'), /Calendar event not found/);
+    const err = await outcome(client.deleteCalendarEvent('noetag@fm'));
     assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
+    assert.equal(err?.message, unreadableRetryText('noetag@fm', 'delete', `"Personal" ("${PERSONAL_URL}noetag.ics")`));
+    await assert.rejects(() => client.getCalendarEventById('noetag@fm'), /Calendar event not found: "noetag@fm"/);
   });
 
   // The other half of the same rule: no payload means nothing could be read off the resource,
@@ -1634,36 +1636,44 @@ describe('CalDAVCalendarClient event lookup', () => {
       assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, JSON.stringify(shape));
       assert.ok(err instanceof Error, `the delete went ahead for ${JSON.stringify(shape)}`);
       assert.equal(err.name, 'Error', JSON.stringify(shape));
-      assert.equal(err.message, unreadableRetryText(PERSONAL_URL + 'nodata.ics', 'delete', `"Personal" ("${PERSONAL_URL}nodata.ics")`));
+      assert.equal(err.message, unreadableAtUrlText(PERSONAL_URL + 'nodata.ics', 'delete', `"Personal" ("${PERSONAL_URL}nodata.ics")`));
     }
   });
 
   // Each of these is a resource the server described but did not describe WHOLE, and each is
   // reached through the path that can actually deliver it: a blank url or a blank etag still
   // parses to a VEVENT, so the UID query hands it back; a VEVENT-less payload cannot be matched
-  // by UID at all, so only the addressed url fetch reaches it. None of them resolves. A payload
-  // that is missing altogether is a different case (#239), refused above.
-  it('does not resolve a resource the server described incompletely', async () => {
-    const cases: Array<[string, StoredObject, string]> = [
-      ['a blank url', { data: eventIcal('blank@fm'), url: '   ', etag: '"e"' }, 'blank@fm'],
-      ['a whitespace-only etag', { data: eventIcal('wsetag@fm'), url: PERSONAL_URL + 'ws.ics', etag: '   ' }, 'wsetag@fm'],
+  // by UID at all, so only the addressed url fetch reaches it. The writes refuse each (#239);
+  // the read skips each.
+  it('refuses to write a resource the server described incompletely, which the read skips', async () => {
+    const cases: Array<[string, StoredObject, string, string]> = [
+      ['a blank url', { data: eventIcal('blank@fm'), url: '   ', etag: '"e"' }, 'blank@fm',
+        unreadableRetryText('blank@fm', 'delete', '"Personal" ("")')],
+      ['a whitespace-only etag', { data: eventIcal('wsetag@fm'), url: PERSONAL_URL + 'ws.ics', etag: '   ' }, 'wsetag@fm',
+        unreadableRetryText('wsetag@fm', 'delete', `"Personal" ("${PERSONAL_URL}ws.ics")`)],
       [
         'a payload holding no VEVENT',
         { data: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR', url: PERSONAL_URL + 'novevent.ics', etag: '"e"' },
         PERSONAL_URL + 'novevent.ics',
+        unreadableAtUrlText(PERSONAL_URL + 'novevent.ics', 'delete', `"Personal" ("${PERSONAL_URL}novevent.ics")`),
+      ],
+      // Stored that way for good, not a passing fault: the refusal says what that means.
+      [
+        'a task rather than an event',
+        { data: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:task@fm\r\nSUMMARY:T\r\nEND:VTODO\r\nEND:VCALENDAR', url: PERSONAL_URL + 'task.ics', etag: '"e"' },
+        PERSONAL_URL + 'task.ics',
+        unreadableAtUrlText(PERSONAL_URL + 'task.ics', 'delete', `"Personal" ("${PERSONAL_URL}task.ics")`),
       ],
     ];
-    for (const [label, stored, lookupId] of cases) {
+    for (const [label, stored, lookupId, refusal] of cases) {
       const { client, mockDAVClient } = makeLookupClient(
         [{ displayName: 'Personal', url: PERSONAL_URL }],
         { [PERSONAL_URL]: [stored] },
       );
-      await assert.rejects(
-        () => client.deleteCalendarEvent(lookupId),
-        /Calendar event not found/,
-        `${label} resolved to a copy`,
-      );
+      const err = await outcome(client.deleteCalendarEvent(lookupId));
       assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, label);
+      assert.equal(err?.message, refusal, label);
+      await assert.rejects(() => client.getCalendarEventById(lookupId), /Calendar event not found/, label);
     }
   });
 
@@ -2121,6 +2131,17 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.deepEqual(read.addressCollision, { addressedUid: realUrl + '#x' });
   });
 
+  // The UID's own query must read the addressed record whole, or following the advice would meet
+  // the refusal for a record that did not come back whole (#239).
+  it('does not offer the addressed record\'s UID when that UID\'s own query cannot read it', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const stored = decoyCarryingAnAddress(realUrl);
+    Object.assign(stored[PERSONAL_URL][0], { withheldFrom: 'query' });
+    const { client } = makeLookupClient(decoyCalendars, stored);
+    await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
+    assert.deepEqual((await client.getCalendarEventById(realUrl)).addressCollision, { addressedUid: undefined });
+  });
+
   // A record whose UID is its own url, and a copy elsewhere carrying the same UID: both rows list
   // the id `.../self.ics`, so a caller acting on the Copy row's id must not reach self.ics.
   const SELF_URL = PERSONAL_URL + 'self.ics';
@@ -2129,7 +2150,7 @@ describe('CalDAVCalendarClient event lookup', () => {
     [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e-self"' }],
   });
 
-  // No id reaches the addressed record alone: its UID is missing, is this url, or is shared.
+  // No id reaches the addressed record alone: its UID is this url, or is shared.
   const assertUnreachableCollision = (tool: string) => (err: Error) => {
     assert.equal(err.name, 'InvalidInputError', tool);
     assert.match(err.message, /is the url of one record and the UID of another/, tool);
@@ -2158,12 +2179,19 @@ describe('CalDAVCalendarClient event lookup', () => {
     await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
   });
 
+  // A record with no UID is not whole to the writes (#239), so they refuse it before the
+  // collision; the read still answers with it and reports the collision with no UID.
   it('does not offer a UID the addressed record does not have', async () => {
     const realUrl = PERSONAL_URL + 'real.ics';
     const stored = decoyCarryingAnAddress(realUrl);
     stored[PERSONAL_URL] = [{ data: eventIcal('real@fm', 'Real').replace('UID:real@fm\r\n', ''), url: realUrl, etag: '"e-real"' }];
-    const { client } = makeLookupClient(decoyCalendars, stored);
-    await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
+    const { client, mockDAVClient } = makeLookupClient(decoyCalendars, stored);
+    const err = await outcome(client.deleteCalendarEvent(realUrl));
+    assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
+    assert.equal(err?.message, unreadableAtUrlText(realUrl, 'delete', `"Personal" ("${realUrl}")`));
+    const read = await client.getCalendarEventById(realUrl);
+    assert.equal(read.event.title, 'Real');
+    assert.deepEqual(read.addressCollision, { addressedUid: undefined });
   });
 
   it('names the addressed record by its calendar and url in the collision refusal', async () => {
@@ -2277,42 +2305,78 @@ describe('CalDAVCalendarClient event lookup', () => {
     await assert.rejects(() => client.deleteCalendarEvent(phantom), /names 2 records/);
   });
 
-  // ---- a matching record the server returned without its data (#239) ----
+  // ---- a record matched to the id that did not come back whole (#239) ----
 
-  // The UID query matched in Work, but its `calendar-data` propstat failed, so the copy cannot be
-  // checked against the id exactly (the server matches case-insensitively) and cannot be counted
-  // or dismissed. Dropping it let update and delete act on the Personal copy.
+  // The writes need every hit for the id read whole: its data as a string, a VEVENT in it with a
+  // UID, its url and its etag.
   const PERSONAL_SOLO = `"Personal" ("${PERSONAL_URL}solo.ics")`;
   const WORK_SOLO = `"Work" ("${WORK_URL}solo.ics")`;
-  const readableAndUnreadable = (shape?: unknown): Record<string, StoredObject[]> => ({
+  const readableAndUnreadable = (work: Partial<StoredObject>): Record<string, StoredObject[]> => ({
     [PERSONAL_URL]: [{ data: eventIcal('solo@fm', 'Personal copy'), url: PERSONAL_URL + 'solo.ics', etag: '"e1"' }],
-    [WORK_URL]: [{ data: eventIcal('solo@fm', 'Work copy'), url: WORK_URL + 'solo.ics', etag: '"e2"', withheldFrom: 'query', withheldAs: shape }],
+    [WORK_URL]: [{ data: eventIcal('solo@fm', 'Work copy'), url: WORK_URL + 'solo.ics', etag: '"e2"', ...work }],
   });
   const onlyUnreadable = (): Record<string, StoredObject[]> => ({
     [WORK_URL]: [{ data: eventIcal('solo@fm', 'Work copy'), url: WORK_URL + 'solo.ics', etag: '"e2"', withheldFrom: 'query' }],
   });
-  const writeCalls = [
-    ['update', (c: CalDAVCalendarClient) => c.updateCalendarEvent('solo@fm', { title: 'X' })],
-    ['delete', (c: CalDAVCalendarClient) => c.deleteCalendarEvent('solo@fm')],
+  const writeCalls = (id: string) => [
+    ['update', (c: CalDAVCalendarClient) => c.updateCalendarEvent(id, { title: 'X' })],
+    ['delete', (c: CalDAVCalendarClient) => c.deleteCalendarEvent(id)],
   ] as Array<['update' | 'delete', (c: CalDAVCalendarClient) => Promise<unknown>]>;
 
-  it('refuses to update or delete a bare UID when another matching copy came back without data', async () => {
-    for (const shape of [undefined, {}]) {
-      for (const [tool, call] of writeCalls) {
-        const { client, mockDAVClient } = makeLookupClient(twoCalendars, readableAndUnreadable(shape));
+  // Every shape a hit can arrive in that is not whole, as a path's answer replaces the stored one.
+  const notWhole = (path: 'query' | 'fetch'): Array<[string, Partial<StoredObject>]> => [
+    ['a failed calendar-data propstat', { withheldFrom: path }],
+    ['an empty calendar-data element', { withheldFrom: path, withheldAs: {} }],
+    ['a truncated payload', { withheldFrom: path, withheldAs: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:solo@fm\r\nSUMMARY:Work c' }],
+    ['an empty VCALENDAR', { withheldFrom: path, withheldAs: 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR' }],
+    ['plain text', { withheldFrom: path, withheldAs: 'internal error' }],
+    ['a VEVENT with no UID line', { withheldFrom: path, withheldAs: eventIcal('solo@fm').replace('UID:solo@fm\r\n', '') }],
+    ['a VEVENT with a blank UID', { withheldFrom: path, withheldAs: eventIcal('solo@fm').replace('UID:solo@fm', 'UID: ') }],
+    ['a failed getetag propstat', { etagWithheldFrom: path }],
+  ];
+
+  it('refuses to update or delete a bare UID when another matching copy did not come back whole', async () => {
+    for (const [label, work] of notWhole('query')) {
+      for (const [tool, call] of writeCalls('solo@fm')) {
+        const { client, mockDAVClient } = makeLookupClient(twoCalendars, readableAndUnreadable(work));
         const err = await outcome(call(client));
-        assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
-        assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, tool);
-        assert.ok(err instanceof Error, `${tool} went ahead`);
+        assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, `${tool}, ${label}`);
+        assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, `${tool}, ${label}`);
+        assert.ok(err instanceof Error, `${tool} went ahead on ${label}`);
         // The way out is a url, which only the caller can supply, so it is an argument error.
-        assert.equal(err.name, 'InvalidInputError', tool);
-        assert.equal(err.message, unreadableUrlText('solo@fm', tool, WORK_SOLO, PERSONAL_SOLO), tool);
+        assert.equal(err.name, 'InvalidInputError', `${tool}, ${label}`);
+        assert.equal(err.message, unreadableUrlText('solo@fm', tool, WORK_SOLO, PERSONAL_SOLO), `${tool}, ${label}`);
       }
     }
   });
 
-  it('refuses to update or delete a bare UID whose only match came back without data', async () => {
-    for (const [tool, call] of writeCalls) {
+  it('acts on the readable copy when its offered url is passed back', async () => {
+    for (const [label, work] of notWhole('query')) {
+      const { client, mockDAVClient } = makeLookupClient(twoCalendars, readableAndUnreadable(work));
+      assert.equal(await outcome(client.deleteCalendarEvent(PERSONAL_URL + 'solo.ics')), undefined, label);
+      assert.deepEqual(
+        mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments[0].calendarObject.url),
+        [PERSONAL_URL + 'solo.ics'],
+        label,
+      );
+    }
+  });
+
+  // LOAD-BEARING exactness: the server matches UIDs case-insensitively, and a whole hit whose UID
+  // differs is not a copy. One that is not whole is refused like any other.
+  it('ignores a whole hit whose UID differs only in case, and refuses one that is not whole', async () => {
+    const otherCase = (extra: Partial<StoredObject>) => readableAndUnreadable({ data: eventIcal('SOLO@FM', 'Work copy'), ...extra });
+    const whole = makeLookupClient(twoCalendars, otherCase({}));
+    assert.equal(await outcome(whole.client.updateCalendarEvent('solo@fm', { title: 'X' })), undefined);
+    assert.equal(whole.mockDAVClient.updateCalendarObject.mock.calls[0].arguments[0].calendarObject.url, PERSONAL_URL + 'solo.ics');
+    const etagless = makeLookupClient(twoCalendars, otherCase({ etagWithheldFrom: 'query' }));
+    const err = await outcome(etagless.client.updateCalendarEvent('solo@fm', { title: 'X' }));
+    assert.equal(etagless.mockDAVClient.updateCalendarObject.mock.callCount(), 0);
+    assert.equal(err?.message, unreadableUrlText('solo@fm', 'update', WORK_SOLO, PERSONAL_SOLO));
+  });
+
+  it('refuses to update or delete a bare UID whose only match did not come back whole', async () => {
+    for (const [tool, call] of writeCalls('solo@fm')) {
       const { client, mockDAVClient } = makeLookupClient(twoCalendars, onlyUnreadable());
       const err = await outcome(call(client));
       assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
@@ -2331,28 +2395,117 @@ describe('CalDAVCalendarClient event lookup', () => {
     });
   });
 
-  // On the url path the UID query asks for the url string itself, so an unreadable hit there is
-  // a record whose UID may be that url: the collision class, which cannot be ruled out.
-  it('refuses a url-addressed write when the UID query met a record it could not read', async () => {
+  // A blank url names no resource, so two such hits are two records, not one.
+  it('counts each hit with a blank url on its own', async () => {
+    const { client } = makeLookupClient(twoCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal('solo@fm'), url: '', withheldFrom: 'query' }],
+      [WORK_URL]: [{ data: eventIcal('solo@fm'), url: '', withheldFrom: 'query' }],
+    });
+    const err = await outcome(client.deleteCalendarEvent('solo@fm'));
+    assert.equal(err?.message, unreadableRetryText('solo@fm', 'delete', '"Personal" (""), "Work" ("")', 2));
+  });
+
+  // tsdav answers a 207 it cannot parse with one object at the request's own url: the calendar's.
+  it('names the calendar whose answer could not be read, not a record', async () => {
+    const { client, mockDAVClient } = makeLookupClient(twoCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal('solo@fm', 'Personal copy'), url: PERSONAL_URL + 'solo.ics', etag: '"e1"' }],
+      [WORK_URL]: [{ data: eventIcal('solo@fm'), url: WORK_URL, withheldFrom: 'query', etagWithheldFrom: 'query' }],
+    });
+    const err = await outcome(client.deleteCalendarEvent('solo@fm'));
+    assert.equal(err?.name, 'InvalidInputError');
+    assert.equal(err?.message, unreadableLead('solo@fm', 'delete')
+      + ' The answer from the calendar "Work" to the search for it could not be read.'
+      + ` To act on a copy this server could read, pass its url as eventId: ${PERSONAL_SOLO}.`);
+    // The advice works.
+    assert.equal(await outcome(client.deleteCalendarEvent(PERSONAL_URL + 'solo.ics')), undefined);
+    assert.deepEqual(mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments[0].calendarObject.url), [PERSONAL_URL + 'solo.ics']);
+  });
+
+  it('names the calendar whose answer for the url could not be read', async () => {
+    const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
+    const mockDAVClient = makeMockDAVClient(twoCalendars, {
+      // The url fetch's answer did not parse; the UID query found nothing.
+      fetchCalendarObjects: mock.fn(async (params: FetchObjectsParams) => (params as { objectUrls?: string[] }).objectUrls
+        ? [{ url: PERSONAL_URL, etag: undefined, data: undefined } as unknown as DAVCalendarObject]
+        : []),
+      deleteCalendarObject: mock.fn(async (_p: DeleteObjectParams) => ({ status: 200 })),
+    });
+    (client as any).client = mockDAVClient;
+    const err = await outcome(client.deleteCalendarEvent(PERSONAL_URL + 'x.ics'));
+    assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
+    assert.equal(err?.name, 'Error');
+    assert.equal(err?.message, unreadableLead(PERSONAL_URL + 'x.ics', 'delete')
+      + ' The answer from the calendar "Personal" for that url could not be read.' + RETRY);
+  });
+
+  // The record at the caller's url did not come back whole, and another record carries that url
+  // as its UID: no other record is a way to the one the url addresses, so none is offered.
+  it('refuses a url whose record did not come back whole, offering nothing', async () => {
     const realUrl = PERSONAL_URL + 'real.ics';
-    for (const tool of ['update', 'delete'] as const) {
-      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, {
-        [WORK_URL]: [{ data: eventIcal(realUrl, 'Decoy'), url: WORK_URL + 'decoy.ics', etag: '"e-decoy"', withheldFrom: 'query' }],
-        [PERSONAL_URL]: [{ data: eventIcal('real@fm', 'Real'), url: realUrl, etag: '"e-real"' }],
-      });
-      const err = await outcome(tool === 'update' ? client.updateCalendarEvent(realUrl, { title: 'X' }) : client.deleteCalendarEvent(realUrl));
-      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
-      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, tool);
-      assert.ok(err instanceof Error, `${tool} went ahead`);
-      assert.equal(err.name, 'Error', tool);
-      // No url hint: the caller already passed one.
-      assert.equal(err.message, unreadableRetryText(realUrl, tool, `"Work" ("${WORK_URL}decoy.ics")`), tool);
+    for (const [label, real] of notWhole('fetch')) {
+      for (const [tool, call] of writeCalls(realUrl)) {
+        const stored = decoyCarryingAnAddress(realUrl);
+        Object.assign(stored[PERSONAL_URL][0], real);
+        const { client, mockDAVClient } = makeLookupClient(decoyCalendars, stored);
+        const err = await outcome(call(client));
+        assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, `${tool}, ${label}`);
+        assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, `${tool}, ${label}`);
+        assert.ok(err instanceof Error, `${tool} went ahead on ${label}`);
+        assert.equal(err.name, 'Error', `${tool}, ${label}`);
+        assert.equal(err.message, unreadableAtUrlText(realUrl, tool, `"Personal" ("${realUrl}")`), `${tool}, ${label}`);
+      }
+    }
+  });
+
+  // On the url path the UID query asks for the url string itself, so an unreadable hit there is
+  // a record whose UID may be that url. The addressed record was read whole, so its own UID is
+  // a way to it where that UID reaches it alone.
+  it('offers the addressed record\'s own UID when only a record matched to its url as a UID did not come back whole', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const DECOY = `"Work" ("${WORK_URL}decoy.ics")`;
+    for (const [label, decoy] of [['no data', { withheldFrom: 'query' }], ['no etag', { etagWithheldFrom: 'query' }]] as Array<[string, Partial<StoredObject>]>) {
+      for (const [tool, call] of writeCalls(realUrl)) {
+        const stored = decoyCarryingAnAddress(realUrl);
+        Object.assign(stored[WORK_URL][0], decoy);
+        const { client, mockDAVClient } = makeLookupClient(decoyCalendars, stored);
+        const err = await outcome(call(client));
+        assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, `${tool}, ${label}`);
+        assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, `${tool}, ${label}`);
+        assert.ok(err instanceof Error, `${tool} went ahead on ${label}`);
+        assert.equal(err.name, 'InvalidInputError', `${tool}, ${label}`);
+        assert.equal(err.message, unreadableUidText(realUrl, tool, DECOY, `"Personal" ("${realUrl}")`, 'real@fm'), `${tool}, ${label}`);
+      }
+      // The advice works.
+      const stored = decoyCarryingAnAddress(realUrl);
+      Object.assign(stored[WORK_URL][0], decoy);
+      const { client, mockDAVClient } = makeLookupClient(decoyCalendars, stored);
+      assert.equal(await outcome(client.deleteCalendarEvent('real@fm')), undefined, label);
+      assert.deepEqual(mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments[0].calendarObject.url), [realUrl], label);
+    }
+  });
+
+  it('offers no UID where the addressed record\'s own UID would not reach it alone', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const DECOY = `"Work" ("${WORK_URL}decoy.ics")`;
+    const cases: Array<[string, (stored: Record<string, StoredObject[]>) => void]> = [
+      ['another record holds that UID', s => s[WORK_URL].push({ data: eventIcal('real@fm', 'Duplicate'), url: WORK_URL + 'dup.ics', etag: '"e-dup"' })],
+      // Its own UID's query could not read it, so following the advice would meet this refusal again.
+      ['its own UID cannot read it', s => Object.assign(s[PERSONAL_URL][0], { withheldFrom: 'query' })],
+    ];
+    for (const [label, arrange] of cases) {
+      const stored = decoyCarryingAnAddress(realUrl);
+      Object.assign(stored[WORK_URL][0], { withheldFrom: 'query' });
+      arrange(stored);
+      const { client } = makeLookupClient(decoyCalendars, stored);
+      const err = await outcome(client.deleteCalendarEvent(realUrl));
+      assert.equal(err?.name, 'Error', label);
+      assert.equal(err?.message, unreadableRetryText(realUrl, 'delete', DECOY), label);
     }
   });
 
   // The read is not decided on #239, so it keeps answering as before.
   it('leaves get_calendar_event as it was when a matching copy came back without data', async () => {
-    const both = makeLookupClient(twoCalendars, readableAndUnreadable());
+    const both = makeLookupClient(twoCalendars, readableAndUnreadable({ withheldFrom: 'query' }));
     const read = await both.client.getCalendarEventById('solo@fm');
     assert.equal(read.event.title, 'Personal copy');
     assert.equal(read.otherCopies, undefined);
@@ -2384,27 +2537,18 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 1);
   });
 
-  // Read whole without an etag by the UID query: not a record this server could not read, so the
-  // url fetch's data-less answer for it is not a refusal, and with nothing resolved it is absent.
-  it('does not refuse a record the UID query read whole without an etag that the url fetch could not', async () => {
-    const { client } = makeLookupClient(twoCalendars, {
-      [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e"', etagWithheldFrom: 'query', withheldFrom: 'fetch' }],
-    });
-    await assert.rejects(() => client.deleteCalendarEvent(SELF_URL), (err: Error) => {
-      assert.equal(err.message, `Calendar event not found: "${SELF_URL}"`);
-      return true;
-    });
-  });
-
-  // Unreadable to both paths: one record, named once.
-  it('names a record both paths could not read once', async () => {
-    const { client } = makeLookupClient(twoCalendars, {
-      [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e"', withheldFrom: 'both' }],
-    });
-    await assert.rejects(() => client.deleteCalendarEvent(SELF_URL), (err: Error) => {
-      assert.equal(err.message, unreadableRetryText(SELF_URL, 'delete', `"Personal" ("${SELF_URL}")`));
-      return true;
-    });
+  // Neither path read it whole: one record, named once, as the record at that url.
+  it('names a record neither path read whole once, as the record at the url', async () => {
+    for (const [label, self] of [
+      ['no data on either', { withheldFrom: 'both' }],
+      ['no etag on the query, no data on the fetch', { etagWithheldFrom: 'query', withheldFrom: 'fetch' }],
+    ] as Array<[string, Partial<StoredObject>]>) {
+      const { client } = makeLookupClient(twoCalendars, {
+        [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e"', ...self }],
+      });
+      const err = await outcome(client.deleteCalendarEvent(SELF_URL));
+      assert.equal(err?.message, unreadableAtUrlText(SELF_URL, 'delete', `"Personal" ("${SELF_URL}")`), label);
+    }
   });
 
   it('keeps server-authored names and urls on one line in the unreadable refusal', async () => {
@@ -2418,43 +2562,10 @@ describe('CalDAVCalendarClient event lookup', () => {
       },
     );
     await assert.rejects(() => client.deleteCalendarEvent('solo@fm'), (err: Error) => {
-      assert.match(err.message, /^The event id "solo@fm" matched 2 records that the calendar server returned without their event data: "Work/);
+      assert.ok(err.message.startsWith(`${unreadableLead('solo@fm', 'delete')} It matched 2 records`), err.message);
       assert.ok(!/[\r\n\u2028\u2029]/.test(err.message), err.message);
       return true;
     });
-  });
-
-  // A copy read whole, carrying the exact UID, whose etag propstat failed: it was checked, so it
-  // is a second record, but with no etag no write can be conditional on it, so it is never the
-  // copy acted on.
-  it('counts a matching copy that came back without an etag toward the ambiguity refusal', async () => {
-    for (const [tool, call] of [
-      ['update', (c: CalDAVCalendarClient) => c.updateCalendarEvent('dup@fm', { title: 'X' })],
-      ['delete', (c: CalDAVCalendarClient) => c.deleteCalendarEvent('dup@fm')],
-    ] as Array<[string, (c: CalDAVCalendarClient) => Promise<unknown>]>) {
-      const stored = duplicateInTwoCalendars();
-      delete stored[WORK_URL][0].etag;
-      const { client, mockDAVClient } = makeLookupClient(twoCalendars, stored);
-      const err = await outcome(call(client));
-      assert.equal(mockDAVClient.updateCalendarObject.mock.callCount(), 0, tool);
-      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, tool);
-      assert.ok(err instanceof Error, `${tool} went ahead`);
-      assert.match(err.message, /names 2 records/, tool);
-      for (const span of [`"Personal" ("${PERSONAL_URL}dup.ics")`, `"Work" ("${WORK_URL}dup.ics")`]) {
-        assert.ok(err.message.includes(span), `${tool} refusal omitted ${span}`);
-      }
-    }
-  });
-
-  it('refuses a url-addressed write when a record without an etag carries that url as its UID', async () => {
-    const realUrl = PERSONAL_URL + 'real.ics';
-    const stored = decoyCarryingAnAddress(realUrl);
-    delete stored[WORK_URL][0].etag;
-    const { client, mockDAVClient } = makeLookupClient(decoyCalendars, stored);
-    const err = await outcome(client.deleteCalendarEvent(realUrl));
-    assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
-    assert.ok(err instanceof Error, 'the delete went ahead');
-    assertAddressCollision(realUrl, 'delete')(err);
   });
 
   it('does not offer the addressed record\'s UID when a copy without an etag holds it too', async () => {
@@ -4166,22 +4277,20 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
     assert.ok(updatedData.includes('DTSTART;VALUE=DATE:20260405'));
   });
 
-  // A resource carrying no VEVENT does not RESOLVE at all now (#137): a copy counts only when it
-  // came back whole, and a payload with nothing to read is not a record this server can act on.
-  // So the answer is the ordinary not-found rather than a message about the resource's contents —
-  // the caller's id matched nothing usable, which is what "not found" says.
-  it('does not resolve an event whose payload holds no VEVENT', async () => {
+  // A resource carrying no VEVENT is not a record this server can act on (#137), and one the
+  // lookup was handed for the id refuses the write rather than reading as absent (#239).
+  it('refuses to update an event whose payload holds no VEVENT', async () => {
     const noVeventIcal = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR';
     const objects = [{ data: noVeventIcal, url: '/cal/bad.ics' }];
     const { client } = createMockedPatchClient(objects);
 
     await assert.rejects(
       () => client.updateCalendarEvent('bad@fm', { title: 'X' }),
-      /Calendar event not found/
+      /^Error: This server will not update anything for the event id "bad@fm"\. Nothing was changed\. It matched a record that came back missing /
     );
   });
 
-  it('does not resolve an event whose VEVENT block is malformed (BEGIN without END)', async () => {
+  it('refuses to update an event whose VEVENT block is malformed (BEGIN without END)', async () => {
     // Has BEGIN:VEVENT (passes a string check) but no END:VEVENT, so nothing parses out of it —
     // the same class as the no-VEVENT case above, and answered the same way.
     const brokenIcal = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:broken@fm\r\nEND:VCALENDAR';
@@ -4190,7 +4299,7 @@ describe('CalDAVCalendarClient.updateCalendarEvent (patch-based)', () => {
 
     await assert.rejects(
       () => client.updateCalendarEvent('broken@fm', { title: 'X' }),
-      /Calendar event not found/
+      /^Error: This server will not update anything for the event id "broken@fm"\. Nothing was changed\. It matched a record that came back missing /
     );
   });
 
@@ -5068,10 +5177,9 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     assert.equal(err.name, 'InvalidInputError');
     assert.equal(
       err.message,
-      `The event id "${UID}" matched a record that the calendar server returned without its event data: "Work" ("${OTHER_CAL_URL}weekly.ics"). `
-      + 'This server cannot read it, so it cannot tell whether it is the event you mean or another copy of it, and will not delete anything for this id. '
-      + `Nothing was changed. To act on a copy this server could read, pass its url as eventId: "Personal" ("${EVENT_URL}"). `
-      + 'The Fastmail web interface can still change or delete the record it could not read.',
+      `This server will not delete anything for the event id "${UID}". Nothing was changed. It matched a record that came back `
+      + `missing its url, its event data, an event with a UID, or its entity tag: "Work" ("${OTHER_CAL_URL}weekly.ics"). `
+      + `To act on a copy this server could read, pass its url as eventId: "Personal" ("${EVENT_URL}").`,
     );
   });
 
