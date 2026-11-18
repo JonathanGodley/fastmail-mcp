@@ -26,7 +26,7 @@ const FIXTURE_TEST = [
   "writeFileSync('ran', '');",
   "test('target is ok', async () => {",
   "  const text = readFileSync('target.txt', 'utf8');",
-  "  if (text.includes('HANG')) { writeFileSync('hanging', String(process.pid)); await new Promise((r) => setTimeout(r, 60000)); }",
+  "  if (text.includes('HANG')) { writeFileSync('hanging', String(process.pid)); await new Promise((r) => setTimeout(r, 120000)); }",
   "  assert.ok(text.includes('status = ok'), 'status changed');",
   '});',
   "test('always fails', () => {",
@@ -74,6 +74,7 @@ function run(levers: unknown[]) {
 
 // The hanging fixture test's own process must be dead, not merely cut off from the script.
 async function assertHangingProcessGone() {
+  assert.ok(existsSync(join(work, 'hanging')), 'the hanging fixture test never started');
   const pid = Number(readFileSync(join(work, 'hanging'), 'utf8'));
   assert.ok(pid > 0, 'the fixture did not record its pid');
   const alive = () => {
@@ -170,11 +171,12 @@ test('a failure with no stack frame in the repo is INVALID, not RED', () => {
 
 test('a run past timeoutMs is TIMEOUT, kills the test, exits promptly, and restores the target', async () => {
   const started = Date.now();
-  const r = run([lever({ replace: 'status = HANG', timeoutMs: 5000 })]);
-  // The fixture hangs for 60 s; a test runner left running would hold the script that long.
-  assert.ok(Date.now() - started < 30000, `the script took ${Date.now() - started} ms to exit`);
+  // 20 s covers the fixture's start on a loaded runner, so the timeout fires after it hangs.
+  const r = run([lever({ replace: 'status = HANG', timeoutMs: 20000 })]);
+  // The fixture hangs for 120 s; a test runner left running would hold the script that long.
+  assert.ok(Date.now() - started < 60000, `the script took ${Date.now() - started} ms to exit`);
   assert.equal(r.status, 1, r.out);
-  assert.match(r.out, /^status lever: TIMEOUT - the test ran past 5000 ms with the lever in place$/m);
+  assert.match(r.out, /^status lever: TIMEOUT - the test ran past 20000 ms with the lever in place$/m);
   assert.ok(readFileSync(join(work, 'target.txt')).equals(TARGET));
   await assertHangingProcessGone();
 });
