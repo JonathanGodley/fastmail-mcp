@@ -208,6 +208,58 @@ describe('getEmails', () => {
     assert.equal(countFilter.inMailboxOtherThan, undefined);
   });
 
+  it('the four keyword flags come before $draft, each its own condition', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }),
+    );
+
+    await client.getEmails({
+      isUnread: true, isPinned: false, isAnswered: false, isForwarded: true, excludeDrafts: true,
+      includeTrash: true, includeSpam: true,
+    });
+    const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+    assert.deepEqual(filter, {
+      operator: 'AND',
+      conditions: [
+        { notKeyword: '$seen' }, { notKeyword: '$flagged' }, { notKeyword: '$answered' },
+        { hasKeyword: '$forwarded' }, { notKeyword: '$draft' },
+      ],
+    });
+  });
+
+  // Otherwise the withheld count would describe a wider set than the results.
+  it('the hidden-count query narrows by the keyword flags', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0, broaderTotal: 0 }),
+    );
+
+    await client.getEmails({ isUnread: true });
+    const batch = callArguments(makeReq)[0].methodCalls;
+    assert.equal(batch.length, 3);
+    assert.deepEqual(batch[0][1].filter, {
+      operator: 'AND',
+      conditions: [{ inMailboxOtherThan: ['mb-trash', 'mb-junk'] }, { notKeyword: '$seen' }],
+    });
+    assert.deepEqual(batch[2][1].filter, { notKeyword: '$seen' });
+  });
+
+  it('a keyword flag with mailbox ANDs with inMailbox and runs no count query', async () => {
+    stubMailboxes(client);
+    const makeReq = stubRequests(client, async () =>
+      queryResponse({ ids: [], list: [], total: 0 }),
+    );
+
+    await client.getEmails({ mailbox: 'inbox', isAnswered: false });
+    const batch = callArguments(makeReq)[0].methodCalls;
+    assert.equal(batch.length, 2);
+    assert.deepEqual(batch[0][1].filter, {
+      operator: 'AND',
+      conditions: [{ inMailbox: 'mb-inbox' }, { notKeyword: '$answered' }],
+    });
+  });
+
   // getEmails does not clamp: the callers that need a bound (list_emails) apply clampLimit
   // themselves before calling in, so the client must forward whatever limit it is given.
   it('passes the limit through to JMAP unclamped', async () => {
@@ -2843,6 +2895,47 @@ describe('computeExclusion', () => {
   });
 });
 
+// ---------- the keyword filters, on both list and search ----------
+
+describe('keyword filters on getEmails and searchEmails', () => {
+  const FLAGS = [
+    // [flag, keyword, the condition `true` sends]
+    ['isUnread', '$seen', 'notKeyword'],
+    ['isPinned', '$flagged', 'hasKeyword'],
+    ['isAnswered', '$answered', 'hasKeyword'],
+    ['isForwarded', '$forwarded', 'hasKeyword'],
+  ] as const;
+  const METHODS = ['getEmails', 'searchEmails'] as const;
+
+  for (const method of METHODS) {
+    for (const [flag, keyword, whenTrue] of FLAGS) {
+      const whenFalse = whenTrue === 'hasKeyword' ? 'notKeyword' : 'hasKeyword';
+      // The conditions on `keyword` in the visible filter, from a call with only `flag` set.
+      const onKeyword = async (value: boolean | undefined) => {
+        const client = makeClient();
+        stubMailboxes(client);
+        const makeReq = stubRequests(client, async () => queryResponse({ ids: [], list: [], total: 0 }));
+        await client[method]({ [flag]: value, includeTrash: true, includeSpam: true });
+        const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
+        const conds: any[] = filter.operator === 'AND' ? filter.conditions : [filter];
+        return conds.filter((c) => c.hasKeyword === keyword || c.notKeyword === keyword);
+      };
+
+      it(`${method} ${flag}:true => one ${whenTrue} ${keyword}`, async () => {
+        assert.deepEqual(await onKeyword(true), [{ [whenTrue]: keyword }]);
+      });
+
+      it(`${method} ${flag}:false => one ${whenFalse} ${keyword}`, async () => {
+        assert.deepEqual(await onKeyword(false), [{ [whenFalse]: keyword }]);
+      });
+
+      it(`${method} ${flag} omitted => no condition on ${keyword}`, async () => {
+        assert.deepEqual(await onKeyword(undefined), []);
+      });
+    }
+  }
+});
+
 // ---------- searchEmails exclusion + hidden-count semantics ----------
 
 describe('searchEmails exclusion + count', () => {
@@ -2896,29 +2989,6 @@ describe('searchEmails exclusion + count', () => {
     assert.ok(filter.conditions.some((c: any) => c.notKeyword === '$seen'));
     assert.ok(filter.conditions.some((c: any) => c.hasKeyword === '$flagged'));
   });
-
-  for (const [flag, keyword] of [['isAnswered', '$answered'], ['isForwarded', '$forwarded']] as const) {
-    const onKeyword = async (value: boolean | undefined) => {
-      const makeReq = stubRequests(client, async () =>
-        queryResponse({ ids: [], list: [], total: 0 }));
-      await client.searchEmails({ query: 'x', [flag]: value, includeTrash: true, includeSpam: true });
-      const filter = callArguments(makeReq)[0].methodCalls[0][1].filter;
-      const conds: any[] = filter.operator === 'AND' ? filter.conditions : [filter];
-      return conds.filter((c) => c.hasKeyword === keyword || c.notKeyword === keyword);
-    };
-
-    it(`${flag}:true => one hasKeyword ${keyword}`, async () => {
-      assert.deepEqual(await onKeyword(true), [{ hasKeyword: keyword }]);
-    });
-
-    it(`${flag}:false => one notKeyword ${keyword}`, async () => {
-      assert.deepEqual(await onKeyword(false), [{ notKeyword: keyword }]);
-    });
-
-    it(`${flag} omitted => no condition on ${keyword}`, async () => {
-      assert.deepEqual(await onKeyword(undefined), []);
-    });
-  }
 
   it('the four keyword flags are four separate conditions in one AND', async () => {
     const makeReq = stubRequests(client, async () =>
