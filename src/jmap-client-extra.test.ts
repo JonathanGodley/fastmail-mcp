@@ -2910,7 +2910,6 @@ describe('keyword filters on getEmails and searchEmails', () => {
   for (const method of METHODS) {
     for (const [flag, keyword, whenTrue] of FLAGS) {
       const whenFalse = whenTrue === 'hasKeyword' ? 'notKeyword' : 'hasKeyword';
-      // The conditions on `keyword` in the visible filter, from a call with only `flag` set.
       const onKeyword = async (value: boolean | undefined) => {
         const client = makeClient();
         stubMailboxes(client);

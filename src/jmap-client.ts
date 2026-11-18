@@ -278,8 +278,6 @@ export const EMAIL_PROPERTIES_COMPACT = [
 export const EMAIL_SORT_VALUES = ['date', 'sentAt', 'size', 'from', 'to', 'subject'] as const;
 export type EmailSortBy = typeof EMAIL_SORT_VALUES[number];
 
-// The keyword filters getEmails and searchEmails share. Each is tri-state: absent adds no
-// condition.
 export interface KeywordFilters {
   isUnread?: boolean;
   isPinned?: boolean;
