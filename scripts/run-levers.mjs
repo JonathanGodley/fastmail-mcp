@@ -4,18 +4,25 @@
 //
 //   node scripts/run-levers.mjs levers.json
 //
-// levers.json is an array of { label, target, find, replace, test, pattern }: `target` and
-// `test` are paths relative to the current directory, `find` must occur exactly once in
-// `target`, and `pattern` is passed to the test runner's --test-name-pattern. For each
-// lever, in order, the edit is written, the one test file runs under tsx --test (the
-// runner `npm test` uses), and the original bytes are put back and compared. One line per
-// lever, for a commit message: RED with the first failing test and the file:line of its
-// failing assertion, GREEN (the pin did not notice the lever), or INVALID with the reason.
-// Exits 1 if any lever is GREEN or INVALID, 2 on a usage error or a refusal to start.
+// levers.json is an array of { label, target, find, replace, test, pattern, timeoutMs? }:
+// `target` and `test` are paths relative to the current directory, `find` must occur exactly
+// once in `target` (overlapping matches count), `pattern` is a regular expression passed to
+// the test runner's --test-name-pattern, and `timeoutMs` (default 300000) bounds each run of
+// the test. For each lever, in order, the edit is written, the one test file runs under
+// tsx --test (the runner `npm test` uses), and the original bytes are put back and compared.
+// One line per lever, for a commit message:
+//   RED      a matching test failed an assertion; names the test and the assertion's file:line
+//   GREEN    the test still passed: the pin did not notice the lever
+//   THREW    a matching test failed by a throw that is not an assertion, so no pin went red
+//   TIMEOUT  the test ran past timeoutMs
+//   INVALID  the lever proves nothing, with the reason
+// Exits 0 only if every lever is RED; 1 otherwise; 2 on a usage error or a refusal to start.
 //
-// It refuses to start if any target has uncommitted changes, so a restore never destroys
-// work. A test that already fails without the lever makes the lever INVALID, since its red
-// would prove nothing.
+// It refuses to start if `git status` shows a change to any target, so a restore never
+// destroys work. A gitignored target is invisible to that check and is not refused; the
+// restore still writes back the bytes read before the edit. The target is restored on
+// SIGINT, SIGTERM and SIGHUP too, but SIGKILL or a crash can leave it modified; the next
+// run's check then refuses until it is restored by hand (`git checkout -- <target>`).
 //
 // This file is also the test reporter the child run loads; it prints one marked JSON line
 // per finished test, which is all the parent reads.
@@ -23,11 +30,13 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { constants } from 'node:os';
 import { relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const MARK = 'run-levers-event ';
 const SELF = fileURLToPath(import.meta.url);
+const DEFAULT_TIMEOUT_MS = 300000;
 
 export default async function* reporter(source) {
   for await (const { type, data } of source) {
@@ -39,12 +48,23 @@ export default async function* reporter(source) {
       failed: type === 'test:fail',
       name: data.name,
       file: data.file,
+      assertion: err?.code === 'ERR_ASSERTION',
+      errorName: err?.name ?? typeof err,
       stack: err ? String(err.stack ?? err.message ?? err) : '',
     })}\n`;
   }
 }
 
-function runTest(testFile, pattern) {
+const current = { target: null, original: null, child: null };
+
+// tsx runs the tests in a grandchild, which a plain kill() on Windows would orphan.
+function killTree(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+  else child.kill('SIGKILL');
+}
+
+function runTest(testFile, pattern, timeoutMs) {
   const tsxCli = createRequire(import.meta.url).resolve('tsx/cli');
   const args = [tsxCli, '--test', `--test-name-pattern=${pattern}`,
     `--test-reporter=${pathToFileURL(SELF).href}`, '--test-reporter-destination=stdout', testFile];
@@ -54,31 +74,40 @@ function runTest(testFile, pattern) {
     const { NODE_TEST_CONTEXT, ...env } = process.env;
     const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env });
     current.child = child;
-    let out = '';
-    child.stdout.on('data', (b) => { out += b; });
-    child.stderr.on('data', (b) => { out += b; });
-    child.on('error', fail);
-    child.on('close', (code) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (b) => { stdout += b; });
+    child.stderr.on('data', (b) => { stderr += b; });
+    const timer = setTimeout(() => {
+      killTree(child);
       current.child = null;
-      // A file that fails to load is reported as a test named by the file's path.
-      const events = out.split('\n').filter((l) => l.startsWith(MARK)).map((l) => JSON.parse(l.slice(MARK.length)))
-        .filter((e) => !e.file || resolve(e.name) !== resolve(e.file));
-      done({ code, events, out });
+      done({ timedOut: true });
+    }, timeoutMs);
+    child.on('error', (e) => { clearTimeout(timer); fail(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      current.child = null;
+      try {
+        // A file that fails to load is reported as a test named by the file's path.
+        const events = stdout.split('\n').filter((l) => l.startsWith(MARK)).map((l) => JSON.parse(l.slice(MARK.length)))
+          .filter((e) => !e.file || resolve(e.name) !== resolve(e.file));
+        done({ code, events, stderr });
+      } catch (e) {
+        fail(new Error(`cannot read the test run's report: ${e.message}`));
+      }
     });
   });
 }
 
 // The first stack frame in the test file itself, else the first in the repo outside
 // node_modules: the line of the assertion, not of the test's declaration.
-function assertionSite(stack, testFile) {
+function failureSite(stack, testFile) {
   const frames = [...stack.matchAll(/(?:file:\/\/\/?)?((?:[A-Za-z]:)?[\\/][^\s():]*?):(\d+):\d+/g)]
     .map((m) => ({ file: resolve(decodeURIComponent(m[1]).replace(/^\/([A-Za-z]:)/, '$1')), line: m[2] }));
   const inRepo = (f) => !relative(process.cwd(), f.file).startsWith('..') && !f.file.includes(`${sep}node_modules${sep}`);
   const hit = frames.find((f) => f.file === testFile) ?? frames.find(inRepo);
   return hit ? `${relative(process.cwd(), hit.file).split(sep).join('/')}:${hit.line}` : null;
 }
-
-const current = { target: null, original: null, child: null };
 
 function restore() {
   if (current.target === null) return;
@@ -89,15 +118,15 @@ function restore() {
 }
 
 function onSignal(signal) {
-  current.child?.kill();
+  if (current.child) killTree(current.child);
   restore();
   console.error(`run-levers: ${signal}; target restored`);
-  process.exit(130);
+  process.exit(128 + constants.signals[signal]);
 }
 
 function count(haystack, needle) {
   let n = 0;
-  for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + needle.length)) n++;
+  for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + 1)) n++;
   return n;
 }
 
@@ -105,6 +134,8 @@ async function runLever(lever, baselines) {
   for (const key of ['label', 'target', 'find', 'replace', 'test', 'pattern']) {
     if (typeof lever[key] !== 'string') return `INVALID - "${key}" is not a string`;
   }
+  const timeoutMs = lever.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) return 'INVALID - "timeoutMs" is not a positive integer';
   const target = resolve(lever.target);
   const testFile = resolve(lever.test);
   let original;
@@ -114,12 +145,13 @@ async function runLever(lever, baselines) {
     return `INVALID - cannot read ${lever.target}: ${e.code ?? e.message}`;
   }
   const find = Buffer.from(lever.find, 'utf8');
-  const hits = count(original, find);
-  if (find.length === 0 || hits !== 1) return `INVALID - find occurs ${hits} times in ${lever.target}, not once`;
+  const hits = find.length === 0 ? 0 : count(original, find);
+  if (hits !== 1) return `INVALID - find occurs ${hits} times in ${lever.target}, not once`;
 
-  const key = `${testFile}\0${lever.pattern}`;
-  if (!baselines.has(key)) baselines.set(key, await runTest(testFile, lever.pattern));
+  const key = `${testFile}\0${lever.pattern}\0${timeoutMs}`;
+  if (!baselines.has(key)) baselines.set(key, await runTest(testFile, lever.pattern, timeoutMs));
   const base = baselines.get(key);
+  if (base.timedOut) return `INVALID - the test ran past ${timeoutMs} ms without the lever`;
   if (base.events.length === 0) return `INVALID - no test in ${lever.test} matches "${lever.pattern}"`;
   if (base.code !== 0) return 'INVALID - the test fails without the lever';
 
@@ -130,15 +162,18 @@ async function runLever(lever, baselines) {
   current.original = original;
   try {
     writeFileSync(target, changed);
-    run = await runTest(testFile, lever.pattern);
+    run = await runTest(testFile, lever.pattern, timeoutMs);
   } finally {
     restore();
   }
+  if (run.timedOut) return `TIMEOUT - the test ran past ${timeoutMs} ms with the lever in place`;
+  if (run.events.length === 0 && run.code === 0) return `INVALID - with the lever in place no test matches "${lever.pattern}"`;
   if (run.code === 0) return 'GREEN - the test still passes with the lever in place';
-  // RED only for a test failing at a located line: a lever that breaks loading proves no pin.
   const first = run.events.find((e) => e.failed);
+  // A lever that stops the file loading turns no pin red.
   if (!first) return `INVALID - the run failed (exit ${run.code}) but no matching test did; the lever may break loading`;
-  const site = assertionSite(first.stack, testFile);
+  const site = failureSite(first.stack, testFile);
+  if (!first.assertion) return `THREW - "${first.name}" threw ${first.errorName} at ${site ?? 'no stack frame in the repo'}, not at an assertion`;
   if (!site) return `INVALID - "${first.name}" failed with no stack frame in the repo`;
   return `RED - "${first.name}" at ${site}`;
 }
@@ -171,13 +206,17 @@ async function main(argv) {
       return 2;
     }
   }
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, onSignal);
 
   const baselines = new Map();
   let bad = false;
   for (const lever of levers) {
-    const verdict = await runLever(lever ?? {}, baselines);
+    let verdict;
+    try {
+      verdict = await runLever(lever ?? {}, baselines);
+    } catch (e) {
+      verdict = `ERROR - ${e.message}`;
+    }
     if (!verdict.startsWith('RED')) bad = true;
     console.log(`${lever?.label ?? '(no label)'}: ${verdict}`);
   }
