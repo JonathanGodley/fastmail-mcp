@@ -581,8 +581,7 @@ default with a hidden-count note. The accepted residuals:
   `delete_calendar_event`, `update_contact` and `delete_contact` return `InvalidParams` for an id
   that resolves to nothing, so each confirms whether that event or contact exists. The calendar
   writes also refuse an id that matched a record the server returned without its data, naming that
-  record (#239), which `get_calendar_event` reads as not-found; the record is one
-  `list_calendar_events` already lists, as a row with no dates. `create_calendar_event`
+  record (#239), which `get_calendar_event` reads as not-found. `create_calendar_event`
   does the same for a `calendarId`. Accepted on exactly the footing above: every one of these ids is
   already readable through `list_calendar_events` / `get_calendar_event` / `list_contacts` /
   `get_contact` with the same token, so the rejection discloses nothing a caller holding these tools

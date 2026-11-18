@@ -1437,7 +1437,11 @@ describe('CalDAVCalendarClient event lookup', () => {
   // `withheldFrom` models a server whose `calendar-data` propstat failed on one path (#239): the
   // store still matches on the stored UID, and that path's answer carries `withheldAs` (tsdav's
   // `undefined` for a failed propstat, `{}` for an empty `<c:calendar-data/>`) as its data.
-  type StoredObject = { data?: string; url: string; etag?: string; withheldFrom?: 'query' | 'fetch'; withheldAs?: unknown };
+  // `etagWithheldFrom` does the same for the `getetag` propstat.
+  type StoredObject = {
+    data?: string; url: string; etag?: string;
+    withheldFrom?: 'query' | 'fetch'; withheldAs?: unknown; etagWithheldFrom?: 'query' | 'fetch';
+  };
 
   function eventIcal(uid: string, summary = 'Meeting'): string {
     return [
@@ -1472,8 +1476,11 @@ describe('CalDAVCalendarClient event lookup', () => {
   function makeObjectStore(byCalendarUrl: Record<string, StoredObject[]>) {
     return mock.fn(async (params: FetchObjectsParams) => {
       const objects = byCalendarUrl[(params.calendar as { url?: string })?.url ?? ''] ?? [];
-      const answer = (path: 'query' | 'fetch') => ({ withheldFrom, withheldAs, ...o }: StoredObject) =>
-        (withheldFrom === path ? { ...o, data: withheldAs } : o) as DAVCalendarObject;
+      const answer = (path: 'query' | 'fetch') => ({ withheldFrom, withheldAs, etagWithheldFrom, ...o }: StoredObject) => ({
+        ...o,
+        ...(withheldFrom === path ? { data: withheldAs } : {}),
+        ...(etagWithheldFrom === path ? { etag: undefined } : {}),
+      }) as DAVCalendarObject;
       const objectUrls = (params as { objectUrls?: string[] }).objectUrls;
       if (objectUrls) return objects.filter(o => objectUrls.includes(o.url)).map(answer('fetch'));
       const uid = uidInFilter((params as { filters?: unknown }).filters);
@@ -2425,6 +2432,24 @@ describe('CalDAVCalendarClient event lookup', () => {
     assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
     assert.ok(err instanceof Error, 'the delete went ahead');
     assertAddressCollision(realUrl, 'delete')(err);
+  });
+
+  it('does not offer the addressed record\'s UID when a copy without an etag holds it too', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const stored = decoyCarryingAnAddress(realUrl);
+    stored[WORK_URL].push({ data: eventIcal('real@fm', 'Duplicate'), url: WORK_URL + 'dup.ics' });
+    const { client } = makeLookupClient(decoyCalendars, stored);
+    await assert.rejects(() => client.deleteCalendarEvent(realUrl), assertUnreachableCollision('delete'));
+  });
+
+  // The UID query missed the etag of the record the url fetch read whole: the same record, so
+  // no collision with itself.
+  it('does not count the addressed record as its own etag-less copy', async () => {
+    const { client, mockDAVClient } = makeLookupClient(twoCalendars, {
+      [PERSONAL_URL]: [{ data: eventIcal(SELF_URL, 'Self'), url: SELF_URL, etag: '"e"', etagWithheldFrom: 'query' }],
+    });
+    await client.deleteCalendarEvent(SELF_URL);
+    assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 1);
   });
 
   // The premise the stub's shape rests on, pinned against tsdav itself: a multistatus whose
