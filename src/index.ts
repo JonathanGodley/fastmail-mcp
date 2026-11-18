@@ -1118,8 +1118,7 @@ const TOOLS = [
       },
       {
         name: 'search_emails',
-        // One search tool (#12): a new filter is a parameter here. list_emails carries only
-        // the four keyword flags.
+        // A new search filter is a parameter on this tool, not a new search tool.
         description: 'Search emails. Provide a free-text query matched across subject, body, and participants (plain words — NOT operator syntax: "from:alice" is matched literally; for structured matching use this tool\'s own from/to/cc/bcc/subject params). All filters combine with AND. Trash and Spam are excluded by default (deleted mail lives in Trash; set includeTrash/includeSpam to include them); drafts are included. Set mailbox (incl. Trash/Spam) to search exactly that mailbox, which ignores the default exclusion; requiredMailboxes/excludeMailboxes scope across several mailboxes at once. ' + KEYWORD_MARK_CAVEAT + ' ' + SEARCH_SCOPE_RELIABILITY_CONTRACT + ` Recovery example: if a search returns a "2 ${excludedCountPhrase('Trash/Spam')}" note, re-run with includeTrash:true (or mailbox:"trash") to find the deleted message.` + ' Returns simplified format (metadata + preview, no bodies); use raw=true for original JMAP, get_email for bodies. The date field is local time with a UTC offset (raw=true returns canonical JMAP UTC). ' + LIST_SENT_AT_DESC + ' ' + LOCATION_FIELDS_DESC + ' ' + PREVIEW_SIZE_DESC + ' ' + COMPACT_ATTACHMENT_DESC + ' query is optional: search_emails with no query returns recent mail matching only the structural filters (for a plain folder listing use list_emails). Results come newest first; sortBy orders them by sentAt, size, from, to or subject instead, e.g. sortBy:"size" for the largest messages first. limit default 20, max 100. ' + FIELDS_TOOL_DESC + ' ' + POSITION_TOOL_DESC,
         inputSchema: {
           type: 'object',

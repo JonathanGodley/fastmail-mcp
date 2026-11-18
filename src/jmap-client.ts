@@ -4747,7 +4747,6 @@ export class JmapClient {
     const allExcludeIds = [...exclusion.excludeIds, ...callerExcludeIds];
     if (allExcludeIds.length > 0) base.inMailboxOtherThan = allExcludeIds;
 
-    // One condition per keyword: a FilterCondition allows only one hasKeyword/notKeyword.
     const combine = (b: any, c: any[], bEmpty: boolean) =>
       c.length === 0 ? b
       : (bEmpty && c.length === 1) ? c[0]
