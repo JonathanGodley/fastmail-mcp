@@ -10211,10 +10211,10 @@ describe('eventIntersectsWindow', () => {
   // machine running the tests happens to be in. 'UTC' keeps the cases below about what they
   // are about; the zone behaviour itself is asserted separately, in zones that are not UTC.
   it('excludes a series master dated years before the window', () => {
-    // The exact failure #64 reported: a ten-day window in March 2027 answered with an
-    // August 2020 date.
+    // The failure #64 reported: a ten-day window in March 2027 answered with a date years
+    // before it.
     assert.equal(
-      eventIntersectsWindow({ start: '2020-08-28', end: '2020-08-29' }, WINDOW_START, WINDOW_END, 'UTC'),
+      eventIntersectsWindow({ start: '2019-06-12', end: '2019-06-13' }, WINDOW_START, WINDOW_END, 'UTC'),
       false,
     );
   });
@@ -10789,7 +10789,7 @@ describe('CalDAVCalendarClient.getCalendarEvents across several calendars', () =
     const client = new CalDAVCalendarClient({ username: 'test', password: 'test' });
     (client as any).client = makeMockDAVClient([{ displayName: 'A', url: '/cal/a/' }], {
       fetchCalendarObjects: mock.fn(async (_p: FetchObjectsParams) => [
-        { data: makeIcal('old@fm', 'Pay Day', '20200828T000000Z'), url: '/old.ics' },
+        { data: makeIcal('old@fm', 'Old event', '20190612T000000Z'), url: '/old.ics' },
         { data: makeIcal('now@fm', 'In window', '20270305T090000Z'), url: '/now.ics' },
       ]),
     });
