@@ -235,6 +235,17 @@ two-copy result differs by tool, and the split is the whole convention:
   testable promise rather than an accident), sets `otherCopies` on its result, and appends
   `buildAmbiguousEventNote`'s trailing line.
 
+**A hit the server returned without its data is neither counted nor dismissed** (#239). The
+server matches UIDs case-insensitively, so only the parsed UID says whether a hit is a copy,
+and a hit whose `calendar-data` propstat failed has none to parse. The lookup reports such hits
+in `CalendarObjectLookup.unreadable`, and update and delete refuse through
+`refuseUnreadableMatches` before any other check, naming each. The refusal offers a readable
+copy's url only on the UID path, where passing it means the UID query no longer asks for this
+id; elsewhere nothing the caller passes could help. The lookup reports rather than throws
+because `get_calendar_event` shares it and its answer for this case is not decided; today it
+reads the hit as not-found. A hit read whole with the exact UID but no etag is the opposite
+case: checked, so it counts toward this refusal and the url collision, but never acted on.
+
 **Addressing a record is not naming it.** Both forms of `eventId` are always tried, so a
 record whose UID literally spells another record's resource `url` puts two records in one
 result. The disambiguation is made on the RESULT rather than on the look of the string: where a
@@ -249,8 +260,8 @@ or destroy an event never shown under that id. That holds even when the addresse
 UID is the same url: two rows then list one id. `addressCollisionError` refuses, names both
 records' urls, and quotes the addressed record's own UID where that UID reaches it alone; the
 other record's url reaches that one. Where it does not (no UID, the url itself, a UID that is
-another resource's url, or a UID another record also holds, each of which a refusal would then
-refuse in turn), the refusal offers no
+another resource's url, or a UID another record also holds, read whole or matched without its
+data (#239), each of which a refusal would then refuse in turn), the refusal offers no
 id rather than one that loops, and names the Fastmail web interface. The url is
 therefore not an escape hatch in this one case, and saying "pass the url" would send the
 caller back to the id they passed. A url-shaped id with no resource at that address is
@@ -841,7 +852,10 @@ calendar rejects raised in `src/caldav-client.ts` itself follow the same rule an
 `InvalidInputError` directly: the start/end frame and ordering checks below, the date
 format and control-character rejects, the participant-address rejects, a `calendarId` or
 `eventId` that resolves to nothing, and the repeating-event refusal that
-`update_calendar_event` / `delete_calendar_event` raise (see below). `src/contacts-calendar.ts` follows it too — its
+`update_calendar_event` / `delete_calendar_event` raise (see below). The refusal those two raise
+for a matching record returned without its data (#239) is split by the same rule:
+`InvalidInputError` when it offers a readable copy's url, a plain `Error` that says to retry when
+nothing the caller passes could help. `src/contacts-calendar.ts` follows it too — its
 input rejects (a contact with neither name nor address, an update naming no field, an
 empty entry array, an ambiguous entry edit, an update aimed at a card that is not an individual) and its
 not-found rejects are `InvalidInputError`, and its create/update/delete set-errors route
