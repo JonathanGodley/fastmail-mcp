@@ -26,7 +26,7 @@ const FIXTURE_TEST = [
   "writeFileSync('ran', '');",
   "test('target is ok', async () => {",
   "  const text = readFileSync('target.txt', 'utf8');",
-  "  if (text.includes('HANG')) { writeFileSync('hanging', ''); await new Promise((r) => setTimeout(r, 60000)); }",
+  "  if (text.includes('HANG')) { writeFileSync('hanging', String(process.pid)); await new Promise((r) => setTimeout(r, 60000)); }",
   "  assert.ok(text.includes('status = ok'), 'status changed');",
   '});',
   "test('always fails', () => {",
@@ -70,6 +70,23 @@ function writeLevers(levers: unknown[]) {
 function run(levers: unknown[]) {
   const r = spawnSync(process.execPath, [SCRIPT, writeLevers(levers)], { cwd: work, encoding: 'utf8' });
   return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+// The hanging fixture test's own process must be dead, not merely cut off from the script.
+async function assertHangingProcessGone() {
+  const pid = Number(readFileSync(join(work, 'hanging'), 'utf8'));
+  assert.ok(pid > 0, 'the fixture did not record its pid');
+  const alive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code !== 'ESRCH';
+    }
+  };
+  const deadline = Date.now() + 10000;
+  while (alive() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+  assert.ok(!alive(), `the fixture test process ${pid} is still running`);
 }
 
 beforeEach(() => {
@@ -151,7 +168,7 @@ test('a failure with no stack frame in the repo is INVALID, not RED', () => {
   assert.match(r.out, /^status lever: INVALID - "fails without a stack when told" failed with no stack frame in the repo$/m);
 });
 
-test('a run past timeoutMs is TIMEOUT, the script exits promptly, and the target is restored', () => {
+test('a run past timeoutMs is TIMEOUT, kills the test, exits promptly, and restores the target', async () => {
   const started = Date.now();
   const r = run([lever({ replace: 'status = HANG', timeoutMs: 5000 })]);
   // The fixture hangs for 60 s; a test runner left running would hold the script that long.
@@ -159,6 +176,7 @@ test('a run past timeoutMs is TIMEOUT, the script exits promptly, and the target
   assert.equal(r.status, 1, r.out);
   assert.match(r.out, /^status lever: TIMEOUT - the test ran past 5000 ms with the lever in place$/m);
   assert.ok(readFileSync(join(work, 'target.txt')).equals(TARGET));
+  await assertHangingProcessGone();
 });
 
 test('it refuses to start when a target has uncommitted changes, and runs no test', () => {
@@ -186,5 +204,6 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     child.kill(signal);
     assert.equal(await closed, 128 + constants.signals[signal], out);
     assert.ok(readFileSync(join(work, 'target.txt')).equals(TARGET));
+    await assertHangingProcessGone();
   });
 }

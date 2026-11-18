@@ -62,14 +62,22 @@ const current = { target: null, original: null, child: null };
 // still running and still holding our pipes. So off Windows the child leads its own process
 // group (spawned detached) and the whole group is killed; on Windows taskkill /T kills the tree.
 const DETACHED = process.platform !== 'win32';
+// Returns why the kill failed, or null. A tree that is already gone is not a failure.
 function killTree(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    if (DETACHED) process.kill(-child.pid, 'SIGKILL');
-    else spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-  } catch {
-    // The group is already gone.
+  if (child.exitCode !== null || child.signalCode !== null) return null;
+  if (DETACHED) {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch (e) {
+      if (e.code !== 'ESRCH') return `kill of process group ${child.pid} failed: ${e.code ?? e.message}`;
+    }
+    return null;
   }
+  const r = spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { encoding: 'utf8' });
+  // taskkill exits 128 when the process is not found.
+  if (r.error) return `taskkill failed: ${r.error.message}`;
+  if (r.status !== 0 && r.status !== 128) return `taskkill /pid ${child.pid} exited ${r.status}: ${(r.stderr || r.stdout).trim()}`;
+  return null;
 }
 
 function runTest(testFile, pattern, timeoutMs) {
@@ -87,13 +95,13 @@ function runTest(testFile, pattern, timeoutMs) {
     child.stdout.on('data', (b) => { stdout += b; });
     child.stderr.on('data', (b) => { stderr += b; });
     const timer = setTimeout(() => {
-      killTree(child);
+      const killError = killTree(child);
       // Should anything survive the kill and hold a pipe, it must not keep this process alive.
       child.stdout.destroy();
       child.stderr.destroy();
       child.unref();
       current.child = null;
-      done({ timedOut: true });
+      done({ timedOut: true, killError });
     }, timeoutMs);
     child.on('error', (e) => { clearTimeout(timer); fail(e); });
     child.on('close', (code) => {
@@ -130,8 +138,9 @@ function restore() {
 }
 
 function onSignal(signal) {
-  if (current.child) killTree(current.child);
+  const killError = current.child ? killTree(current.child) : null;
   restore();
+  if (killError) console.error(`run-levers: ${killError}`);
   console.error(`run-levers: ${signal}; target restored`);
   process.exit(128 + constants.signals[signal]);
 }
@@ -163,7 +172,8 @@ async function runLever(lever, baselines) {
   const key = `${testFile}\0${lever.pattern}\0${timeoutMs}`;
   if (!baselines.has(key)) baselines.set(key, await runTest(testFile, lever.pattern, timeoutMs));
   const base = baselines.get(key);
-  if (base.timedOut) return `INVALID - the test ran past ${timeoutMs} ms without the lever`;
+  const killNote = (r) => (r.killError ? `; ${r.killError}` : '');
+  if (base.timedOut) return `INVALID - the test ran past ${timeoutMs} ms without the lever${killNote(base)}`;
   if (base.events.length === 0) return `INVALID - no test in ${lever.test} matches "${lever.pattern}"`;
   if (base.code !== 0) return 'INVALID - the test fails without the lever';
 
@@ -178,7 +188,7 @@ async function runLever(lever, baselines) {
   } finally {
     restore();
   }
-  if (run.timedOut) return `TIMEOUT - the test ran past ${timeoutMs} ms with the lever in place`;
+  if (run.timedOut) return `TIMEOUT - the test ran past ${timeoutMs} ms with the lever in place${killNote(run)}`;
   if (run.events.length === 0 && run.code === 0) return `INVALID - with the lever in place no test matches "${lever.pattern}"`;
   if (run.code === 0) return 'GREEN - the test still passes with the lever in place';
   const first = run.events.find((e) => e.failed);
