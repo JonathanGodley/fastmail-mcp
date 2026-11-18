@@ -510,7 +510,7 @@ the better signal.
 
 **Measured on 16 November 2026** by `scripts/probes/calendar-component-set.probe.mjs` — raw
 `PROPFIND` over bare `fetch`, one account, read-only. Every calendar collection in the calendar home
-declared `VEVENT` only in `CALDAV:supported-calendar-component-set`, and none carried the display
+(there were several) declared `VEVENT` only in `CALDAV:supported-calendar-component-set`, and none carried the display
 name `DEFAULT_TASK_CALENDAR_NAME`. The only other entries were the scheduling inbox and outbox.
 
 **Documented by Fastmail, not measured.** Fastmail's help centre (fastmail.help article
@@ -519,6 +519,11 @@ compatible CalDAV client, that this is not thoroughly tested, and that there is 
 
 **So what a Fastmail task collection declares is `unmeasured`.** The account measured had none to
 read.
+
+**Dated, not permanent.** One account, one day. A task list that a CalDAV to-do app creates later
+would change the answer, so re-run the probe rather than cite this as settled. **What it does not
+cover** is any other account, and a task collection renamed away from `DEFAULT_TASK_CALENDAR_NAME`:
+none was present here, so whether such a collection still declares `VTODO` was not measured.
 
 ## Authoring: what a reply prefills as recipients
 
