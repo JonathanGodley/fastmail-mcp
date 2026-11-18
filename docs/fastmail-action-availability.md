@@ -63,7 +63,7 @@ supported reading, and it is the one implemented.
 
 ## Availability: where Archive is offered
 
-Seven of the account's nine role mailboxes were measured; `archive` and `memos` are marked
+Every role mailbox on the account was measured except `archive` and `memos`, which are marked
 **unmeasured**.
 
 | Message state / view | Actions offered | Archive? |
@@ -331,8 +331,8 @@ rest on. Read an unmarked one as measured.
 - **One resource, one UID, after the edit** — the edit did not fork the series into a second
   resource. This is not a before-and-after comparison of the UID: only the post-edit resource was
   read, so what is measured is that a single resource under a single UID is what the series is.
-  It is bounded, though, by how that resource was found: a title-substring sweep across **all five
-  calendar collections in the account** over 2026-07-24 to 2026-12-21 returned exactly four
+  It is bounded, though, by how that resource was found: a title-substring sweep across **every
+  calendar collection in the account** over 2026-07-24 to 2026-12-21 returned exactly four
   resources for the pass's four events. A fork would have had to land outside that window or under
   a title not containing the substring to escape it.
 - `RRULE` carries `UNTIL=20260923T135959Z`, exactly as authored, so moving the series did not move
@@ -534,14 +534,14 @@ stored bytes are in the calendar section: the row records what the client put in
 inference about what it would send.
 
 **The view.** The account's own **Sent** copy of a message it had sent to itself: `From` the
-account's own address, `To` the account's own address, `Cc` empty, and a **six-entry `Bcc` list that
+account's own address, `To` the account's own address, `Cc` empty, and a **`Bcc` list of several entries that
 included the account's own address**. The message carried **no `Reply-To` header**. Addresses,
 display names and subject are deliberately not recorded here — the row is about the shape.
 
 | Action pressed | To | Cc | Bcc |
 | --- | --- | --- | --- |
-| Reply | the account's own address | empty | the original's six entries, whole, in the original's order, the account's own address among them |
-| Reply All | the account's own address | empty | the original's six entries, whole, in the original's order, the account's own address among them |
+| Reply | the account's own address | empty | the original's entries, whole, in the original's order, the account's own address among them |
+| Reply All | the account's own address | empty | the original's entries, whole, in the original's order, the account's own address among them |
 
 Three things follow.
 
