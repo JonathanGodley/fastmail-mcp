@@ -24,15 +24,15 @@ Every tool in this server acts on a **message**. The client's unit of action is 
 setting*: with conversation grouping on the toolbar acts on the whole conversation, with it off the
 toolbar acts on a single message. Neither is the client's behaviour - each account is configured one
 way or the other, so there is no default mode to treat as canonical and no way to infer which one a
-caller is looking at. Both were measured on the same three-message thread, on 16 August 2026.
+caller is looking at. Both were measured on the same thread, on 16 August 2026.
 
-**Grouped.** Every message filed in `{Inbox, "Pending Orders"}`, archived with one click on the
-thread. All three came back filed in `{"Pending Orders"}` alone: none kept an Inbox membership, and
+**Grouped.** Every message filed in the Inbox and one user label, archived with one click on the
+thread. Every message came back filed in that label alone: none kept an Inbox membership, and
 **none gained Archive**.
 
-**Individual.** The same thread restored to `{Inbox, "Pending Orders"}`, with a single message
-archived. That message came back `{"Pending Orders"}`; the other two were left in
-`{Inbox, "Pending Orders"}`, untouched.
+**Individual.** The same thread restored to the Inbox plus that label, with a single message
+archived. That message came back in the label alone; the others were left in the Inbox plus the
+label, untouched.
 
 Three things follow.
 
@@ -63,7 +63,7 @@ supported reading, and it is the one implemented.
 
 ## Availability: where Archive is offered
 
-Seven of the account's nine role mailboxes were measured; `archive` and `memos` are marked
+Every role mailbox on the account was measured except `archive` and `memos`, which are marked
 **unmeasured**.
 
 | Message state / view | Actions offered | Archive? |
@@ -90,8 +90,8 @@ unmeasured, and is not to be inferred from the `snoozed` row (see "Extending thi
 `src/jmap-client.ts` cites this table as the evidence that its refusal set is exactly the set
 that was measured.
 
-**Role mailboxes are not uniformly exclusive.** Two real messages on this account are filed in both
-`snoozed` and `sent`, so "which refusal applies" is a live case rather than a hypothetical. Inbox
+**Role mailboxes are not uniformly exclusive.** Messages filed in both `snoozed` and `sent` were
+observed on this account, so "which refusal applies" is a live case rather than a hypothetical. Inbox
 and Trash are the two that do behave exclusively.
 
 When a message is in two refusing roles, this server picks the first in the fixed order
@@ -110,7 +110,7 @@ only `Inbox ×`.
 
 But **the client cannot produce that state**. Fastmail's own Delete is a whole-value replace: the
 same message, deleted from the client, came back as `roles: ["trash"]` with the Inbox membership
-gone. Trash is a folder in Fastmail's model, not a label. Corroboration: all 37 messages then in the
+gone. Trash is a folder in Fastmail's model, not a label. Corroboration: every message then in the
 Inbox carried `roles: ["inbox"]` and nothing else.
 
 So the toolbar shown for Inbox + Trash is the Inbox view's *default*, not a considered answer, and
@@ -167,12 +167,12 @@ settle whether a grouped account applies a picker choice to every message in the
 
 | Message is filed in | Archive does | Evidence |
 | --- | --- | --- |
-| Inbox + a label | Inbox removed, label kept, **Archive not added** | a newsletter went `{Inbox, Gmail}` → `{Gmail}`, keywords unchanged |
-| Inbox only | **Moves to Archive** | Inbox 43→42, Inbox-only 31→30, Archive 15843→15844 |
+| Inbox + a label | Inbox removed, label kept, **Archive not added** | a newsletter went from the Inbox plus a user label to that label alone, keywords unchanged |
+| Inbox only | **Moves to Archive** | the Inbox and Inbox-only counts each fell by one, and the Archive count rose by one |
 | A label only, no Inbox | **Nothing**; the UI says "already archived" | re-archiving changed no mailbox and no count |
 
 Account-wide corroboration for the first row: `Email/query` for "in Archive AND in at least one
-other mailbox" returns **0 of 15,843**. Fastmail never creates an Archive-plus-label message.
+other mailbox" matches **none of the Archive's messages**. Fastmail never creates an Archive-plus-label message.
 
 **Mode dependence.** Fastmail's own MCP describes the operation as "in folders mode the emails are
 moved to the Archive folder; in labels mode the Inbox label is removed and any user-applied labels
@@ -331,8 +331,8 @@ rest on. Read an unmarked one as measured.
 - **One resource, one UID, after the edit** — the edit did not fork the series into a second
   resource. This is not a before-and-after comparison of the UID: only the post-edit resource was
   read, so what is measured is that a single resource under a single UID is what the series is.
-  It is bounded, though, by how that resource was found: a title-substring sweep across **all five
-  calendar collections in the account** over 2026-07-24 to 2026-12-21 returned exactly four
+  It is bounded, though, by how that resource was found: a title-substring sweep across **every
+  calendar collection in the account** over 2026-07-24 to 2026-12-21 returned exactly four
   resources for the pass's four events. A fork would have had to land outside that window or under
   a title not containing the substring to escape it.
 - `RRULE` carries `UNTIL=20260923T135959Z`, exactly as authored, so moving the series did not move
@@ -502,6 +502,29 @@ Two consequences for any probe at this host that reads a status code:
 **What this does not settle** is the proxy's routing table. Which prefixes reach the backend was not
 enumerated — only that `/dav/` does, and that two root paths do not.
 
+## The platform: what a task collection declares
+
+This server tells a task collection from an event calendar by its display name alone
+(`DEFAULT_TASK_CALENDAR_NAME`); #197 asks whether the collection's declared component set would be
+the better signal.
+
+**Measured on 16 November 2026** by `scripts/probes/calendar-component-set.probe.mjs` — raw
+`PROPFIND` over bare `fetch`, one account, read-only. Every calendar collection in the calendar home
+(there were several) declared `VEVENT` only in `CALDAV:supported-calendar-component-set`, and none carried the display
+name `DEFAULT_TASK_CALENDAR_NAME`. The only other entries were the scheduling inbox and outbox.
+
+**Documented by Fastmail, not measured.** Fastmail's help centre (fastmail.help article
+1500000279841, read 19 November 2026) says the backend supports `VTODO` and `VJOURNAL` for a
+compatible CalDAV client, that this is not thoroughly tested, and that there is no frontend support.
+
+**So what a Fastmail task collection declares is `unmeasured`.** The account measured had none to
+read.
+
+**Dated, not permanent.** One account, one day. A task list that a CalDAV to-do app creates later
+would change the answer, so re-run the probe rather than cite this as settled. **What it does not
+cover** is any other account, and a task collection renamed away from `DEFAULT_TASK_CALENDAR_NAME`:
+none was identifiable here, so whether such a collection still declares `VTODO` was not measured.
+
 ## Authoring: what a reply prefills as recipients
 
 Reading the client's pixels again, this time on the **mobile** app and against a compose form rather
@@ -516,14 +539,14 @@ stored bytes are in the calendar section: the row records what the client put in
 inference about what it would send.
 
 **The view.** The account's own **Sent** copy of a message it had sent to itself: `From` the
-account's own address, `To` the account's own address, `Cc` empty, and a **six-entry `Bcc` list that
+account's own address, `To` the account's own address, `Cc` empty, and a **`Bcc` list of several entries that
 included the account's own address**. The message carried **no `Reply-To` header**. Addresses,
 display names and subject are deliberately not recorded here — the row is about the shape.
 
 | Action pressed | To | Cc | Bcc |
 | --- | --- | --- | --- |
-| Reply | the account's own address | empty | the original's six entries, whole, in the original's order, the account's own address among them |
-| Reply All | the account's own address | empty | the original's six entries, whole, in the original's order, the account's own address among them |
+| Reply | the account's own address | empty | the original's entries, whole, in the original's order, the account's own address among them |
+| Reply All | the account's own address | empty | the original's entries, whole, in the original's order, the account's own address among them |
 
 Three things follow.
 
