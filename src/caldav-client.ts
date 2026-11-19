@@ -3069,7 +3069,7 @@ function readCalendarData(res: DAVResponse): string | undefined {
 
 /** A resource's own UID, trimmed as the lookup compares it; undefined when it has none. */
 function ownUid(obj: DAVCalendarObject): string | undefined {
-  return parseICalValue(extractVEvent(typeof obj.data === 'string' ? obj.data : '') ?? '', 'UID')?.trim();
+  return parseICalValue(extractVEvent(obj.data || '') ?? '', 'UID')?.trim();
 }
 
 /**
@@ -3094,7 +3094,7 @@ function matchesToCopies(matches: CalendarObjectMatch[]): CalendarEventCopy[] {
 function isResolvedCalendarObject(obj: DAVCalendarObject): boolean {
   if (typeof obj.url !== 'string' || obj.url.trim().length === 0) return false;
   if (typeof obj.etag !== 'string' || obj.etag.trim().length === 0) return false;
-  if (typeof obj.data !== 'string' || obj.data.length === 0) return false;
+  if (typeof obj.data !== 'string') return false;
   return extractVEventBlocks(obj.data).length > 0;
 }
 
@@ -3526,12 +3526,11 @@ function refuseUnreadableMatches(eventId: string, action: 'update' | 'delete', l
     parts.push(`The answer from ${describeCalendars(answers(atUrl))} for that url could not be read.`);
   }
   const matched = records(byUid);
-  if (matched.length === 1) {
-    parts.push('It matched a record that came back missing its url, its event data, an event with a UID, '
-      + `or its entity tag: ${describeEventCopies(matched)}.`);
-  } else if (matched.length > 1) {
-    parts.push(`It matched ${matched.length} records, each of which came back missing its url, its event data, `
-      + `an event with a UID, or its entity tag: ${describeEventCopies(matched)}.`);
+  if (matched.length > 0) {
+    parts.push((matched.length === 1
+      ? 'It matched a record that came back missing its url, '
+      : `It matched ${matched.length} records, each of which came back missing its url, `)
+      + `its event data, an event with a UID, or its entity tag: ${describeEventCopies(matched)}.`);
   }
   if (answers(byUid).length > 0) {
     parts.push(`The answer from ${describeCalendars(answers(byUid))} to the search for it could not be read.`);
@@ -3545,7 +3544,7 @@ function refuseUnreadableMatches(eventId: string, action: 'update' | 'delete', l
       + `${describeEventCopies(matchesToCopies(matches))}.${broken}`,
     );
   }
-  if (atUrl.length === 0 && addressed && addressedUid !== undefined) {
+  if (addressedUid !== undefined) {
     throw new InvalidInputError(
       `${lead} To act on the record at that url, ${describeEventCopies(matchesToCopies(matches.slice(0, 1)))}, `
       + `pass its own UID "${echoCallerText(addressedUid, CALENDAR_UID_ECHO_LIMIT)}" as eventId; it reaches that `
@@ -4220,9 +4219,10 @@ export class CalDAVCalendarClient {
         continue;
       }
       for (const obj of objects) {
-        // Resolved is enough for the read; the writes also need its UID.
+        // Resolved is enough for the read. Every object goes to the writes' list too, where one
+        // that is readable is dropped as already read.
         collect(calendar, obj);
-        if (!isReadableHit(obj)) unreadable.push({ calendar, obj, fromUrlFetch: true });
+        unreadable.push({ calendar, obj, fromUrlFetch: true });
       }
     }
 
@@ -4232,10 +4232,11 @@ export class CalDAVCalendarClient {
       matches.filter(m => isReadableHit(m.object)).map(m => [addressComparisonKey(m.object.url), null]),
     );
     const unreadableHits: UnreadableHit[] = [];
-    for (const { calendar, obj, fromUrlFetch } of unreadable) {
+    for (const [index, { calendar, obj, fromUrlFetch }] of unreadable.entries()) {
       const url = typeof obj.url === 'string' ? obj.url : '';
-      const key = url.trim() === '' ? undefined : addressComparisonKey(url);
-      if (key !== undefined && byKey.has(key)) {
+      // NUL cannot occur in a url, so a blank one's key matches nothing else.
+      const key = url.trim() === '' ? `\u0000${index}` : addressComparisonKey(url);
+      if (byKey.has(key)) {
         const met = byKey.get(key);
         if (met && fromUrlFetch) met.addressed = true;
         continue;
@@ -4244,9 +4245,9 @@ export class CalDAVCalendarClient {
         calendar: calendarLabel(calendar),
         url,
         addressed: fromUrlFetch,
-        wholeAnswer: key !== undefined && key === addressComparisonKey(calendar.url),
+        wholeAnswer: key === addressComparisonKey(calendar.url),
       };
-      if (key !== undefined) byKey.set(key, hit);
+      byKey.set(key, hit);
       unreadableHits.push(hit);
     }
 
@@ -4255,17 +4256,18 @@ export class CalDAVCalendarClient {
     if (addressedIndex > 0) matches.unshift(...matches.splice(addressedIndex, 1));
     const addressed = addressedIndex !== -1;
 
-    // The addressed record's UID, only where it reaches that record alone: not absent, not this
-    // same string, not another resource's url, read whole by its own query, and held by no other
-    // record, read or unreadable.
+    // The addressed record's UID, only where it reaches that record alone: not absent, not another
+    // resource's url, read whole by its own query, and held by no other record, read or
+    // unreadable. A UID that is this same string meets again whatever caused the refusal.
     const uidReachingAddressed = async (): Promise<string | undefined> => {
       const uid = ownUid(matches[0].object);
-      if (uid === undefined || uid === '' || uid === wanted) return undefined;
+      if (uid === undefined || uid === '') return undefined;
       const addressedKey = addressComparisonKey(matches[0].object.url);
       if (!resolveEventUrlTargets(uid, selectable).every(t => addressComparisonKey(t.objectUrl) === addressedKey)) {
         return undefined;
       }
-      const elsewhere = (obj: DAVCalendarObject) => addressComparisonKey(typeof obj.url === 'string' ? obj.url : '') !== addressedKey;
+      // A missing url compares as the text "undefined", which is elsewhere.
+      const elsewhere = (obj: DAVCalendarObject) => addressComparisonKey(`${obj.url}`) !== addressedKey;
       const others = await uidHolders(uid);
       const alone = others.holders.some(h => !elsewhere(h.obj))
         && !others.holders.some(h => elsewhere(h.obj))

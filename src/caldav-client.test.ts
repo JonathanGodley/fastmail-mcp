@@ -1,6 +1,7 @@
 import { after, before, describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AMBIGUOUS_COPY_LIST_CAP,
   extractVEvent,
   resolveDisplayName,
   parseICalValue,
@@ -2183,15 +2184,25 @@ describe('CalDAVCalendarClient event lookup', () => {
   // collision; the read still answers with it and reports the collision with no UID.
   it('does not offer a UID the addressed record does not have', async () => {
     const realUrl = PERSONAL_URL + 'real.ics';
-    const stored = decoyCarryingAnAddress(realUrl);
-    stored[PERSONAL_URL] = [{ data: eventIcal('real@fm', 'Real').replace('UID:real@fm\r\n', ''), url: realUrl, etag: '"e-real"' }];
-    const { client, mockDAVClient } = makeLookupClient(decoyCalendars, stored);
-    const err = await outcome(client.deleteCalendarEvent(realUrl));
-    assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0);
-    assert.equal(err?.message, unreadableAtUrlText(realUrl, 'delete', `"Personal" ("${realUrl}")`));
-    const read = await client.getCalendarEventById(realUrl);
-    assert.equal(read.event.title, 'Real');
-    assert.deepEqual(read.addressCollision, { addressedUid: undefined });
+    for (const [label, data] of [
+      ['no UID line', eventIcal('real@fm', 'Real').replace('UID:real@fm\r\n', '')],
+      ['a blank UID', eventIcal('real@fm', 'Real').replace('UID:real@fm', 'UID: ')],
+    ]) {
+      const stored = decoyCarryingAnAddress(realUrl);
+      stored[PERSONAL_URL] = [{ data, url: realUrl, etag: '"e-real"' }];
+      const { client, mockDAVClient, fetchCalendarObjects } = makeLookupClient(decoyCalendars, stored);
+      const err = await outcome(client.deleteCalendarEvent(realUrl));
+      assert.equal(mockDAVClient.deleteCalendarObject.mock.callCount(), 0, label);
+      assert.equal(err?.message, unreadableAtUrlText(realUrl, 'delete', `"Personal" ("${realUrl}")`), label);
+      const read = await client.getCalendarEventById(realUrl);
+      assert.equal(read.event.title, 'Real', label);
+      assert.deepEqual(read.addressCollision, { addressedUid: undefined }, label);
+      // No query is sent for a UID the record does not have.
+      for (const call of fetchCalendarObjects.mock.calls) {
+        const filters = (call.arguments[0] as { filters?: unknown }).filters;
+        if (filters !== undefined) assert.ok(uidInFilter(filters), `${label}: a query asked for UID ${JSON.stringify(uidInFilter(filters))}`);
+      }
+    }
   });
 
   it('names the addressed record by its calendar and url in the collision refusal', async () => {
@@ -2397,12 +2408,41 @@ describe('CalDAVCalendarClient event lookup', () => {
 
   // A blank url names no resource, so two such hits are two records, not one.
   it('counts each hit with a blank url on its own', async () => {
+    for (const url of ['', '  ', undefined as unknown as string]) {
+      const { client } = makeLookupClient(twoCalendars, {
+        [PERSONAL_URL]: [{ data: eventIcal('solo@fm'), url, withheldFrom: 'query' }],
+        [WORK_URL]: [{ data: eventIcal('solo@fm'), url, withheldFrom: 'query' }],
+      });
+      const err = await outcome(client.deleteCalendarEvent('solo@fm'));
+      assert.equal(err?.message, unreadableRetryText('solo@fm', 'delete', '"Personal" (""), "Work" ("")', 2), JSON.stringify(url));
+    }
+  });
+
+  it('states each kind of hit that did not come back whole, one sentence each', async () => {
     const { client } = makeLookupClient(twoCalendars, {
-      [PERSONAL_URL]: [{ data: eventIcal('solo@fm'), url: '', withheldFrom: 'query' }],
-      [WORK_URL]: [{ data: eventIcal('solo@fm'), url: '', withheldFrom: 'query' }],
+      [PERSONAL_URL]: [{ data: eventIcal('solo@fm', 'Personal copy'), url: PERSONAL_URL + 'solo.ics', etag: '"e1"' }],
+      [WORK_URL]: [
+        { data: eventIcal('solo@fm'), url: WORK_URL + 'solo.ics', etag: '"e2"', withheldFrom: 'query' },
+        { data: eventIcal('solo@fm'), url: WORK_URL, withheldFrom: 'query', etagWithheldFrom: 'query' },
+      ],
     });
     const err = await outcome(client.deleteCalendarEvent('solo@fm'));
-    assert.equal(err?.message, unreadableRetryText('solo@fm', 'delete', '"Personal" (""), "Work" ("")', 2));
+    assert.equal(err?.message, unreadableLead('solo@fm', 'delete') + matchedPart(WORK_SOLO)
+      + ' The answer from the calendar "Work" to the search for it could not be read.'
+      + ` To act on a copy this server could read, pass its url as eventId: ${PERSONAL_SOLO}.`);
+  });
+
+  it('names every calendar whose answer could not be read, up to the cap', async () => {
+    const calendars = Array.from({ length: AMBIGUOUS_COPY_LIST_CAP + 1 }, (_, i) => ({
+      displayName: `Cal ${i}`, url: `https://caldav.example.invalid/dav/calendars/user/probe/c${i}/`,
+    }));
+    const { client } = makeLookupClient(calendars, Object.fromEntries(calendars.map(c => [c.url, [
+      { data: eventIcal('solo@fm'), url: c.url, withheldFrom: 'query', etagWithheldFrom: 'query' } as StoredObject,
+    ]])));
+    const err = await outcome(client.deleteCalendarEvent('solo@fm'));
+    const named = calendars.slice(0, AMBIGUOUS_COPY_LIST_CAP).map(c => `"${c.displayName}"`).join(', ');
+    assert.equal(err?.message, unreadableLead('solo@fm', 'delete')
+      + ` The answer from the calendars ${named}, …and 1 more to the search for it could not be read.` + RETRY);
   });
 
   // tsdav answers a 207 it cannot parse with one object at the request's own url: the calendar's.
@@ -2482,6 +2522,16 @@ describe('CalDAVCalendarClient event lookup', () => {
       assert.equal(await outcome(client.deleteCalendarEvent('real@fm')), undefined, label);
       assert.deepEqual(mockDAVClient.deleteCalendarObject.mock.calls.map(c => c.arguments[0].calendarObject.url), [realUrl], label);
     }
+  });
+
+  // Only the addressed record is named beside its UID, not every record the id matched.
+  it('names only the addressed record beside the UID it offers', async () => {
+    const realUrl = PERSONAL_URL + 'real.ics';
+    const stored = decoyCarryingAnAddress(realUrl);
+    stored[WORK_URL].push({ data: eventIcal(realUrl, 'Hidden'), url: WORK_URL + 'hidden.ics', etag: '"e-h"', withheldFrom: 'query' });
+    const { client } = makeLookupClient(decoyCalendars, stored);
+    const err = await outcome(client.deleteCalendarEvent(realUrl));
+    assert.equal(err?.message, unreadableUidText(realUrl, 'delete', `"Work" ("${WORK_URL}hidden.ics")`, `"Personal" ("${realUrl}")`, 'real@fm'));
   });
 
   it('offers no UID where the addressed record\'s own UID would not reach it alone', async () => {
