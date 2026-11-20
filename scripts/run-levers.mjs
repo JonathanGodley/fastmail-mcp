@@ -33,6 +33,7 @@ import { createRequire } from 'node:module';
 import { constants } from 'node:os';
 import { relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { DETACHED, killTree } from './kill-tree.mjs';
 
 const MARK = 'run-levers-event ';
 const SELF = fileURLToPath(import.meta.url);
@@ -56,29 +57,6 @@ export default async function* reporter(source) {
 }
 
 const current = { target: null, original: null, child: null };
-
-// tsx runs the tests in a child node process of its own, with inherited stdio, and relays
-// only SIGINT and SIGTERM to it. Killing tsx alone with SIGKILL would orphan that process,
-// still running and still holding our pipes. So off Windows the child leads its own process
-// group (spawned detached) and the whole group is killed; on Windows taskkill /T kills the tree.
-const DETACHED = process.platform !== 'win32';
-// Returns why the kill failed, or null. A tree that is already gone is not a failure.
-function killTree(child) {
-  if (child.exitCode !== null || child.signalCode !== null) return null;
-  if (DETACHED) {
-    try {
-      process.kill(-child.pid, 'SIGKILL');
-    } catch (e) {
-      if (e.code !== 'ESRCH') return `kill of process group ${child.pid} failed: ${e.code ?? e.message}`;
-    }
-    return null;
-  }
-  const r = spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { encoding: 'utf8' });
-  // taskkill exits 128 when the process is not found.
-  if (r.error) return `taskkill failed: ${r.error.message}`;
-  if (r.status !== 0 && r.status !== 128) return `taskkill /pid ${child.pid} exited ${r.status}: ${(r.stderr || r.stdout).trim()}`;
-  return null;
-}
 
 function runTest(testFile, pattern, timeoutMs) {
   const tsxCli = createRequire(import.meta.url).resolve('tsx/cli');

@@ -18,7 +18,7 @@
     "prepare": "npm run build",
     "prepack": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && npm run build",
     "pretest": "npm run build",
-    "test": "tsx --test src/*.test.ts",
+    "test": "node scripts/run-tests.mjs src/*.test.ts",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
     "scan:secrets": "node scripts/scan-secrets.mjs --all",
     "payload:sizes": "tsx scripts/payload-sizes.mts",

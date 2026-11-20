@@ -4,6 +4,8 @@ Developer tooling. None of it ships with the server; `dist/` is built from `src/
 
 | Script | What it does |
 | --- | --- |
+| `run-tests.mjs` | What `npm test` runs: `tsx --test` over the files given, killed with every process under it, exiting 1, if it has not ended within `TEST_RUN_LIMIT_MS` (default 600000; the suite takes under a minute). Exit code and output are the runner's otherwise. Off Windows, a SIGKILL to this process leaves the run going. |
+| `kill-tree.mjs` | `killTree(child)` kills a spawned process and everything under it (a process group off Windows, `taskkill /T` on Windows); `run-tests.mjs` and `run-levers.mjs` use it. |
 | `mcp-harness.mjs` | Raw JSON-RPC client that spawns `dist/index.js` as a real MCP server. `createClient({ env })` → `init`/`call`/`close`, matching responses by JSON-RPC `id`. `node scripts/mcp-harness.mjs --list` dumps the advertised tool schemas. Use it rather than hand-writing a client. |
 | `scan-secrets.mjs` | The PII/credential scanner the git hooks run (`npm run scan:secrets` for a full sweep). See `CONTRIBUTING.md`. |
 | `vtimezone-scan.fuzz.mts` | An offline invariant sweep over the VTIMEZONE block scan behind #166 (`removeOrphanedVTimezones`, `regenerateVTimezones` in `src/caldav-client.ts`): needs no credentials, touches no network and does not use the built server. Run it with `npx tsx scripts/vtimezone-scan.fuzz.mts [iterations]` (default 200000). The invariant is described in its header and the mutations in its `MUTATE` list. Seeded, so a given count always generates the same payloads; exits non-zero on any violation or unexpected throw. Result on 25 Sep 2026, 200000 iterations: 337200 accepted, 62800 refused, 0 unexpected throws, 0 violations. |
