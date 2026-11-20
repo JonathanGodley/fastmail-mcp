@@ -1879,7 +1879,7 @@ back. On anything it cannot read, it keeps the event: an event with no readable 
 KEPT, because a missing event is the failure this whole area exists to prevent.
 
 **What the server matches, measured live:** `{startDate: "2026-08-01", endDate: "2026-08-31"}`
-on a UTC+10 account returned `{"title":"Newcastle","start":"2026-07-31","end":"2026-08-01"}` as
+on a UTC+10 account returned `{"title":"…","start":"2026-07-31","end":"2026-08-01"}` as
 its first row. The window begins at local midnight (`2026-07-31T14:00:00Z`), and Cyrus matched
 that `VALUE=DATE` event on a UTC day. That is a fact about Cyrus, not about this client. The
 exact filter trims the row, because 31 July as a LOCAL day ends at `2026-07-31T14:00:00Z`,

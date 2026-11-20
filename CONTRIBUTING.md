@@ -347,6 +347,39 @@ synthetic value is unavoidably credential-shaped and the scanner flags it, put
 const sample = 'fmu0-00000000-0000…'; // allowlist-secret (synthetic token shape)
 ```
 
+### What a run against a real account may contribute
+
+A probe or a live check reads a real account, and this repo is public. The test
+for anything committed or posted publicly (a file, a code comment, a commit or
+tag message, an issue, a pull request, a comment, a release note) is whether it
+tells the reader how the server behaved or what the account holds.
+
+How the server behaved may be published. That covers counts and sizes,
+booleans, pass/fail, positions and offsets, status codes and error types, the
+shape of an object, the date of the run, and any name the platform defines
+(a property, a capability, a role or default mailbox name). It also covers a
+property of a value without the value: its length, its form, whether it starts
+with a non-ASCII character. A count or boolean qualifies only when the
+condition behind it is generic or invented: "messages after a date floor" is,
+"messages from a named person" is not. The account's configured time zone and
+a bare date with nothing that identifies what fell on it may be published too.
+
+What the account holds may not be published. That is any value read out of a
+record that is not test data, other than a bare date: a subject, title, body
+text, location, filename, sender, recipient or contact field; the time of a
+message or event; a mailbox, label, keyword or calendar name the user chose.
+It is also the account's own address, username, display name and signature,
+and any id, UID, href or etag the server assigned. Where an example needs such
+a value, invent one.
+
+A record created only for testing, by hand or by a probe, is test data. Its
+invented values, dates included, may be named; the values the server assigned
+to it, and the account's own address on it, may not.
+
+This governs what is published, not what a probe prints to the terminal of the
+person running it. Several probes print account content there; quote from a
+run only what this section permits.
+
 ### Local denylist for your own identifiers (optional but recommended)
 
 To make the scanner also flag *your* real names, domains, addresses and
