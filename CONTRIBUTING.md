@@ -110,6 +110,14 @@ npm test
 than `src/`. When that hook throws, the runner reports the suite as cancelled
 rather than failed, so a run without a build can look green.
 
+`npm test` runs through `scripts/run-tests.mjs`, which kills the run and every
+process under it if it has not ended within ten minutes (`TEST_RUN_LIMIT_MS`
+overrides that). Node's test runner can spin forever, holding a core and
+growing without bound, after a test file's process stops partway through a
+report, and no timeout inside the runner reaches it. Run the suite through
+`npm test` rather than `tsx --test` directly, and if you kill a run yourself,
+check that no `node --test` process is left behind.
+
 Handler logic must be unit-testable. The `CallTool` switch in `src/index.ts`
 has no test harness, so a handler that does more than destructure and delegate
 belongs in a function that takes an injected client, tested with a mock. The
