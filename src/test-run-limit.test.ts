@@ -54,21 +54,25 @@ after(() => {
 });
 
 // npm puts node_modules/.bin on PATH for a script; a worktree's node_modules is an ancestor's.
-function envForScript(): NodeJS.ProcessEnv {
+function envForScript(limited: boolean): NodeJS.ProcessEnv {
   const bin = join(dirname(createRequire(import.meta.url).resolve('tsx/cli')), '..', '..', '.bin');
   // NODE_TEST_CONTEXT would make the inner runner report to this one in its own protocol.
   const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
   const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-  return { ...env, [pathKey]: `${bin}${delimiter}${env[pathKey] ?? ''}`, TEST_RUN_LIMIT_MS: String(LIMIT_MS) };
+  const out: NodeJS.ProcessEnv = { ...env, [pathKey]: `${bin}${delimiter}${env[pathKey] ?? ''}` };
+  // Only a run meant to hang gets the short limit: on a loaded machine a healthy run can pass it.
+  if (limited) out.TEST_RUN_LIMIT_MS = String(LIMIT_MS);
+  else delete out.TEST_RUN_LIMIT_MS;
+  return out;
 }
 
 type Run = { ended: boolean; code: number | null; output: string };
 
-function runTestScript(fixture: string): Promise<Run> {
+function runTestScript(fixture: string, limited: boolean): Promise<Run> {
   const script: string = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).scripts.test;
   assert.ok(script.includes(TEST_GLOB), `the test script no longer names ${TEST_GLOB}: ${script}`);
   const command = script.replace(TEST_GLOB, `"${join(dir, fixture)}"`);
-  const child = spawn(command, { cwd: REPO, shell: true, env: envForScript(), detached: DETACHED, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(command, { cwd: REPO, shell: true, env: envForScript(limited), detached: DETACHED, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
   child.stdout.on('data', (b) => { output += b; });
   child.stderr.on('data', (b) => { output += b; });
@@ -110,7 +114,7 @@ function survivors(): string[] {
 const opts = { timeout: DEADLINE_MS + 20_000 };
 
 test('npm test ends a run that would never end by itself, and leaves no process behind', opts, async () => {
-  const run = await runTestScript('never-ends.test.mjs');
+  const run = await runTestScript('never-ends.test.mjs', true);
   assert.ok(run.ended, `the run was still going ${DEADLINE_MS} ms in, with a ${LIMIT_MS} ms limit set`);
   assert.notEqual(run.code, 0);
   assert.match(run.output, new RegExp(`${LIMIT_MS} ms`));
@@ -118,14 +122,14 @@ test('npm test ends a run that would never end by itself, and leaves no process 
 });
 
 test('npm test ends a run whose file process stopped partway through a report', opts, async () => {
-  const run = await runTestScript('cut-short.test.mjs');
+  const run = await runTestScript('cut-short.test.mjs', true);
   assert.ok(run.ended, `the run was still going ${DEADLINE_MS} ms in, with a ${LIMIT_MS} ms limit set`);
   assert.deepEqual(survivors(), []);
 });
 
 test('npm test exits 0 when the tests pass and 1 when one fails', opts, async () => {
-  assert.equal((await runTestScript('passes.test.mjs')).code, 0);
-  const failed = await runTestScript('fails.test.mjs');
+  assert.equal((await runTestScript('passes.test.mjs', false)).code, 0);
+  const failed = await runTestScript('fails.test.mjs', false);
   assert.equal(failed.code, 1);
   assert.match(failed.output, /fixture failure/);
 });
