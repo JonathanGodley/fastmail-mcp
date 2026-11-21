@@ -249,10 +249,17 @@ one reaches a readable record: a readable copy's url where nothing came back for
 form, since passing a url makes the UID query ask for that url instead; or, where the caller's
 url addressed a record read whole, that record's own UID if it reaches it alone. Where the
 record at the caller's url is itself the unreadable one, no other record is a way to it, and
-the refusal offers nothing. A hit at its calendar's own url is tsdav's stand-in for an answer it
-could not parse, so the refusal names that calendar's answer, not a record. The lookup reports
-rather than throws because `get_calendar_event` shares it and applies its own rule: it skips a
-hit missing its data, a VEVENT, its url or its etag.
+the refusal offers nothing. A hit at its calendar's own url names the collection, not a record,
+so the refusal names that calendar's answer. The lookup reports
+rather than throws because `get_calendar_event` shares it and applies its own rule: it answers
+with a match carrying its url, etag and a VEVENT, UID or not, and names every other hit (except one at a calendar's
+own url, at the url of the match it answered with, or found by UID and read whole under another
+UID) as a record it could not use as this event: in `unreadableCopies` beside an answer, or in
+an error where there is none, since "not found" would deny a record that is there. The wording
+claims neither that the data was unreadable nor that the record is an event, because the hits
+include a record read whole without an etag and a task. A hit's url is given only where it lies
+under the calendar it was read from: the server chooses a response's href, and nothing compares
+it with the request.
 
 **Addressing a record is not naming it.** Both forms of `eventId` are always tried, so a
 record whose UID literally spells another record's resource `url` puts two records in one
@@ -2504,11 +2511,33 @@ update/delete refusal), answers false for both, and false on this
 path is a positive claim about the calendar rather than the fail-closed refusal it is on the
 write path.
 
+**A success answer that is not a complete multistatus is an error** (#239), on this follow-up
+read and on every other calendar-object read: the listing, the lookup's UID query and url fetch,
+and the occurrence delete's expansion. tsdav hands back one stand-in entry for a 2xx body it
+cannot parse, and the query leg filters that entry out, so the calendar reads as empty; xml-js
+also recovers a body cut after a complete `response` as if it were whole. RFC 4791 §7.8 and §7.9
+require a multistatus. So every such read passes `checkedReadFetch`, which throws
+`UnreadableDavAnswerError` when tsdav's own parse of a 2xx body yields the stand-in or the root
+`multistatus` does not close. An empty multistatus, self-closed or not, is the valid empty window
+(RFC 4918 §13). A non-2xx answer passes untouched, so tsdav's own throw and the url fetch's
+not-found classification see it as before. The check lives in the fetch, not in what tsdav
+returns, because the stand-in never reaches the caller of a query. The only read after a write,
+the occurrence delete's confirmation, already catches every throw as NOT CONFIRMED, so the
+error's "Nothing was changed" holds.
+
 One row that carries no recurrence claim in either direction is the placeholder a resource
-with no parseable VEVENT produces (`{ id, url, title: 'Untitled' }`). It is not set to
-`isRecurring: false`: "does not repeat" would be as unfounded as "does", said about a record
-nothing was read out of. The tool description and `docs/reference/tools.md` carve it out by name rather than
-claiming the field is decided on literally every row.
+with no parseable VEVENT produces (`{ id, url, title: 'Untitled', unreadable: true }`). It is
+not set to `isRecurring: false`: "does not repeat" would be as unfounded as "does", said about a
+record nothing was read out of. The tool description and `docs/reference/tools.md` carve it out
+by name rather than claiming the field is decided on literally every row.
+
+The placeholder is listed rather than dropped or failed (#239): the listing's comp-filter means
+the server reported a VEVENT there, so a row that silently vanished would leave a busy slot
+looking free, and failing the call would let one broken record hide a whole calendar. Every
+placeholder carries `unreadable: true` and `buildUnreadableEventNote` states once what it means.
+The flag is set whatever the cause (a failed or empty `calendar-data`, a non-string, a payload
+with no block found), and some causes are this server's reader rather than the server, so the
+note promises nothing from a retry.
 
 A row marked `malformedStructure` is the other row whose absences make no claim (#237). Its
 payload fails `walkICalComponents`, so the block-by-block read may have missed the very lines
