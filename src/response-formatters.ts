@@ -3,8 +3,8 @@ import { projectListEmail } from './field-projection.js';
 import { describeUntrusted, describeUntrustedAt, echoCallerText, parseAddress, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, SavedBodySizes, UpdateDraftResult } from './jmap-client.js';
-import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, buildMalformedStructureNote, buildUnreadableEventNote, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
-import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp } from './caldav-client.js';
+import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, buildMalformedStructureNote, buildUnreadableEventNote, describeEventCopies, describeUnusableCopies, summariseBrokenCollections } from './caldav-client.js';
+import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp, UnusableCopy } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 import type { BodyEditsReceipt } from './body-edits.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
@@ -345,8 +345,8 @@ export function buildAmbiguousEventNote(
 export function calendarEventBody(
   event: CalendarEvent,
   otherCopies?: CalendarEventCopy[],
-  unreadableCopies?: CalendarEventCopy[],
-): CalendarEvent & { otherCopies?: CalendarEventCopy[]; unreadableCopies?: CalendarEventCopy[] } {
+  unreadableCopies?: UnusableCopy[],
+): CalendarEvent & { otherCopies?: CalendarEventCopy[]; unreadableCopies?: UnusableCopy[] } {
   // Presence is the signal, so an empty list is omitted.
   return {
     ...event,
@@ -356,11 +356,11 @@ export function calendarEventBody(
 }
 
 /** The trailing note beside `unreadableCopies` (#239); worded as `unusableMatchError` is. */
-export function buildUnusableCopiesNote(unreadableCopies?: CalendarEventCopy[]): string {
+export function buildUnusableCopiesNote(unreadableCopies?: UnusableCopy[]): string {
   if (!unreadableCopies || unreadableCopies.length === 0) return '';
   const one = unreadableCopies.length === 1;
   return `\n\nNote: this event id also matched ${one ? 'a record' : `${unreadableCopies.length} records`} this server `
-    + `could not use as this event: ${describeEventCopies(unreadableCopies)}. The event above is a record it could use. `
+    + `could not use as this event: ${describeUnusableCopies(unreadableCopies)}. The event above is a record it could use. `
     + 'update_calendar_event and delete_calendar_event refuse this id while '
     + `${one ? 'that record cannot' : 'those records cannot'} be used.`;
 }

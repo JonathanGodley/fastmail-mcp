@@ -327,6 +327,55 @@ describe('get_calendar_event names a record it matched and could not use (#239)'
     await assert.rejects(client.getCalendarEventById(url), { message: /^Calendar event not found: / });
   });
 
+  // The server matches UIDs case-insensitively; a record read whole under another UID is not a copy.
+  it('does not name a record whose own UID differs from the id', async () => {
+    const otherCase: FakeResource = { href: `${PERSONAL}upper.ics`, data: ical('SOLO@fm'), etag: '"eu"', query: 'noetag' };
+    const alone = setup({ [PERSONAL]: [otherCase] });
+    await assert.rejects(alone.client.getCalendarEventById('solo@fm'), { message: /^Calendar event not found: "solo@fm"/ });
+    const beside = setup({
+      [PERSONAL]: [otherCase],
+      [WORK]: [{ href: `${WORK}solo.ics`, data: ical('solo@fm', 'Work copy'), etag: '"e2"' }],
+    });
+    const result = await beside.client.getCalendarEventById('solo@fm');
+    assert.equal(result.event.title, 'Work copy');
+    assert.equal(result.unreadableCopies, undefined);
+    // The writes keep refusing on it: they cannot rule out a copy they could not write safely.
+    await assert.rejects(beside.client.deleteCalendarEvent('solo@fm'));
+    assert.equal(beside.dav.deleteCalendarObject.mock.callCount(), 0);
+  });
+
+  // A record the caller's url addresses is named whatever UID it holds.
+  it('names the addressed record that came back without its entity tag', async () => {
+    const url = `${PERSONAL}real.ics`;
+    const { client } = setup({ [PERSONAL]: [{ href: url, data: ical('real@fm'), etag: '"ex"', fetch: 'noetag' }] });
+    await assert.rejects(client.getCalendarEventById(url), { message: unusable(url, `"Personal" ("${url}")`) });
+  });
+
+  // A url the server put in its answer that lies outside the calendar asked is not named.
+  it('names no url outside the calendar the record was read from', async () => {
+    for (const stray of ['/dav/calendars/user/probe/personal/stray.ics', 'https://elsewhere.invalid/dav/calendars/user/probe/work/x.ics']) {
+      const strayAnswer = (request: FakeRequest) => (request.url === WORK && request.kind === 'multiget'
+        ? { body: multistatus(resp(stray, etagProp('"es"'))), contentType: XML }
+        : undefined);
+      const workCopy = { href: `${WORK}solo.ics`, data: ical('solo@fm', 'Work copy'), etag: '"e2"' };
+      const alone = setup({ [WORK]: [workCopy] }, strayAnswer);
+      await assert.rejects(alone.client.getCalendarEventById('solo@fm'), {
+        message: unusable('solo@fm', '"Work" (at an address outside that calendar)'),
+      }, stray);
+      const beside = setup({
+        [PERSONAL]: [{ href: `${PERSONAL}solo.ics`, data: ical('solo@fm', 'Personal copy'), etag: '"e1"' }],
+        [WORK]: [workCopy],
+      }, strayAnswer);
+      const result = await beside.client.getCalendarEventById('solo@fm');
+      assert.deepEqual(result.unreadableCopies, [{ calendar: 'Work' }], stray);
+      assert.equal(
+        buildUnusableCopiesNote(result.unreadableCopies).includes('"Work" (at an address outside that calendar)'),
+        true,
+        stray,
+      );
+    }
+  });
+
   it('has no note when every match could be used', () => {
     assert.equal(buildUnusableCopiesNote(undefined), '');
     assert.equal(buildUnusableCopiesNote([]), '');

@@ -253,11 +253,13 @@ the refusal offers nothing. A hit at its calendar's own url names the collection
 so the refusal names that calendar's answer. The lookup reports
 rather than throws because `get_calendar_event` shares it and applies its own rule: it answers
 with a match carrying its url, etag and a VEVENT, UID or not, and names every other hit (except one at a calendar's
-own url, or at the url of the match it answered with) as a record it could not use as this
-event: in `unreadableCopies` beside an answer, or in an error where there is none, since "not
-found" would deny a record that is there. The wording claims neither that the data was
-unreadable nor that the record is an event, because the hits include a record read whole
-without an etag and a task.
+own url, at the url of the match it answered with, or found by UID and read whole under another
+UID) as a record it could not use as this event: in `unreadableCopies` beside an answer, or in
+an error where there is none, since "not found" would deny a record that is there. The wording
+claims neither that the data was unreadable nor that the record is an event, because the hits
+include a record read whole without an etag and a task. A hit's url is given only where it lies
+under the calendar it was read from: the server chooses a response's href, and nothing compares
+it with the request.
 
 **Addressing a record is not naming it.** Both forms of `eventId` are always tried, so a
 record whose UID literally spells another record's resource `url` puts two records in one

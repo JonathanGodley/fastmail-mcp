@@ -155,7 +155,7 @@ export interface CalendarEventResult {
    * The records the id matched that this server could not use as this event, beside the one it
    * answered with (#239). Absent, never empty. Never the answered record itself.
    */
-  unreadableCopies?: CalendarEventCopy[];
+  unreadableCopies?: UnusableCopy[];
   brokenCollections?: BrokenCollections;
 }
 
@@ -3271,6 +3271,41 @@ interface UnreadableHit extends CalendarEventCopy {
   addressed: boolean;
   /** The hit sits at its calendar's own url, which names the collection, so it is not a record. */
   wholeAnswer: boolean;
+  /** The UID its data holds, where that parses; a different one makes it no copy for the read. */
+  ownUid: string | undefined;
+  /**
+   * Its url lies under the calendar it was read from. The server chooses a response's href and
+   * nothing checks it against the request (#239), so the read names no url outside it.
+   */
+  insideCalendar: boolean;
+}
+
+/** Whether a non-blank `url` lies strictly under the collection `calendarUrl`. */
+function isInsideCalendar(url: string, calendarUrl: unknown): boolean {
+  if (typeof calendarUrl !== 'string') return false;
+  const collection = resolveCollectionUrl(calendarUrl.trim(), CALDAV_URL_MATCH_BASE);
+  const entry = resolveCollectionUrl(url, collection?.href ?? CALDAV_URL_MATCH_BASE);
+  if (collection === undefined || entry === undefined || entry.origin !== collection.origin) return false;
+  return isPathStrictlyInside(collectionPathSegments(collection.pathname), collectionPathSegments(entry.pathname));
+}
+
+/** A copy `get_calendar_event` discloses; `url` is absent where it lies outside its calendar. */
+export interface UnusableCopy {
+  calendar: string;
+  url?: string;
+}
+
+/** The disclosed copies as `describeEventCopies` writes them, at the same bounds. */
+export function describeUnusableCopies(copies: UnusableCopy[]): string {
+  const listed = copies
+    .slice(0, AMBIGUOUS_COPY_LIST_CAP)
+    .map(c => `"${echoCallerText(c.calendar, AMBIGUOUS_COPY_URL_ECHO_LIMIT)}" `
+      + (c.url === undefined
+        ? '(at an address outside that calendar)'
+        : `("${echoCallerText(c.url, AMBIGUOUS_COPY_URL_ECHO_LIMIT)}")`))
+    .join(', ');
+  const more = copies.length > AMBIGUOUS_COPY_LIST_CAP ? `, …and ${copies.length - AMBIGUOUS_COPY_LIST_CAP} more` : '';
+  return `${listed}${more}`;
 }
 
 /**
@@ -3595,11 +3630,11 @@ function eventNotFoundError(eventId: string, broken?: BrokenCollections): Invali
  * record is there, so "not found" would be false. "Could not use as this event" because the hits
  * include records read whole but unusable, a task among them.
  */
-function unusableMatchError(eventId: string, hits: CalendarEventCopy[], broken?: BrokenCollections): Error {
+function unusableMatchError(eventId: string, hits: UnusableCopy[], broken?: BrokenCollections): Error {
   return new Error(
     `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" matched `
     + `${hits.length === 1 ? 'a record' : `${hits.length} records`} this server could not use as this event: `
-    + `${describeEventCopies(hits)}. A retry helps only if the server failed to send the record whole.`
+    + `${describeUnusableCopies(hits)}. A retry helps only if the server failed to send the record whole.`
     + describeBrokenCollections(broken),
   );
 }
@@ -4427,6 +4462,9 @@ export class CalDAVCalendarClient {
         url,
         addressed: fromUrlFetch,
         wholeAnswer: key === addressComparisonKey(calendar.url),
+        ownUid: typeof obj.data === 'string' ? ownUid(obj) : undefined,
+        // A blank url names no address, inside or out, and is shown as the blank it is.
+        insideCalendar: url.trim() === '' || isInsideCalendar(url, calendar.url),
       };
       byKey.set(key, hit);
       unreadableHits.push(hit);
@@ -4477,9 +4515,12 @@ export class CalDAVCalendarClient {
     const { matches, addressed, collision, unreadable, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     // A hit at a match's own url is that match failing the writes' stricter rule, not a copy.
     const answered = new Set(matches.map(m => addressComparisonKey(m.object.url)));
-    const unusable: CalendarEventCopy[] = unreadable
-      .filter(h => !h.wholeAnswer && !answered.has(addressComparisonKey(h.url)))
-      .map(h => ({ calendar: h.calendar, url: h.url }));
+    // A UID-query hit read whole under another UID is not a copy (the server matches case-
+    // insensitively); the writes still refuse on it, as they cannot tell what they did not write.
+    const otherUid = (h: UnreadableHit) => !h.addressed && !!h.ownUid && h.ownUid !== eventId.trim();
+    const unusable: UnusableCopy[] = unreadable
+      .filter(h => !h.wholeAnswer && !answered.has(addressComparisonKey(h.url)) && !otherUid(h))
+      .map(h => (h.insideCalendar ? { calendar: h.calendar, url: h.url } : { calendar: h.calendar }));
     const obj = matches[0]?.object;
     if (!obj) {
       if (unusable.length > 0) throw unusableMatchError(eventId, unusable, brokenCollections);
