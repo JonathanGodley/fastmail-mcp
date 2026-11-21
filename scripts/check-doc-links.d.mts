@@ -8,7 +8,6 @@ export interface LinkFinding {
   problem: 'missing file' | 'no such anchor' | 'anchor on a non-.md target';
 }
 
-/** Checks every relative link in the docs under `root`. */
 export declare function checkDocLinks(root: string): {
   checked: number;
   bad: LinkFinding[];
