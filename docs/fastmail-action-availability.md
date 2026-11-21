@@ -6,10 +6,10 @@ and Fastmail's own MCP publishes tool *descriptions* rather than behaviour. So w
 needs to know what an action means — not what the protocol allows — the answer comes from measuring
 the client.
 
-A message or description that sends the caller to the Fastmail web interface to act on a message,
-event, contact or mailbox does so only where this file records that action as measured there;
-otherwise it says what this server will not do and stops. Setup steps, such as creating an API token
-or changing an account setting, are outside this rule.
+A message or description that sends the caller to the Fastmail web interface, or to a Fastmail
+client, to act on a message, event, contact or mailbox does so only where this file records that
+action as measured there; otherwise it says what this server will not do and stops. Setup steps,
+such as creating an API token or changing an account setting, are outside this rule.
 
 ## How these were measured
 

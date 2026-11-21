@@ -46,8 +46,9 @@ export function parseArgs(argv) {
     if (!m || i < 1 || i > n) return { error: `--shard takes <i>/<n> with 1 <= i <= n, got ${argv[2]}` };
     return { all: true, shard: { i, n } };
   }
-  if (argv.length === 1 && !argv[0].startsWith('-')) return { commit: argv[0] };
-  if (argv.length === 2 && argv[0] === '--base' && !argv[1].startsWith('-')) return { base: argv[1] };
+  const isRef = (arg) => arg !== '' && !arg.startsWith('-');
+  if (argv.length === 1 && isRef(argv[0])) return { commit: argv[0] };
+  if (argv.length === 2 && argv[0] === '--base' && isRef(argv[1])) return { base: argv[1] };
   return { error: argv.length === 0 ? 'A commit, --base <ref> or --all is required.' : `Unexpected arguments: ${argv.join(' ')}` };
 }
 
@@ -107,8 +108,15 @@ function main() {
   const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const resolve = (rev) => {
-    try { return git('rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`).trim(); } catch { return null; }
+    try {
+      return execFileSync('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`],
+        { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch { return null; }
   };
+  // Fixed prefixes, no colour and no external driver, so diffToRanges parses the same output
+  // whatever the user's diff config says.
+  const diff = (from, to) => git('diff', '--src-prefix=a/', '--dst-prefix=b/', '--no-color', '--no-ext-diff',
+    from, to, '-U0', '--', 'src');
   const fail = (msg) => { console.error(msg); process.exit(2); };
 
   const args = parseArgs(process.argv.slice(2));
@@ -124,7 +132,7 @@ function main() {
     const status = git('status', '--porcelain').trim();
     if (status) fail(`The tree is not clean, so it would not describe ${args.commit}:\n${status}`);
     if (!resolve(`${sha}~1`)) fail(`${args.commit} is a root commit; there is no parent to diff against.`);
-    mutate = diffToRanges(git('diff', `${sha}~1`, sha, '-U0', '--', 'src'));
+    mutate = diffToRanges(diff(`${sha}~1`, sha));
     if (mutate.length === 0) fail(`${args.commit} changed no mutable src/ lines.`);
   }
   if (args.base) {
@@ -135,7 +143,11 @@ function main() {
     if (!mergeBase) fail(`${args.base} has no merge base with HEAD.`);
     const status = git('status', '--porcelain').trim();
     if (status) fail(`The tree is not clean, so it would not describe HEAD:\n${status}`);
-    mutate = diffToRanges(git('diff', mergeBase, 'HEAD', '-U0', '--', 'src'));
+    const head = resolve('HEAD');
+    if (mergeBase === head && sha !== head) {
+      fail(`${args.base} is ahead of HEAD; check out the branch to measure and pass the branch it forked from.`);
+    }
+    mutate = diffToRanges(diff(mergeBase, 'HEAD'));
     if (mutate.length === 0) fail(`HEAD changed no mutable src/ lines since its merge base with ${args.base}.`);
   }
   const { shard } = args;

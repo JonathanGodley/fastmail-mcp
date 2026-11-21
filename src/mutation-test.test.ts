@@ -23,14 +23,14 @@ test('parseArgs accepts one commit, --all or --base <ref>, and nothing else', ()
   assert.deepEqual(parseArgs(['abc123']), { commit: 'abc123' });
   assert.deepEqual(parseArgs(['--all']), { all: true });
   assert.deepEqual(parseArgs(['--base', 'main']), { base: 'main' });
-  for (const argv of [[], ['a', 'b'], ['--all', 'a'], ['--tests=x'], ['--help']]) {
+  for (const argv of [[], [''], ['a', 'b'], ['--all', 'a'], ['--tests=x'], ['--help']]) {
     assert.ok('error' in parseArgs(argv), argv.join(' '));
   }
 });
 
 test('parseArgs rejects --base without one ref, or combined with anything else', () => {
   for (const argv of [
-    ['--base'], ['--base', '-x'], ['--base', '--all'], ['--base', 'a', 'b'], ['--all', '--base', 'a'],
+    ['--base'], ['--base', ''], ['--base', '-x'], ['--base', '--all'], ['--base', 'a', 'b'], ['--all', '--base', 'a'],
     ['--base', 'a', '--all'], ['--base', 'a', '--shard', '1/4'], ['a', '--base', 'b'],
   ]) {
     assert.ok('error' in parseArgs(argv), argv.join(' '));
@@ -155,8 +155,10 @@ function git(cwd: string, args: string[]) {
   return r.stdout.trim();
 }
 
-function run(cwd: string, args: string[]) {
-  const r = spawnSync(process.execPath, [join(cwd, 'scripts', 'mutation-test.mjs'), ...args], { cwd, encoding: 'utf8', env: env() });
+function run(cwd: string, args: string[], extraEnv: Record<string, string> = {}) {
+  const r = spawnSync(process.execPath, [join(cwd, 'scripts', 'mutation-test.mjs'), ...args], {
+    cwd, encoding: 'utf8', env: { ...env(), ...extraEnv },
+  });
   return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
@@ -215,21 +217,39 @@ test('a clean HEAD commit passes every refusal and reaches the dependency check'
   assert.match(r.out, /No node_modules/);
 });
 
-// A branch whose first commit changes a mutable src/ line and whose tip changes only a non-src
-// file, plus an orphan branch sharing no history with it.
+// `feature` (checked out in `branch`): a first commit changing a mutable src/ line, then a tip
+// changing only a non-src file. `lonely` shares no history with it; `tipref` is its tip and
+// `ahead` one commit past it. `docs-only` (checked out in `diverged`) changes only a non-src
+// file and forked from `main` before `main` changed a mutable src/ line.
 let branch: string;
+let diverged: string;
+
+function commitNotes(dir: string, text: string) {
+  writeFileSync(join(dir, 'notes.txt'), text);
+  git(dir, ['add', 'notes.txt']);
+  git(dir, ['commit', '-m', 'change notes']);
+}
 
 before(() => {
   branch = join(root, 'branch');
   initRepo(branch);
   git(branch, ['checkout', '--orphan', 'lonely']);
   git(branch, ['commit', '-m', 'unrelated root']);
-  git(branch, ['checkout', '-b', 'feature', 'main']);
+  git(branch, ['checkout', '-b', 'docs-only', 'main']);
+  commitNotes(branch, 'docs\n');
+  git(branch, ['checkout', 'main']);
+  writeFileSync(join(branch, 'src', 'foo.ts'), 'export const foo = 3;\n');
+  git(branch, ['commit', '-am', 'main moves on']);
+  git(branch, ['checkout', '-b', 'feature', 'main~1']);
   writeFileSync(join(branch, 'src', 'foo.ts'), 'export const foo = 2;\n');
   git(branch, ['commit', '-am', 'change src']);
-  writeFileSync(join(branch, 'notes.txt'), 'notes\n');
-  git(branch, ['add', 'notes.txt']);
-  git(branch, ['commit', '-m', 'change notes']);
+  commitNotes(branch, 'notes\n');
+  git(branch, ['branch', 'tipref']);
+  git(branch, ['checkout', '-b', 'ahead']);
+  commitNotes(branch, 'more notes\n');
+  git(branch, ['checkout', 'feature']);
+  diverged = join(root, 'diverged');
+  git(branch, ['worktree', 'add', diverged, 'docs-only']);
 });
 
 test('--base mutates lines an earlier commit on the branch changed, which commit mode at the tip misses', () => {
@@ -268,7 +288,29 @@ test('--base refuses a dirty tree, naming HEAD', () => {
 });
 
 test('--base refuses a ref whose merge base with HEAD leaves no mutable src/ lines, naming the ref', () => {
-  const r = run(branch, ['--base', 'HEAD']);
+  const r = run(branch, ['--base', 'tipref']);
   assert.equal(r.status, 2, r.out);
-  assert.match(r.out, /HEAD.*no mutable src\/ lines/);
+  assert.match(r.out, /no mutable src\/ lines since its merge base with tipref\./);
+});
+
+test('--base diffs from the merge base, not from the ref, so lines the ref changed since are left out', () => {
+  const r = run(diverged, ['--base', 'main']);
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /no mutable src\/ lines since its merge base with main\./);
+});
+
+test('--base refuses a ref that is ahead of HEAD, saying the arguments look swapped', () => {
+  const r = run(branch, ['--base', 'ahead']);
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /ahead is ahead of HEAD; check out the branch to measure and pass the branch it forked from\./);
+});
+
+test('both diff modes find their lines whatever the user\'s diff.noprefix says', () => {
+  const noprefix = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'diff.noprefix', GIT_CONFIG_VALUE_0: 'true' };
+  const commit = run(work, ['main'], noprefix);
+  assert.equal(commit.status, 2, commit.out);
+  assert.match(commit.out, /No node_modules/);
+  const base = run(branch, ['--base', 'main'], noprefix);
+  assert.equal(base.status, 2, base.out);
+  assert.match(base.out, /No node_modules/);
 });

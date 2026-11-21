@@ -129,11 +129,13 @@ model is `composeDraftEmail(args, client, attachDir)` in
 `JmapClient` satisfies structurally, so its branches are covered by `npm test`
 with no credentials or network.
 
-A test of what the calendar client makes of a server's answer to an event read
-(a calendar-query or multiget REPORT) drives the real CalDAV library through
-`makeFakeServerDAVClient` in `src/testing/caldav-fake-server.ts`, as
-`src/caldav-wire.test.ts` does; `src/caldav-client.test.ts` stubs the library's
-return values, and writes are stubbed in both.
+A test of what the CalDAV library (tsdav) makes of a server's bytes on an event
+read (a calendar-query or multiget REPORT) goes in `src/caldav-wire.test.ts`,
+which drives the real library through `makeFakeServerDAVClient` in
+`src/testing/caldav-fake-server.ts`. A test of what the calendar client makes of
+the library's output stubs it through `makeMockDAVClient`, as
+`src/caldav-client.test.ts` and `src/caldav-series-cap.test.ts` do. Writes are
+stubbed in both styles.
 
 A live run against a real account is a one-off check of externally observable
 behaviour (for example a byte-identical attachment round-trip), never the only
