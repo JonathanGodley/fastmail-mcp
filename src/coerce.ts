@@ -38,16 +38,17 @@ export class InvalidInputError extends Error {
 // Error text is redacted twice: once as each untrusted value is rendered, and again over the
 // finished message in the CallTool catch. `\S+` runs to the next whitespace, so on that second
 // pass it would take the closing quote, comma or `…` cut marker written after the value. So a
-// marker followed only by such a tail is left alone, and up to BEARER_TAIL_MAX closing
-// characters ending a match are put back. Three covers `…",`. A restore can show at most three
-// trailing characters of the value, never one inside a registered secret or Fastmail token;
-// of the set only `.` can occur in an RFC 6750 token.
+// marker followed only by closing characters, however many, is left alone: that run can only
+// be what the server wrote. On a raw value up to BEARER_TAIL_MAX closing characters ending the
+// match are put back, never one inside a registered secret or marker; of the set only `.` can
+// occur in an RFC 6750 token. Three covers `…",`; a raw value whose own closing run plus the
+// server's passes three keeps only the last three (`"Bearer abc…"),` loses the `…`).
 const BEARER_TAIL_CHARS = `"',;:)\\]}.\u2026`;
 const BEARER_TAIL_MAX = 3;
-const BEARER_PATTERN = new RegExp(
-  `Bearer\\s+(?!\\[REDACTED\\][${BEARER_TAIL_CHARS}]{0,${BEARER_TAIL_MAX}}(?:\\s|$))\\S+`,
-  'gi',
-);
+const AFTER_MARKER = `\\[REDACTED\\][${BEARER_TAIL_CHARS}]*(?:\\s|$)`;
+const BEARER_PATTERN = new RegExp(`Bearer\\s+(?!${AFTER_MARKER})\\S+`, 'gi');
+const BEARER_BEFORE_MARKER = new RegExp(`Bearer\\s+(?=${AFTER_MARKER})`, 'gi');
+const KEPT_RUN = new RegExp(`\\[REDACTED\\][${BEARER_TAIL_CHARS}]*`, 'iy');
 const BEARER_TAIL = new RegExp(`[${BEARER_TAIL_CHARS}]{1,${BEARER_TAIL_MAX}}$`);
 // The CalDAV path authenticates with HTTP Basic, so a reflected header or a
 // tsdav error carries the base64 credential blob — redact that shape too.
@@ -82,13 +83,16 @@ const BASIC_AT = new RegExp(BASIC_PATTERN.source, 'iy');
  *
  * Hidden: each registered secret occurrence and existing marker (sealed: never restored), a
  * Basic blob, a Fastmail token after `fmu`, and a Bearer value less its restored tail. Each
- * maximal hidden run is written as one marker. Where spans overlap, hidden wins: a `Bearer` or
- * `Basic` word inside another span is hidden with it. A visible label word is written in its
- * canonical case with one space after it, and a Bearer value always begins with a marker, so
- * the output keeps the `Bearer [REDACTED]` + tail, `Basic [REDACTED]` and `fmu[REDACTED]`
- * shapes. When a Bearer value's hidden run reaches past the value, hiding extends to the next
- * whitespace, so the output never carries a marker glued to text a later pass would take as
- * part of the value.
+ * maximal hidden run is written as one upper-case marker, so a lower-case marker is rewritten
+ * and adjacent markers or secrets merge into one. Where spans overlap, hidden wins: a `Bearer`
+ * or `Basic` word inside another span is hidden with it. A visible `Bearer` or `Basic` label,
+ * including one before a marker left alone, is written in that case with one space after it,
+ * even when the space was a secret's own whitespace; a Bearer value always begins with a marker.
+ * So the output keeps the `Bearer [REDACTED]` + tail, `Basic [REDACTED]` and `fmu[REDACTED]`
+ * shapes. When the whitespace ending a Bearer value, or ending a kept marker's closing run, is
+ * hidden (a secret's own whitespace), nothing in it is restored and hiding extends to the next
+ * visible whitespace, so the output never carries a marker glued to text a later pass would
+ * take as part of the value.
  */
 export function redactBearerTokens(input: string): string {
   const n = input.length;
@@ -96,6 +100,7 @@ export function redactBearerTokens(input: string): string {
   const sealed = new Uint8Array(n);
   const label: (string | undefined)[] = [];
   const valueStarts = new Set<number>();
+  const labelSpaces = new Set<number>();
   const hide = (from: number, to: number, seal = false): void => {
     for (let i = from; i < to; i++) {
       hidden[i] = 1;
@@ -106,6 +111,7 @@ export function redactBearerTokens(input: string): string {
     const head = LABEL.exec(match)![0];
     for (let i = 0; i < word.length; i++) label[at + i] = word[i];
     label[at + word.length] = ' ';
+    labelSpaces.add(at + word.length);
     for (let i = word.length + 1; i < head.length; i++) label[at + i] = '';
     return at + head.length;
   };
@@ -125,22 +131,26 @@ export function redactBearerTokens(input: string): string {
     if (m) hide(markLabel(word.index, m[0], 'Basic'), word.index + m[0].length);
   }
 
-  const tails: number[] = [];
-  const valueEnds: number[] = [];
+  // A kept marker and its closing run count as a value here only for the glue rule below.
+  const values: Array<{ start: number; end: number; tail: number }> = [];
+  for (const m of input.matchAll(BEARER_BEFORE_MARKER)) {
+    const start = markLabel(m.index, m[0], 'Bearer');
+    KEPT_RUN.lastIndex = start;
+    values.push({ start, end: start + KEPT_RUN.exec(input)![0].length, tail: 0 });
+  }
   for (const m of input.matchAll(BEARER_PATTERN)) {
     const start = markLabel(m.index, m[0], 'Bearer');
     const end = m.index + m[0].length;
     hide(start, end);
     valueStarts.add(start);
-    valueEnds.push(end);
-    const tail = m[0].match(BEARER_TAIL)?.[0] ?? '';
-    for (let i = end - tail.length; i < end; i++) tails.push(i);
+    values.push({ start, end, tail: m[0].match(BEARER_TAIL)?.[0].length ?? 0 });
   }
-  for (const i of tails) if (!sealed[i]) hidden[i] = 0;
-  for (const end of valueEnds) {
-    if (hidden[end - 1] && end < n && hidden[end]) {
-      let i = end;
-      while (i < n && (hidden[i] || !/\s/.test(input[i]))) hidden[i++] = 1;
+  for (const { start, end, tail } of values) {
+    if (end < n && hidden[end]) {
+      hide(start, end);
+      for (let i = end; i < n && (hidden[i] || !/\s/.test(input[i])); i++) hidden[i] = 1;
+    } else {
+      for (let i = end - tail; i < end; i++) if (!sealed[i]) hidden[i] = 0;
     }
   }
 
@@ -148,7 +158,7 @@ export function redactBearerTokens(input: string): string {
   let inRun = false;
   for (let i = 0; i < n; i++) {
     if (hidden[i] || (valueStarts.has(i) && !inRun)) {
-      if (!inRun) out += MARKER;
+      if (!inRun) out += labelSpaces.has(i) && !hidden[i - 1] ? ` ${MARKER}` : MARKER;
       inRun = true;
       if (hidden[i]) continue;
     }

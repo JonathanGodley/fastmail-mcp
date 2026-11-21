@@ -852,6 +852,39 @@ describe('redactBearerTokens', () => {
     assertStable('auth Bearer fmu[REDACTED]", x', 'auth Bearer [REDACTED]", x');
   });
 
+  it('keeps the whole closing run after a marker an earlier pass wrote', () => {
+    assertStable('(TZID "x Bearer [REDACTED]…"), so', '(TZID "x Bearer [REDACTED]…"), so');
+    assertStable('id "Bearer [REDACTED]…"). Next', 'id "Bearer [REDACTED]…"). Next');
+  });
+
+  it('accepted residue: a raw value whose closing run passes three keeps only the last three', () => {
+    assert.equal(redactBearerTokens('(TZID "Bearer abc…"), so'), '(TZID "Bearer [REDACTED]"), so');
+  });
+
+  it('writes one space after a visible label when a secret starting with whitespace follows it', () => {
+    registerSecret('\tQXTAB01\t');
+    assertStable('Bearer\tQXTAB01\tz', 'Bearer [REDACTED]');
+    registerSecret(' QXLEAD01');
+    assertStable('Basic QXLEAD01 y', 'Basic [REDACTED] y');
+  });
+
+  it('hides a kept marker and what follows when a secret starting with whitespace is glued to it', () => {
+    registerSecret(' QXLEAD02');
+    assertStable('Bearer [REDACTED]" QXLEAD02.x y', 'Bearer [REDACTED] y');
+  });
+
+  it('writes a label left alone by the second-pass skip in its canonical form', () => {
+    assertStable('\nBEARER  [redacted]', '\nBearer [REDACTED]');
+  });
+
+  it('writes every maximal hidden run as one upper-case marker', () => {
+    assertStable('.[redacted];', '.[REDACTED];');
+    assertStable('[redacted][redacted],', '[REDACTED],');
+    registerSecret('QXADJ001');
+    registerSecret('QXADJ002');
+    assertStable('a QXADJ001QXADJ002 b', 'a [REDACTED] b');
+  });
+
   it('property: hides every character either reference order hides, beyond the restored tail', () => {
     // Registered secrets are module state shared by this file. The generator's only lowercase
     // letters are those of "bearer", "basic", "fmu" and "a", so no secret registered elsewhere in
@@ -862,6 +895,7 @@ describe('redactBearerTokens', () => {
       'Bearer QYB2', // holds "Bearer "
       'QYNEST)"]', 'QYNEST)"]LONG', // one inside another
       'QYOVER12', 'ER12QYZ9', // overlapping, neither inside the other
+      ' QYLEAD1', 'QYTRAIL1 ', // leading and trailing whitespace
     ];
     for (const s of secrets) registerSecret(s);
     const pieces = [
@@ -905,15 +939,15 @@ describe('redactBearerTokens', () => {
       return hidden;
     };
     // The one exception: up to three closing characters ending a Bearer value, none inside a
-    // secret or a marker. Matched without the lookahead, so the tail after a marker an earlier
-    // pass wrote counts too.
+    // secret or a marker, or any closing run after a value that is only a marker.
     const allowedTail = (input: string): Set<number> => {
       const sealed = hiddenBySecrets(input);
       for (const [a, b] of occurrences(input, /\[REDACTED\]/gi)) for (let i = a; i < b; i++) sealed.add(i);
       const allowed = new Set<number>();
       for (const m of input.matchAll(/Bearer\s+\S+/gi)) { // allowlist-secret (pattern, not a credential)
         const end = m.index + m[0].length;
-        const tail = m[0].match(/["',;:)\]}.…]{1,3}$/)?.[0] ?? '';
+        const afterMarker = /\s\[REDACTED\](["',;:)\]}.…]*)$/i.exec(m[0]);
+        const tail = afterMarker ? afterMarker[1] : (m[0].match(/["',;:)\]}.…]{1,3}$/)?.[0] ?? '');
         for (let i = end - tail.length; i < end; i++) if (!sealed.has(i)) allowed.add(i);
       }
       return allowed;
