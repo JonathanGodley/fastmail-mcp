@@ -70,30 +70,92 @@ export function registerSecret(value: string | undefined): void {
   }
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+const MARKER = '[REDACTED]';
+const MARKER_PATTERN = /\[REDACTED\]/gi;
+const LABEL = /^(?:bearer|basic)\s+/i;
+const BASIC_AT = new RegExp(BASIC_PATTERN.source, 'iy');
 
-// The closing characters ending a Bearer match. A marker inside the match is masked first so
-// its `]` is never given back; a registered secret is a marker by now, and no character of a
-// Fastmail token is in the tail set.
-function restoredTail(match: string): string {
-  return match.replace(/\[REDACTED\]/gi, '\0').match(BEARER_TAIL)?.[0] ?? '';
-}
-
-// Registered secrets go first: they are exact strings, and a pattern run before them can split
-// one at a space and leave the rest in clear. Longest first, so a secret that contains another
-// is replaced whole. The pattern order is load-bearing too: Basic before Bearer would let
-// `Basic Bearer x` show the `x`.
+/**
+ * Every span is found on the RAW input and the union is hidden, so no pass can cut another's
+ * run short: replacing one match first would leave a marker that ends a Basic blob, a Fastmail
+ * token or a Bearer value early, or would split a registered secret at a space.
+ *
+ * Hidden: each registered secret occurrence and existing marker (sealed: never restored), a
+ * Basic blob, a Fastmail token after `fmu`, and a Bearer value less its restored tail. Each
+ * maximal hidden run is written as one marker. Where spans overlap, hidden wins: a `Bearer` or
+ * `Basic` word inside another span is hidden with it. A visible label word is written in its
+ * canonical case with one space after it, and a Bearer value always begins with a marker, so
+ * the output keeps the `Bearer [REDACTED]` + tail, `Basic [REDACTED]` and `fmu[REDACTED]`
+ * shapes. When a Bearer value's hidden run reaches past the value, hiding extends to the next
+ * whitespace, so the output never carries a marker glued to text a later pass would take as
+ * part of the value.
+ */
 export function redactBearerTokens(input: string): string {
-  let out = input;
-  for (const secret of [...KNOWN_SECRETS].sort((a, b) => b.length - a.length)) {
-    out = out.replace(new RegExp(escapeRegExp(secret), 'g'), '[REDACTED]');
+  const n = input.length;
+  const hidden = new Uint8Array(n);
+  const sealed = new Uint8Array(n);
+  const label: (string | undefined)[] = [];
+  const valueStarts = new Set<number>();
+  const hide = (from: number, to: number, seal = false): void => {
+    for (let i = from; i < to; i++) {
+      hidden[i] = 1;
+      if (seal) sealed[i] = 1;
+    }
+  };
+  const markLabel = (at: number, match: string, word: string): number => {
+    const head = LABEL.exec(match)![0];
+    for (let i = 0; i < word.length; i++) label[at + i] = word[i];
+    label[at + word.length] = ' ';
+    for (let i = word.length + 1; i < head.length; i++) label[at + i] = '';
+    return at + head.length;
+  };
+
+  for (const secret of KNOWN_SECRETS) {
+    for (let at = input.indexOf(secret); at !== -1; at = input.indexOf(secret, at + 1)) {
+      hide(at, at + secret.length, true);
+    }
   }
-  return out
-    .replace(BEARER_PATTERN, (match) => `Bearer [REDACTED]${restoredTail(match)}`)
-    .replace(BASIC_PATTERN, 'Basic [REDACTED]')
-    .replace(FASTMAIL_TOKEN_PATTERN, 'fmu[REDACTED]');
+  for (const m of input.matchAll(MARKER_PATTERN)) hide(m.index, m.index + m[0].length, true);
+  for (const m of input.matchAll(FASTMAIL_TOKEN_PATTERN)) hide(m.index + 3, m.index + m[0].length);
+  // Tried at every `basic`, not left to right: in `Basic Basic dXNl` the second word starts a
+  // blob of its own once the first match has taken it.
+  for (const word of input.matchAll(/basic/gi)) {
+    BASIC_AT.lastIndex = word.index;
+    const m = BASIC_AT.exec(input);
+    if (m) hide(markLabel(word.index, m[0], 'Basic'), word.index + m[0].length);
+  }
+
+  const tails: number[] = [];
+  const valueEnds: number[] = [];
+  for (const m of input.matchAll(BEARER_PATTERN)) {
+    const start = markLabel(m.index, m[0], 'Bearer');
+    const end = m.index + m[0].length;
+    hide(start, end);
+    valueStarts.add(start);
+    valueEnds.push(end);
+    const tail = m[0].match(BEARER_TAIL)?.[0] ?? '';
+    for (let i = end - tail.length; i < end; i++) tails.push(i);
+  }
+  for (const i of tails) if (!sealed[i]) hidden[i] = 0;
+  for (const end of valueEnds) {
+    if (hidden[end - 1] && end < n && hidden[end]) {
+      let i = end;
+      while (i < n && (hidden[i] || !/\s/.test(input[i]))) hidden[i++] = 1;
+    }
+  }
+
+  let out = '';
+  let inRun = false;
+  for (let i = 0; i < n; i++) {
+    if (hidden[i] || (valueStarts.has(i) && !inRun)) {
+      if (!inRun) out += MARKER;
+      inRun = true;
+      if (hidden[i]) continue;
+    }
+    inRun = false;
+    out += label[i] ?? input[i];
+  }
+  return out;
 }
 
 /**

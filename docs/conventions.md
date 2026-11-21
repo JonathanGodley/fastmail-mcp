@@ -925,9 +925,10 @@ rebuilding would double the SDK's `MCP error <code>: ` prefix), the `PathAccessE
 list, which is the point: the audit "no unredacted error text reaches tool output" stays a
 grep anyone can run instead of a claim that has to be re-argued per error class. An
 untrusted value a message quotes was already redacted once, when it was rendered, so
-`redactBearerTokens` must leave its own output unchanged; how it does is at `BEARER_PATTERN`
-in `src/coerce.ts`. Only `.message` is scrubbed; `McpError.data` is deliberately left
-alone, because nothing here populates it and it is arbitrary JSON a string-shaped scrubber cannot walk.
+`redactBearerTokens` must leave its own output unchanged; how it does is at its definition
+and `BEARER_PATTERN` in `src/coerce.ts`. Only `.message` is scrubbed; `McpError.data` is
+deliberately left alone, because nothing here populates it and it is arbitrary JSON a
+string-shaped scrubber cannot walk.
 
 Server text that reaches the caller on a *successful* result gets no help from that catch,
 so it is sanitised at its own render site. `orphanedOldDraftReason` and `bodyHashWithheld`
