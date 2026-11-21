@@ -10,7 +10,6 @@ const { check, failures } = makeChecker();
 if (!process.env.FASTMAIL_WEB_COOKIE) { console.error('FASTMAIL_WEB_COOKIE is not set. Stopping.'); process.exit(2); }
 
 const c = createClient({ env: { ...process.env, FASTMAIL_EXPERIMENTAL_SNOOZE: '1' } });
-await c.init();
 // A failed call check ends the run: the checks after it would read a result that is not there.
 const listCall = async (label, args) => {
   let r;
@@ -29,6 +28,7 @@ const listCall = async (label, args) => {
   return parsed ? body : null;
 };
 try {
+  await c.init();
   const simplified = await listCall('simplified', { limit: 5 });
   if (simplified) console.log(`snoozed messages: ${simplified.total ?? 'not returned'}, returned ${simplified.emails.length}`);
   const raw = simplified && await listCall('raw', { limit: 5, raw: true });
@@ -52,6 +52,8 @@ try {
     check('raw: carries the list property set (keywords, preview, receivedAt)',
       ['keywords', 'preview', 'receivedAt'].every(k => rawKeys.includes(k)));
   }
+} catch (err) {
+  check('the probe ran to its end', false, err?.name ?? 'thrown');
 } finally {
   c.close();
 }
