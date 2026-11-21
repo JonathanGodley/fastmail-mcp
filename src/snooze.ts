@@ -7,7 +7,7 @@
 // Measured by scripts/probes/snooze-read.probe.mjs, snooze-write.probe.mjs and
 // snooze-list.smoke.mjs.
 
-import { coerceBool, coerceUtcDate, describeUntrusted, InvalidInputError, redactedJson, registerSecret } from './coerce.js';
+import { coerceBool, coerceUtcDate, describeUntrusted, InvalidInputError, LENIENT_BOOL_DESC, redactedJson, registerSecret } from './coerce.js';
 import { getDefaultTimezone, simplifyEmail, toLocalIso } from './email-formatter.js';
 import { EMAIL_PROPERTIES_COMPACT, attachMailboxInfo, buildMailboxInfoMap } from './jmap-client.js';
 import { projectListEmail } from './field-projection.js';
@@ -245,7 +245,7 @@ export const SNOOZE_TOOLS = [
       type: 'object',
       properties: {
         limit: { type: ['number', 'string'], description: 'Maximum messages to return (default 50, max 100)', default: 50 },
-        raw: { type: ['boolean', 'string'], description: 'Return original JMAP response instead of simplified format. Also accepts "true"/"false" in any case and 1/0 (as a number or a string); any other value is rejected, naming the parameter.' },
+        raw: { type: ['boolean', 'string'], description: 'Return original JMAP response instead of simplified format.' + LENIENT_BOOL_DESC },
       },
     },
   },

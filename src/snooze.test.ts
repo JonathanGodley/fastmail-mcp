@@ -221,11 +221,12 @@ describe('list_snoozed_emails', () => {
 
   it('declares raw with the wording the other email tools use', () => {
     const list = SNOOZE_TOOLS.find(tool => tool.name === 'list_snoozed_emails')!;
-    const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
-    const lenient = /const LENIENT_BOOL_DESC =\s*'([^']*)'/.exec(source)![1];
     const raw = (list.inputSchema.properties as any).raw;
     assert.ok(raw, 'list_snoozed_emails declares no raw parameter');
-    assert.equal(raw.description, 'Return original JMAP response instead of simplified format.' + lenient);
+    assert.equal(
+      raw.description,
+      'Return original JMAP response instead of simplified format. Also accepts "true"/"false" in any case and 1/0 (as a number or a string); any other value is rejected, naming the parameter.',
+    );
   });
 });
 

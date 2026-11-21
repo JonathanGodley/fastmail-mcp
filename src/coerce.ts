@@ -402,6 +402,13 @@ export function coerceBool(value: unknown, paramName: string): boolean | undefin
   );
 }
 
+// Appended to every boolean whose handler runs coerceBool, alongside a schema type of
+// `['boolean', 'string']`: a narrow `type: 'boolean'` makes the coercion unreachable from a
+// validating client (#54). The prose says WHICH strings, because coerceBool refuses every
+// other value rather than reading it as the default.
+export const LENIENT_BOOL_DESC =
+  ' Also accepts "true"/"false" in any case and 1/0 (as a number or a string); any other value is rejected, naming the parameter.';
+
 // JMAP filter conditions take a UTCDate (RFC 8620 §1.4): an RFC 3339 date-time whose
 // offset is literally `Z`, e.g. `2026-07-20T00:00:00Z`. A bare `2026-07-20` is valid
 // ISO 8601 but the server rejects it with an opaque `invalidArguments` that names no

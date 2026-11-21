@@ -14,7 +14,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, buildMalformedStructureNote, deleteCalendarEventContent, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { setDefaultTimezone } from './email-formatter.js';
 import { buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, describeUntrusted, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, LENIENT_BOOL_DESC, describeUntrusted, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { composeDraftEmail } from './draft-email-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
 import { editDraft } from './edit-draft-handler.js';
@@ -412,14 +412,7 @@ const CONFIGURED_TIMEZONE = (() => {
   return `${zone}${etcGmtOffsetNote(zone)}`;
 })();
 
-// Appended to every boolean whose handler runs coerceBool, alongside a schema type of
-// `['boolean', 'string']`: a narrow `type: 'boolean'` makes the coercion unreachable from a
-// validating client (#54). The prose says WHICH strings, because coerceBool refuses every
-// other value rather than reading it as the default.
-const LENIENT_BOOL_DESC =
-  ' Also accepts "true"/"false" in any case and 1/0 (as a number or a string); any other value is rejected, naming the parameter.';
-
-// Wrap a boolean parameter's description with the note above. Adds sentence-ending
+// Wrap a boolean parameter's description with LENIENT_BOOL_DESC. Adds sentence-ending
 // punctuation first when the description lacks it, so the two clauses don't run
 // together — the descriptions here are not uniformly punctuated.
 function lenientBool(description: string): string {
