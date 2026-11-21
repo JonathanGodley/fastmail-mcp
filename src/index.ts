@@ -370,7 +370,8 @@ const CALENDAR_EVENT_ID_DESC =
   'THE WRITES NEED EVERY RECORD MATCHED TO THE ID WHOLE: its data, an event in it with a UID, its url and its entity tag. ' +
   'Where any of those is missing for a record matched by either form, update_calendar_event and delete_calendar_event ' +
   'REFUSE the id, name that record and change nothing, offering a handle only where one reaches a record this server ' +
-  'read whole. get_calendar_event skips a record missing its data, an event, its url or its entity tag. ' +
+  'read whole. get_calendar_event names such a record as one it could not use, beside an event it could or in an error, ' +
+  'except one holding a UID other than the id; it gives that record\'s url only where it lies inside its calendar. ' +
   'AN ID CAN NAME MORE THAN ONE RECORD: a UID is unique within one calendar, not across the account, so two calendars can ' +
   'hold the same id. Where they do, update_calendar_event and delete_calendar_event REFUSE it outright and name every copy ' +
   'with its calendar and its `url`, rather than picking one; get_calendar_event answers with the FIRST copy, adds an ' +
