@@ -794,6 +794,25 @@ describe('redactBearerTokens', () => {
     assertStable('auth Bearer abczz-bearer-embedded-synthetic)"]", x', 'auth Bearer [REDACTED]", x'); // allowlist-secret (synthetic value registered above)
   });
 
+  it('hides the whole of a registered secret containing whitespace that follows Bearer', () => {
+    registerSecret('zz-space synthetic)"]');
+    assertStable('auth Bearer zz-space synthetic)"] y', 'auth Bearer [REDACTED] y'); // allowlist-secret (synthetic value registered above)
+  });
+
+  it('hides the whole of a registered secret that itself contains "Bearer " or the marker', () => {
+    registerSecret('zz-holds Bearer inside-synthetic'); // allowlist-secret (synthetic value carrying the word, not a credential)
+    registerSecret('zz-holds-[REDACTED]-synthetic)');
+    assertStable('auth zz-holds Bearer inside-synthetic tail', 'auth [REDACTED] tail'); // allowlist-secret (synthetic value registered above)
+    assertStable('auth Bearer zz-holds-[REDACTED]-synthetic), tail', 'auth Bearer [REDACTED], tail'); // allowlist-secret (synthetic value registered above)
+  });
+
+  it('hides the whole of a registered secret that contains a shorter registered one', () => {
+    registerSecret('zz-nested-synth');
+    registerSecret('zz-nested-synth-longer-tail');
+    assertStable('auth zz-nested-synth-longer-tail end', 'auth [REDACTED] end');
+    assertStable('auth zz-nested-synth end', 'auth [REDACTED] end');
+  });
+
   it('restores the closing characters after a Fastmail token, and none of the token', () => {
     assertStable(
       'auth "Bearer fmu0-aaaaaaaaaaaaaaaaaaaaaaaa", x', // allowlist-secret (synthetic fmu shape)

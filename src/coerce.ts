@@ -74,40 +74,26 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// The spans in `input` a Bearer restore must not give back a character of: each registered
-// secret, Fastmail token and earlier marker. Measured on the raw input because the Bearer pass
-// runs first; running the other passes before it leaks instead (`Basic Bearer x` shows `x`).
-function protectedSpans(input: string): Array<[number, number]> {
-  const patterns = [/\[REDACTED\]/gi, FASTMAIL_TOKEN_PATTERN];
-  for (const secret of KNOWN_SECRETS) patterns.push(new RegExp(escapeRegExp(secret), 'g'));
-  return patterns.flatMap((p) => [...input.matchAll(p)].map((m): [number, number] => [m.index, m.index + m[0].length]));
+// The closing characters ending a Bearer match. A marker inside the match is masked first so
+// its `]` is never given back; a registered secret is a marker by now, and no character of a
+// Fastmail token is in the tail set.
+function restoredTail(match: string): string {
+  return match.replace(/\[REDACTED\]/gi, '\0').match(BEARER_TAIL)?.[0] ?? '';
 }
 
-// The closing characters ending a Bearer match, less any that fall inside a protected span.
-function restoredTail(match: string, offset: number, spans: Array<[number, number]>): string {
-  const tail = match.match(BEARER_TAIL)?.[0] ?? '';
-  const matchEnd = offset + match.length;
-  const tailStart = matchEnd - tail.length;
-  let from = tailStart;
-  for (const [start, end] of spans) {
-    if (start < matchEnd && end > from) from = end;
-  }
-  return tail.slice(from - tailStart);
-}
-
+// Registered secrets go first: they are exact strings, and a pattern run before them can split
+// one at a space and leave the rest in clear. Longest first, so a secret that contains another
+// is replaced whole. The pattern order is load-bearing too: Basic before Bearer would let
+// `Basic Bearer x` show the `x`.
 export function redactBearerTokens(input: string): string {
-  let spans: Array<[number, number]> | undefined;
-  let out = input
-    .replace(BEARER_PATTERN, (match: string, offset: number) => {
-      spans ??= protectedSpans(input);
-      return `Bearer [REDACTED]${restoredTail(match, offset, spans)}`;
-    })
-    .replace(BASIC_PATTERN, 'Basic [REDACTED]')
-    .replace(FASTMAIL_TOKEN_PATTERN, 'fmu[REDACTED]');
-  for (const secret of KNOWN_SECRETS) {
+  let out = input;
+  for (const secret of [...KNOWN_SECRETS].sort((a, b) => b.length - a.length)) {
     out = out.replace(new RegExp(escapeRegExp(secret), 'g'), '[REDACTED]');
   }
-  return out;
+  return out
+    .replace(BEARER_PATTERN, (match) => `Bearer [REDACTED]${restoredTail(match)}`)
+    .replace(BASIC_PATTERN, 'Basic [REDACTED]')
+    .replace(FASTMAIL_TOKEN_PATTERN, 'fmu[REDACTED]');
 }
 
 /**
