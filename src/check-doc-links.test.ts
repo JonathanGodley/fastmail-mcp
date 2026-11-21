@@ -68,6 +68,21 @@ describe('checkDocLinks', () => {
     assert.deepEqual(checkDocLinks(root), { checked: 0, bad: [], notes: [] });
   });
 
+  it('checks a link that carries a single-quoted title', () => {
+    const root = tree({ 'README.md': "[x](missing.md 'A title')\n" });
+    assert.deepEqual(checkDocLinks(root).bad, [{ file: 'README.md', line: 1, target: 'missing.md', problem: 'missing file' }]);
+  });
+
+  it('recognises an <a id> or <a name> written with single quotes', () => {
+    const root = tree({ 'docs/a.md': "<a id='first'></a> <a name='second'></a>\n\n[1](#first) [2](#second)\n" });
+    assert.deepEqual(checkDocLinks(root), { checked: 2, bad: [], notes: [] });
+  });
+
+  it('skips a URL scheme written in capitals', () => {
+    const root = tree({ 'README.md': '[site](HTTPS://example.com/missing.md)\n' });
+    assert.deepEqual(checkDocLinks(root), { checked: 0, bad: [], notes: [] });
+  });
+
   it('notes an anchor on a non-.md target without failing it', () => {
     const root = tree({ 'README.md': '[licence](LICENSE#terms)\n', LICENSE: 'terms\n' });
     const { checked, bad, notes } = checkDocLinks(root);

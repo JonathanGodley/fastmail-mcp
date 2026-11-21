@@ -317,7 +317,7 @@ export function buildAmbiguousEventNote(
           + (addressCollision.addressedUid
             ? 'Pass the event\'s own `id` (its UID) to act on the event above, or'
             : 'No event id reaches the event above alone through this server;')
-          + ' pass its own `url` to act on one of the others.'
+          + ' pass the `url` of one of the others to act on that one.'
         : 'picked from the set, and update_calendar_event and delete_calendar_event act on that '
           + 'same record when given this id. To reach one of the others, pass its own `url`.')
     );
@@ -855,8 +855,8 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
       'id', 'name', 'emails', 'phones', 'organizations', 'notes',
       'addresses', 'titles', 'online', 'photos', 'anniversaries',
     ]);
-    // A field the card itself names `organization` is dropped when the card has a named
-    // organization, whose name already fills `result.organization`; with none, it is copied.
+    // A field the card itself names `organization` is dropped when the card's first organization
+    // has a name, which already fills `result.organization`; otherwise it is copied.
     for (const key of Object.keys(raw)) {
       if (!handledKeys.has(key) && result[key] === undefined && raw[key] !== undefined) {
         result[key] = raw[key];

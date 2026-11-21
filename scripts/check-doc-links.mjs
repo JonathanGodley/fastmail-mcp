@@ -4,7 +4,15 @@
 // a URL scheme are skipped, as is anything inside a ``` fence or an inline code span.
 // An anchor on a target that is not .md is reported but does not fail the run.
 //
-// Not handled: reference-style links, ~~~ fences and setext (underlined) headings.
+// Not handled:
+// - reference-style links, ~~~ fences and setext (underlined) headings;
+// - angle-bracket targets, [x](<path>);
+// - headings carrying emphasis markers;
+// - headings indented by one to three spaces;
+// - percent-encoded paths;
+// - a repeated heading whose -N slug is already taken by another heading;
+// - a fence nested inside a longer fence;
+// - case: Windows accepts a link whose case differs from the file's, Linux CI does not.
 //
 // Usage: node scripts/check-doc-links.mjs [root]. Exits 1 when any link is bad.
 
@@ -14,9 +22,9 @@ import { pathToFileURL } from 'node:url';
 
 const FENCE = /^\s*```/;
 const HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
-const HTML_ANCHOR = /<a\s+(?:name|id)="([^"]+)"/g;
-const LINK = /\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
-const SCHEME = /^[a-z]+:/;
+const HTML_ANCHOR = /<a\s+(?:name|id)=(?:"([^"]+)"|'([^']+)')/g;
+const LINK = /\]\(([^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'))?\)/g;
+const SCHEME = /^[a-z]+:/i;
 
 function slug(heading) {
   return heading
@@ -51,7 +59,7 @@ function readAnchors(file) {
       seen.set(base, n + 1);
       anchors.add(n === 0 ? base : `${base}-${n}`);
     }
-    for (const a of line.matchAll(HTML_ANCHOR)) anchors.add(a[1]);
+    for (const a of line.matchAll(HTML_ANCHOR)) anchors.add(a[1] ?? a[2]);
   }
   return anchors;
 }

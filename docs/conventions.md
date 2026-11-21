@@ -2350,10 +2350,9 @@ that covers it (unless scoped to another calendar) until the caller narrows the 
 far more expensive than parsing a few thousand extra blocks.
 
 **The residual of the refusal, stated plainly: a hostile series DOES fail every listing whose
-window covers it**, until the caller narrows the window past it, scopes the call to a calendar
-that does not hold it (`calendarId`), or removes the event in the Fastmail client - this server
-refuses to delete any recurring series (#146), so removal is never something a caller can do from
-here. Leaving the series out with a note would keep the listing answering; the refusal gives
+window covers it**, until the caller narrows the window past it or scopes the call to a calendar
+that does not hold it (`calendarId`). This server refuses to delete any recurring series (#146),
+so removal is never something a caller can do from here. Leaving the series out with a note would keep the listing answering; the refusal gives
 that up, so nothing here promises that one hostile invitation cannot blank a listing - it can,
 and that is the accepted price of the caller being told rather than left to notice.
 
