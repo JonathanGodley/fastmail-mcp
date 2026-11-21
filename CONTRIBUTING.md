@@ -110,6 +110,9 @@ npm test
 than `src/`. When that hook throws, the runner reports the suite as cancelled
 rather than failed, so a run without a build can look green.
 
+`npm test` also checks every relative link and anchor in the docs;
+`npm run check:links` runs that check alone and lists each bad link.
+
 `npm test` runs through `scripts/run-tests.mjs`, which kills the run and every
 process under it if it has not ended within ten minutes (`TEST_RUN_LIMIT_MS`
 overrides that). Node's test runner can spin forever, holding a core and
