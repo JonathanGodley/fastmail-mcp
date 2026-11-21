@@ -775,6 +775,36 @@ describe('redactBearerTokens', () => {
     // Nothing leaks; the values after the token are dropped. Structured output uses redactedJson.
     assert.equal(redactBearerTokens('{"a":"Bearer x","b":"y"}'), '{"a":"Bearer [REDACTED]"}');
   });
+
+  // KNOWN_SECRETS is module state, so these values are unique to these tests.
+  function assertStable(input: string, expected: string): void {
+    const once = redactBearerTokens(input);
+    assert.equal(once, expected);
+    assert.equal(redactBearerTokens(once), once);
+  }
+
+  it('restores none of the closing characters a registered secret ends with', () => {
+    registerSecret('zz-bearer-tail-synthetic)"]');
+    assertStable('auth Bearer zz-bearer-tail-synthetic)"] x', 'auth Bearer [REDACTED] x'); // allowlist-secret (synthetic value registered on the line above)
+  });
+
+  it('restores none of a registered secret embedded in a longer value', () => {
+    registerSecret('zz-bearer-embedded-synthetic)"]');
+    assertStable('auth Bearer abczz-bearer-embedded-synthetic)"] x', 'auth Bearer [REDACTED] x'); // allowlist-secret (synthetic value registered above)
+    assertStable('auth Bearer abczz-bearer-embedded-synthetic)"]", x', 'auth Bearer [REDACTED]", x'); // allowlist-secret (synthetic value registered above)
+  });
+
+  it('restores the closing characters after a Fastmail token, and none of the token', () => {
+    assertStable(
+      'auth "Bearer fmu0-aaaaaaaaaaaaaaaaaaaaaaaa", x', // allowlist-secret (synthetic fmu shape)
+      'auth "Bearer [REDACTED]", x',
+    );
+  });
+
+  it('restores no bracket from a marker an earlier pass wrote inside the value', () => {
+    assertStable('auth Bearer abc[REDACTED] x', 'auth Bearer [REDACTED] x');
+    assertStable('auth Bearer fmu[REDACTED]", x', 'auth Bearer [REDACTED]", x');
+  });
 });
 
 describe('redactedJson', () => {

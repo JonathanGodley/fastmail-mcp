@@ -39,8 +39,9 @@ export class InvalidInputError extends Error {
 // finished message in the CallTool catch. `\S+` runs to the next whitespace, so on that second
 // pass it would take the closing quote, comma or `…` cut marker written after the value. So a
 // marker followed only by such a tail is left alone, and up to BEARER_TAIL_MAX closing
-// characters ending a match are put back. Three covers `…",`. Of the set only `.` can occur
-// in an RFC 6750 token, so a restore shows at most three trailing dots of a credential.
+// characters ending a match are put back. Three covers `…",`. A restore can show at most three
+// trailing characters of the value, never one inside a registered secret or Fastmail token;
+// of the set only `.` can occur in an RFC 6750 token.
 const BEARER_TAIL_CHARS = `"',;:)\\]}.\u2026`;
 const BEARER_TAIL_MAX = 3;
 const BEARER_PATTERN = new RegExp(
@@ -73,9 +74,34 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// The spans in `input` a Bearer restore must not give back a character of: each registered
+// secret, Fastmail token and earlier marker. Measured on the raw input because the Bearer pass
+// runs first; running the other passes before it leaks instead (`Basic Bearer x` shows `x`).
+function protectedSpans(input: string): Array<[number, number]> {
+  const patterns = [/\[REDACTED\]/gi, FASTMAIL_TOKEN_PATTERN];
+  for (const secret of KNOWN_SECRETS) patterns.push(new RegExp(escapeRegExp(secret), 'g'));
+  return patterns.flatMap((p) => [...input.matchAll(p)].map((m): [number, number] => [m.index, m.index + m[0].length]));
+}
+
+// The closing characters ending a Bearer match, less any that fall inside a protected span.
+function restoredTail(match: string, offset: number, spans: Array<[number, number]>): string {
+  const tail = match.match(BEARER_TAIL)?.[0] ?? '';
+  const matchEnd = offset + match.length;
+  const tailStart = matchEnd - tail.length;
+  let from = tailStart;
+  for (const [start, end] of spans) {
+    if (start < matchEnd && end > from) from = end;
+  }
+  return tail.slice(from - tailStart);
+}
+
 export function redactBearerTokens(input: string): string {
+  let spans: Array<[number, number]> | undefined;
   let out = input
-    .replace(BEARER_PATTERN, (match) => `Bearer [REDACTED]${match.match(BEARER_TAIL)?.[0] ?? ''}`)
+    .replace(BEARER_PATTERN, (match: string, offset: number) => {
+      spans ??= protectedSpans(input);
+      return `Bearer [REDACTED]${restoredTail(match, offset, spans)}`;
+    })
     .replace(BASIC_PATTERN, 'Basic [REDACTED]')
     .replace(FASTMAIL_TOKEN_PATTERN, 'fmu[REDACTED]');
   for (const secret of KNOWN_SECRETS) {
