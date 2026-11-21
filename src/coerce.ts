@@ -1,5 +1,5 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
-import { describePart, DESCRIBE_PART_MAX, isAuthorableCid, stripCidSpelling } from './inline-images.js';
+import { cleanPart, describePart, DESCRIBE_PART_MAX, isAuthorableCid, stripCidSpelling } from './inline-images.js';
 import { rejectUnusableCid } from './inline-notes.js';
 import type { BodyEdit } from './body-edits.js';
 
@@ -72,17 +72,18 @@ export function redactSecrets(input: string): string {
 }
 
 /**
- * Render an untrusted value into prose: REDACT it, then neutralise and truncate it.
+ * Render an untrusted value into prose: redact it, neutralise it, redact again, then truncate.
  *
  * Any value not written by this server (a caller-supplied id, a mailbox name, a
  * server-authored set-error description) that is interpolated into a message a caller reads
  * back goes through this. Only the value, never the server's own sentence around it. The
  * model is in docs/conventions.md.
  *
- * The order is the landmine (#131). `describePart` strips line breaks and bidi overrides,
- * swaps `"` for `'`, and truncates at 64 code points. `redactSecrets` matches only a whole
- * registered secret, so truncating first lets a secret's prefix out verbatim. Backwards still
- * passes every line-forging test.
+ * The order is the landmine (#131). `redactSecrets` matches only a whole registered secret.
+ * Neutralising (`cleanPart`: line breaks, format characters and bidi overrides stripped, space
+ * runs folded, `"` swapped for `'`) can break a secret, so redaction runs before it, and can
+ * reassemble one, so redaction runs after it too. Truncating before either pass lets a secret's
+ * prefix out verbatim. Any other order still passes every line-forging test.
  *
  * No second parameter on purpose: callers pass this to `.map` bare, and `map` would hand it
  * the index as a bound. A wider bound goes through `describeUntrustedAt`.
@@ -111,15 +112,15 @@ export function joinCapped(items: string[], separator = ', ', cap = LIST_ECHO_CA
 
 /**
  * `describeUntrusted` at a bound named by the caller, for a value the 64-code-point default
- * renders useless — the same two steps in the same order, at a width that value can survive.
+ * renders useless — the same steps in the same order, at a width that value can survive.
  *
- * The bound moves the TRUNCATION and nothing else. Redaction still runs over the whole value
- * first, so a wider echo cannot let a credential through. Pass a named constant carrying its
- * reason, as `PATH_ECHO_LIMIT` does.
+ * The bound moves the TRUNCATION and nothing else, so a wider echo cannot let a credential
+ * through. Pass a named constant carrying its reason, as `PATH_ECHO_LIMIT` does.
  */
 export function describeUntrustedAt(value: unknown, max: number): string {
   const source = typeof value === 'string' ? value : value == null ? '' : String(value);
-  return describePart(redactSecrets(source), max);
+  // describePart's own cleaning finds nothing left to change; it only truncates here.
+  return describePart(redactSecrets(cleanPart(redactSecrets(source))), max);
 }
 
 /**
@@ -445,10 +446,15 @@ const ECHO_UNSAFE_CHARS = /[\p{Cc}\p{Zl}\p{Zp}\u202A-\u202E\u2066-\u2069]/gu;
  *     short one. The bound counts code points, so a cut never leaves half a surrogate pair.
  */
 export function echoCallerText(value: unknown, limit: number = DATE_ECHO_LIMIT): string {
-  const text = typeof value === 'string' ? value : String(value);
-  const clean = text.replace(ECHO_UNSAFE_CHARS, ' ').replace(/"/g, "'").trim();
+  const clean = cleanCallerText(value);
   const points = [...clean];
   return points.length > limit ? `${points.slice(0, limit).join('')}…` : clean;
+}
+
+/** `echoCallerText`'s cleaning with no truncation. */
+function cleanCallerText(value: unknown): string {
+  const text = typeof value === 'string' ? value : String(value);
+  return text.replace(ECHO_UNSAFE_CHARS, ' ').replace(/"/g, "'").trim();
 }
 
 // Normalise a caller-supplied date/datetime into the JMAP UTCDate shape, reading anything
@@ -589,13 +595,13 @@ export const ZONE_ECHO_LIMIT = 40;
 export const PATH_ECHO_LIMIT = 200;
 
 /**
- * The path spelling of `echoCallerText`: redact, then neutralise and bound at
- * `PATH_ECHO_LIMIT`, the same two steps in the same order `describeUntrusted` runs. Callers
- * quote it with `"…"`.
+ * The path spelling of `echoCallerText`, bound at `PATH_ECHO_LIMIT`, in the order
+ * `describeUntrusted` runs and for its reasons. Callers quote it with `"…"`.
  */
 export function echoPath(value: unknown): string {
   const source = typeof value === 'string' ? value : value == null ? '' : String(value);
-  return echoCallerText(redactSecrets(source), PATH_ECHO_LIMIT);
+  // echoCallerText's own cleaning finds nothing left to change; it only truncates here.
+  return echoCallerText(redactSecrets(cleanCallerText(redactSecrets(source))), PATH_ECHO_LIMIT);
 }
 
 const zoneCanonicalizationCache = new Map<string, string>();

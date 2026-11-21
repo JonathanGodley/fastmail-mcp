@@ -956,6 +956,40 @@ describe('describeUntrustedAt', () => {
   });
 });
 
+describe('the untrusted-value helpers hide a secret their cleaning would reassemble (#246)', () => {
+  it('describeUntrusted: a line break inside a registered value', () => {
+    registerSecret('tokAAAA1111bbbbCCCC');
+    assert.equal(describeUntrusted('tokAAAA\n1111bbbbCCCC'), '[REDACTED]');
+  });
+
+  it('describeUntrusted: a U+202E inside a registered value', () => {
+    registerSecret('zzQXformatsecret1');
+    assert.equal(describeUntrusted('zzQXformat‮secret1'), '[REDACTED]');
+  });
+
+  it('describeUntrusted: a no-break space where a registered value has a space', () => {
+    registerSecret('zzQX nbsp secret');
+    assert.equal(describeUntrusted('zzQX nbsp secret'), '[REDACTED]');
+  });
+
+  it("echoPath: a double quote where a registered value has a single quote", () => {
+    registerSecret('quote\'secret');
+    assert.equal(echoPath('/tmp/quote"secret'), '/tmp/[REDACTED]');
+  });
+
+  it('echoPath: a tab where a registered value has a space', () => {
+    registerSecret('zzQX tab secret');
+    assert.equal(echoPath('/tmp/zzQX\ttab secret'), '/tmp/[REDACTED]');
+  });
+
+  it('describeUntrustedAt: a secret that crosses the bound only once cleaned is still hidden', () => {
+    registerSecret('zzQX-crossing-secret');
+    // 60 visible characters, then the secret split by line breaks the cleaning removes.
+    const out = describeUntrustedAt('x'.repeat(60) + '\n'.repeat(30) + 'zzQX-cross\ning-secret', 64);
+    assert.equal(out, 'x'.repeat(60) + '[RED…');
+  });
+});
+
 describe('echoPath', () => {
   // The two properties a path refusal loses when it interpolates the path directly: a
   // separator in a filename forges a second line that reads as the server's own prose, and an

@@ -1228,11 +1228,13 @@ as it does in any mail an ordinary read returns, and so do the words "Bearer" an
 the account's own content, such as the join preview of a draft's body and the snooze
 results, is not redacted.
 
-Only a whole exact copy is hidden. A secret cut short before redaction runs, or with a
-character inside it, is not. tsdav cuts a failed response's body at 4,096 characters before
-this server sees it, and three kinds of remote text are rendered through `echoCallerText`,
-which truncates without redacting: the DAV status text, and server-supplied calendar urls
-and names. This residual is accepted.
+Only a whole exact copy is hidden. The untrusted-value helpers redact both before and after
+they neutralise a value, so a secret their neutralising would reassemble is hidden too. What
+passes is a secret cut short before this server sees it (tsdav cuts a failed response's body
+at 4,096 characters), one in remote text rendered through `echoCallerText` alone, which
+truncates without redacting (the DAV status text, and server-supplied calendar urls and
+names), and one with a character inside it anywhere the text is not neutralised. This
+residual is accepted.
 
 **A payload inside a prose frame is still a payload.** A list result is a summary line, a
 newline, then the JSON array; the bulk-operations diagnostic wraps its JSON in a heading and a
@@ -1255,7 +1257,7 @@ caller-supplied email id or `attachmentId`, a mailbox name or path or role, a Co
 server-authored `SetError` description. All of them reach a model as a report of what the
 server said.
 
-Two hazards, and the order of the two steps is what covers both:
+Two hazards, and the order of the steps is what covers both:
 
 - **Line forging** — the one that matters in practice, and it needs no long value and no
   credential. A value carrying CR, LF or U+2028 splits one message into what reads as
@@ -1271,9 +1273,11 @@ Two hazards, and the order of the two steps is what covers both:
 - **Credential echo** — narrower, but a leak rather than a style point. Redaction matches
   a registered secret only as a whole exact string, so describing **first** truncates at 64
   code points, hands the redactor a string the secret no longer fits in, and the surviving
-  prefix goes out verbatim.
+  prefix goes out verbatim. Neutralising can also reassemble a secret that a line break or a
+  format character inside it had broken.
 
-Hence: redact the full value, **then** neutralise and truncate it. The wrong order still reads
+Hence the order stated at `describeUntrusted` in `src/coerce.ts`: nothing is truncated before
+the last redaction. The wrong order still reads
 correctly and still passes every line-forging test, which is exactly why the pair lives behind
 one name instead of being respelled at each call site (#131).
 
@@ -1326,9 +1330,9 @@ account's token; that a remote server could still put one there is the accepted 
 `describeUntrusted`, which redacts before it truncates.
 
 **The path spelling: `echoPath`.** A filesystem path needs both halves — the redaction
-`describeUntrusted` runs, and a bound wider than its 64 code points — so `echoPath` is
-`redactSecrets` then `echoCallerText` at `PATH_ECHO_LIMIT`. Not a third policy, the same
-two steps in the same order at a bound a path survives: a path refusal names the resolved path
+`describeUntrusted` runs, and a bound wider than its 64 code points — so `echoPath` runs
+`describeUntrusted`'s order with `echoCallerText`'s neutralising, at `PATH_ECHO_LIMIT`. Not a
+third policy, the same steps in the same order at a bound a path survives: a path refusal names the resolved path
 AND the allowed directory in one sentence, and two paths sharing a long ancestor cut to the
 same prefix at 64 would leave a refusal saying a path is outside a directory it cannot be told
 apart from. `echoPath` is a name rather than the expression repeated at each refusal because a dozen

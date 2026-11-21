@@ -153,14 +153,19 @@ export const DESCRIBE_PART_MAX = 64;
  * where the sender's belong.
  */
 export function describePart(value: unknown, max: number = DESCRIBE_PART_MAX): string {
-  const source = typeof value === 'string' ? value : value == null ? '' : String(value);
-  const cleaned = source
-    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
-    .replace(/\p{Zs}+/gu, ' ')
-    .replace(/"/g, "'");
+  const cleaned = cleanPart(value);
   // Code points, so a surrogate pair is never split.
   const points = [...cleaned];
   return points.length > max ? `${points.slice(0, max).join('')}…` : cleaned;
+}
+
+/** `describePart`'s cleaning with no truncation. */
+export function cleanPart(value: unknown): string {
+  const source = typeof value === 'string' ? value : value == null ? '' : String(value);
+  return source
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
+    .replace(/\p{Zs}+/gu, ' ')
+    .replace(/"/g, "'");
 }
 
 // The trailing [ .]* is load-bearing: Win32 strips trailing spaces and dots before
