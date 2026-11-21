@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
 import { registerSecret } from './coerce.js';
+import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQuerySummary, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatJoins, formatBodyEditsReceipt, formatEditDraftResult,formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
 
 // A registered synthetic secret, long enough that placed after 41 characters it crosses the
 // 64-code-point echo bound.
 const REGISTERED = 'zzQX-formatter-synthetic';
 registerSecret(REGISTERED);
-import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQuerySummary, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatJoins, formatBodyEditsReceipt, formatEditDraftResult,formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
 

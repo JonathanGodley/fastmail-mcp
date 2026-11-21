@@ -59,8 +59,10 @@ const MARKER = '[REDACTED]';
 export function redactSecrets(input: string): string {
   const hidden = new Uint8Array(input.length);
   for (const secret of KNOWN_SECRETS) {
+    let covered = 0;
     for (let at = input.indexOf(secret); at !== -1; at = input.indexOf(secret, at + 1)) {
-      hidden.fill(1, at, at + secret.length);
+      hidden.fill(1, Math.max(at, covered), at + secret.length);
+      covered = at + secret.length;
     }
   }
   let out = '';
@@ -129,7 +131,7 @@ export function describeUntrustedAt(value: unknown, max: number): string {
  * The ONLY safe way to redact a structured result item. In a finished document a secret
  * carrying `"`, `\` or a control character is JSON-escaped and no longer matches; per value it
  * is still the registered text. Prose calls redactSecrets directly; anything JSON.stringify
- * touches comes here.
+ * touches comes here. Object keys are written as given: every caller passes fixed keys.
  *
  * Compact like toolJson below: no indent argument.
  */

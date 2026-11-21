@@ -4,7 +4,7 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { InvalidInputError, LENIENT_BOOL_DESC } from './coerce.js';
+import { InvalidInputError, LENIENT_BOOL_DESC, registerSecret } from './coerce.js';
 import {
   SNOOZE_CAPABILITY, SNOOZE_TOOLS, WAKE_KEYWORDS, WEB_SESSION_EXPIRED, WebSessionError, WebSessionTransport,
   listSnoozedEmails, parseWakeTime, snoozeEmail, unsnoozeEmail,
@@ -166,6 +166,14 @@ describe('list_snoozed_emails', () => {
       ['a', '2026-11-03T11:00:00+11:00', 'Inbox'],
       ['b', '2026-11-04T11:00:00+11:00', 'Receipts'],
     ]);
+  });
+
+  it('shows a registered value in a message as written: the result is the account\'s own content', async () => {
+    registerSecret('zzQX-snooze-subject-synthetic');
+    const { t } = fakeAccount({
+      a: { subject: 'zzQX-snooze-subject-synthetic', mailboxIds: { 'mb-snoozed': true }, snoozed: { until: '2026-11-03T00:00:00Z' } },
+    });
+    assert.equal(out(await listSnoozedEmails({}, t, 50)).emails[0].subject, 'zzQX-snooze-subject-synthetic');
   });
 
   const LISTED = {

@@ -15,7 +15,7 @@
 //
 // Neither group needs credentials or network: every tool call below is rejected by
 // input validation before a request is issued, and the tsdav call is pure local
-// string work. Redaction hides only the exact values registered at startup, so a
+// string work. Redaction hides only the exact values registered where each is read, so a
 // test proves it by passing one in the environment and finding it hidden.
 
 import { describe, it, before, after } from 'node:test';

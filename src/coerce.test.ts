@@ -769,6 +769,11 @@ describe('redactSecrets', () => {
     assertStable('a QXQXQXQXQXQX b', 'a [REDACTED] b');
   });
 
+  it('hides a long run of one self-overlapping value as one marker', () => {
+    registerSecret('QZQZQZQZQZQZQZQZQZQZQZQZQZQZQZQZ');
+    assertStable(`a ${'QZ'.repeat(50_000)} b`, 'a [REDACTED] b');
+  });
+
   it('hides a value carrying whitespace and the word "Bearer"', () => {
     registerSecret('zzQX holds Bearer inside'); // allowlist-secret (synthetic value carrying the word, not a credential)
     assertStable('auth zzQX holds Bearer inside tail', 'auth [REDACTED] tail'); // allowlist-secret (synthetic value registered above)

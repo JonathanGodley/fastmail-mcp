@@ -56,7 +56,7 @@
 // that has to keep finding every call site forever.
 //
 // Where redaction does run: redactedJson is the only serialiser that redacts, and it has one
-// call site (the bulk-operations result in index.ts). Success payloads on every other path
+// call site (the archive_email result in index.ts). Success payloads on every other path
 // are not redacted. Every error reply is redacted centrally in index.ts's CallTool catch, so
 // a registered credential in a server error description is caught there, not here.
 //

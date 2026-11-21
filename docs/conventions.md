@@ -1224,9 +1224,10 @@ registered where it is read: the API token, the CalDAV app password and the base
 `user:password` form tsdav sends, and, with the snooze tools on, the web-session cookie and
 the session token. Nothing else is matched: a credential that is not this server's passes,
 as it does in any mail an ordinary read returns, and so do the words "Bearer" and "Basic"
-(#246). Redaction runs only where a remote server's text can reach a result; text that is
-the account's own content, such as the join preview of a draft's body and the snooze
-results, is not redacted.
+(#246). Redaction runs in the CallTool catch, in the untrusted-value helpers
+(`describeUntrusted`, `describeUntrustedAt`, `echoPath`) over every value they quote, in the
+bulk-operations diagnostic and in the `archive_email` JSON item. The join preview of a
+draft's body and the snooze results are not redacted.
 
 Only a whole exact copy is hidden. The untrusted-value helpers redact both before and after
 they neutralise a value, so a secret their neutralising would reassemble is hidden too. What

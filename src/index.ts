@@ -35,11 +35,11 @@ import { getBasicAuthHeaders } from 'tsdav';
 const MAX_ICAL_FIELD_KB = MAX_ICAL_FIELD_BYTES / 1024;
 const MAX_ICAL_TOTAL_KB = MAX_ICAL_TOTAL_BYTES / 1024;
 
-// Silence tsdav's debug logging. tsdav logs the HTTP Basic credential as bare base64
-// ("tsdav:authHelper Basic auth token generated: <base64 of user:password>") whenever
-// DEBUG is set, straight to stderr — it never passes through this file's redaction
-// boundary, so redactSecrets cannot help. Suppressing the namespaces is the only
-// control. Each detail below was established by running it; re-establish before changing:
+// Silence tsdav's debug logging. With DEBUG set, tsdav 2.3.1 logs the account name and
+// collection URLs straight to stderr (earlier versions logged the whole Basic credential;
+// docs/security-model.md has the account), outside this file's redaction boundary.
+// Suppressing the namespaces is the only control. Each detail below was established by
+// running it; re-establish before changing:
 //
 //   * The skip is `-tsdav*` with NO colon. `-tsdav:*` matches only colon-prefixed
 //     children, so a logger created as bare `tsdav` — or a future `tsdavFoo` — would

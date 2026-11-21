@@ -4,17 +4,17 @@ import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_B
 import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
 import { InvalidInputError, registerSecret } from './coerce.js';
-
-// A registered synthetic secret, long enough that placed after 40 characters it crosses the
-// 64-code-point echo bound.
-const REGISTERED = 'zzQX-jmap-synthetic-value';
-registerSecret(REGISTERED);
 import { validateFastmailUrl } from './url-validation.js';
 import { buildExclusionNote, simplifyMailbox, formatSavedAttachment, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
 import { mkdtemp, writeFile as fsWriteFile, readFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+
+// A registered synthetic secret, long enough that placed after 40 characters it crosses the
+// 64-code-point echo bound.
+const REGISTERED = 'zzQX-jmap-synthetic-value';
+registerSecret(REGISTERED);
 
 // ---------- helpers ----------
 
