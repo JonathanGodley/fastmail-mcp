@@ -901,12 +901,12 @@ describe('redactBearerTokens', () => {
   it('runs in linear time when many Bearer values glue to a secret holding "Bearer "', () => {
     // Wall-clock bound. Linear code takes tens of milliseconds here; the quadratic glue
     // extension this guards against took seconds.
-    registerSecret('x Bearer '); // allowlist-secret (synthetic value carrying the word)
-    const input = `Bearer ${'x Bearer '.repeat(500_000 / 9)}`; // allowlist-secret (synthetic, registered above)
+    registerSecret('QZ Bearer '); // allowlist-secret (synthetic value carrying the word)
+    const input = `Bearer ${'QZ Bearer '.repeat(500_000 / 10)}`; // allowlist-secret (synthetic, registered above)
     const started = performance.now();
     const out = redactBearerTokens(input);
     assert.ok(performance.now() - started < 5000, `took ${performance.now() - started} ms`);
-    assert.ok(!out.includes('x'), out.slice(0, 80));
+    assert.ok(!out.includes('QZ'), out.slice(0, 80));
   });
 
   it('property: hides every character either reference order hides, beyond the restored tail', () => {

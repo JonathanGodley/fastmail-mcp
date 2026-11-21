@@ -87,17 +87,17 @@ const BASIC_AT = new RegExp(BASIC_PATTERN.source, 'iy');
  * Basic blob, a Fastmail token after `fmu`, and a Bearer value less its restored tail. Each
  * maximal hidden run is written as one upper-case marker, so a lower-case marker is rewritten
  * and adjacent markers or secrets merge into one, including across a label's collapsed
- * whitespace. Where spans overlap, hidden wins: a `Bearer`
- * or `Basic` word inside another span is hidden with it. A visible `Bearer` or `Basic` label,
- * including one before a marker left alone, is written in that case with one space after it,
- * even when the space was a secret's own whitespace; a Bearer value always begins with a marker.
- * So the output keeps the `Bearer [REDACTED]` + tail, `Basic [REDACTED]` and `fmu[REDACTED]`
- * shapes. When the whitespace ending a Bearer value, or ending a kept marker's closing run, is
- * hidden (a secret's own whitespace), nothing in it is restored and hiding extends to the next
- * visible whitespace, so the output never carries a marker glued to text a later pass would
- * take as part of the value. That over-hides: a secret containing whitespace right after
- * `Bearer` takes the delimiters after it up to the next visible whitespace, or the rest of the
- * text when none follows.
+ * whitespace. Where spans overlap, hidden wins: a `Bearer` or `Basic` word inside another span
+ * is hidden with it. A visible `Bearer` or `Basic` label, including one before a marker left
+ * alone, is written in that case with one space after it, even when the space was a secret's
+ * own whitespace; a Bearer value always begins with a marker. So the output keeps the
+ * `Bearer [REDACTED]` + tail, `Basic [REDACTED]` and `fmu[REDACTED]` shapes. When the
+ * whitespace ending a Bearer value, or ending a kept marker's closing run, is hidden (a
+ * secret's own whitespace), nothing in it is restored and hiding extends to the next visible
+ * whitespace, so the output never carries a marker glued to text a later pass would take as
+ * part of the value. That over-hides: a secret containing whitespace right after `Bearer`
+ * takes the delimiters after it up to the next visible whitespace, or the rest of the text
+ * when none follows.
  */
 export function redactBearerTokens(input: string): string {
   const n = input.length;
