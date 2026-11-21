@@ -734,6 +734,290 @@ describe('redactBearerTokens', () => {
     assert.equal(redactBearerTokens(original), original);
   });
 
+  it('leaves an already-redacted value and its closing quote alone on a second pass', () => {
+    const once = redactBearerTokens('unknown key(s): "Bearer x", "k2".');
+    assert.equal(once, 'unknown key(s): "Bearer [REDACTED]", "k2".');
+    assert.equal(redactBearerTokens(once), once);
+  });
+
+  // `.` is pinned below: alone it could end a token, so it is not put back.
+  for (const ch of ['"', "'", ',', ';', ':', ')', ']', '}', '…']) {
+    it(`puts back a closing ${JSON.stringify(ch)} that ends a raw value`, () => {
+      assert.equal(redactBearerTokens(`Bearer abc${ch} next`), `Bearer [REDACTED]${ch} next`);
+    });
+  }
+
+  it('keeps the cut marker and closing quote after a truncated value', () => {
+    assert.equal(redactBearerTokens('failed: "Bearer abc…"'), 'failed: "Bearer [REDACTED]…"');
+  });
+
+  it('still writes the marker when the whole value is closing characters', () => {
+    assert.equal(redactBearerTokens('key "Bearer …", next'), 'key "Bearer [REDACTED]…", next');
+  });
+
+  it('puts back at most three closing characters', () => {
+    assert.equal(redactBearerTokens(`Bearer s3cr3t);:,.'"]}`), 'Bearer [REDACTED]"]}');
+    assert.equal(redactBearerTokens('Bearer ,,,,'), 'Bearer [REDACTED],,,');
+  });
+
+  for (const input of [
+    'Bearer [REDACTED]sk-SECRET',
+    'Bearer [redacted]SECRET',
+    'Bearer\t[REDACTED]SECRET',
+    'Bearer [REDACTED].SECRET',
+  ]) {
+    it(`still hides a value glued to, or spelled like, an earlier marker: ${JSON.stringify(input)}`, () => {
+      assert.equal(redactBearerTokens(input), 'Bearer [REDACTED]');
+    });
+  }
+
+  it('still hides a real-looking token followed by punctuation', () => {
+    const out = redactBearerTokens('auth "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl", retry'); // allowlist-secret (synthetic JWT shape: base64 of {"alg":"HS256"}, {"sub":"1"}, "signature")
+    assert.equal(out, 'auth "Bearer [REDACTED]", retry');
+  });
+
+  it('accepted residue: in unspaced JSON-like text the rest of the run is still lost', () => {
+    // Nothing leaks; the values after the token are dropped. Structured output uses redactedJson.
+    assert.equal(redactBearerTokens('{"a":"Bearer x","b":"y"}'), '{"a":"Bearer [REDACTED]"}');
+  });
+
+  // KNOWN_SECRETS is module state, so these values are unique to these tests.
+  function assertStable(input: string, expected: string): void {
+    const once = redactBearerTokens(input);
+    assert.equal(once, expected);
+    assert.equal(redactBearerTokens(once), once);
+  }
+
+  it('restores none of the closing characters a registered secret ends with', () => {
+    registerSecret('zz-bearer-tail-synthetic)"]');
+    assertStable('auth Bearer zz-bearer-tail-synthetic)"] x', 'auth Bearer [REDACTED] x'); // allowlist-secret (synthetic value registered on the line above)
+  });
+
+  it('restores none of a registered secret embedded in a longer value', () => {
+    registerSecret('zz-bearer-embedded-synthetic)"]');
+    assertStable('auth Bearer abczz-bearer-embedded-synthetic)"] x', 'auth Bearer [REDACTED] x'); // allowlist-secret (synthetic value registered above)
+    assertStable('auth Bearer abczz-bearer-embedded-synthetic)"]", x', 'auth Bearer [REDACTED]", x'); // allowlist-secret (synthetic value registered above)
+  });
+
+  it('hides the whole of a registered secret containing whitespace that follows Bearer', () => {
+    registerSecret('zz-space synthetic)"]');
+    assertStable('auth Bearer zz-space synthetic)"] y', 'auth Bearer [REDACTED] y'); // allowlist-secret (synthetic value registered above)
+  });
+
+  it('hides the whole of a registered secret that itself contains "Bearer " or the marker', () => {
+    registerSecret('zz-holds Bearer inside-synthetic'); // allowlist-secret (synthetic value carrying the word, not a credential)
+    registerSecret('zz-holds-[REDACTED]-synthetic)');
+    assertStable('auth zz-holds Bearer inside-synthetic tail', 'auth [REDACTED] tail'); // allowlist-secret (synthetic value registered above)
+    assertStable('auth Bearer zz-holds-[REDACTED]-synthetic), tail', 'auth Bearer [REDACTED], tail'); // allowlist-secret (synthetic value registered above)
+  });
+
+  it('hides the whole of a registered secret that contains a shorter registered one', () => {
+    registerSecret('zz-nested-synth');
+    registerSecret('zz-nested-synth-longer-tail');
+    assertStable('auth zz-nested-synth-longer-tail end', 'auth [REDACTED] end');
+    assertStable('auth zz-nested-synth end', 'auth [REDACTED] end');
+  });
+
+  it('hides the whole Basic blob around a registered secret inside it', () => {
+    registerSecret('QXPQRSTUVW');
+    assertStable('Basic abcdQXPQRSTUVWefgh x', 'Basic [REDACTED] x'); // allowlist-secret (synthetic blob around the value registered above)
+  });
+
+  it('hides the whole Fastmail token around a registered secret inside it', () => {
+    registerSecret('QXPQRSTUVW');
+    assertStable(`fmu1-aaaaQXPQRSTUVW${'a'.repeat(22)} x`, 'fmu[REDACTED] x'); // allowlist-secret (synthetic fmu shape)
+  });
+
+  it('hides the rest of a Bearer value when a registered secret holds "Bearer "', () => {
+    registerSecret('Bearer QXBEARER1'); // allowlist-secret (synthetic value carrying the word)
+    // The word is part of the secret, so it is hidden with it.
+    assertStable('Bearer QXBEARER1Z9PQRS.', '[REDACTED]'); // allowlist-secret (synthetic value registered above)
+  });
+
+  it('hides a Basic blob that follows a registered secret with whitespace after Bearer', () => {
+    registerSecret('QX ER TY)"]');
+    const out = redactBearerTokens('Bearer QX ER TY)"]Basic dXNlcjpwYXNz y'); // allowlist-secret (synthetic: secret registered above, base64 of "user:pass")
+    assert.ok(!/QX|ER|TY|dXNl/.test(out), out);
+    assert.equal(redactBearerTokens(out), out);
+  });
+
+  it('restores the closing characters after a Fastmail token, and none of the token', () => {
+    assertStable(
+      'auth "Bearer fmu0-aaaaaaaaaaaaaaaaaaaaaaaa", x', // allowlist-secret (synthetic fmu shape)
+      'auth "Bearer [REDACTED]", x',
+    );
+  });
+
+  it('restores no bracket from a marker an earlier pass wrote inside the value', () => {
+    assertStable('auth Bearer abc[REDACTED] x', 'auth Bearer [REDACTED] x');
+    assertStable('auth Bearer fmu[REDACTED]", x', 'auth Bearer [REDACTED]", x');
+  });
+
+  it('keeps the whole closing run after a marker an earlier pass wrote', () => {
+    assertStable('(TZID "x Bearer [REDACTED]…"), so', '(TZID "x Bearer [REDACTED]…"), so');
+    assertStable('id "Bearer [REDACTED]…"). Next', 'id "Bearer [REDACTED]…"). Next');
+  });
+
+  it('accepted residue: a raw value whose closing run passes three keeps only the last three', () => {
+    assert.equal(redactBearerTokens('(TZID "Bearer abc…"), so'), '(TZID "Bearer [REDACTED]"), so');
+  });
+
+  it('writes one space after a visible label when a secret starting with whitespace follows it', () => {
+    registerSecret('\tQXTAB01\t');
+    assertStable('Bearer\tQXTAB01\tz', 'Bearer [REDACTED]');
+    registerSecret(' QXLEAD01');
+    assertStable('Basic QXLEAD01 y', 'Basic [REDACTED] y');
+  });
+
+  it('hides a kept marker and what follows when a secret starting with whitespace is glued to it', () => {
+    registerSecret(' QXLEAD02');
+    assertStable('Bearer [REDACTED]" QXLEAD02.x y', 'Bearer [REDACTED] y');
+  });
+
+  it('writes a label left alone by the second-pass skip in its canonical form', () => {
+    assertStable('\nBEARER  [redacted]', '\nBearer [REDACTED]');
+  });
+
+  it('writes every maximal hidden run as one upper-case marker', () => {
+    assertStable('.[redacted];', '.[REDACTED];');
+    assertStable('[redacted][redacted],', '[REDACTED],');
+    registerSecret('QXADJ001');
+    registerSecret('QXADJ002');
+    assertStable('a QXADJ001QXADJ002 b', 'a [REDACTED] b');
+  });
+
+  it('restores no "." that could end a token, only one after a character that cannot', () => {
+    assertStable('Bearer abc... next', 'Bearer [REDACTED] next');
+    assertStable('Bearer abc.', 'Bearer [REDACTED]');
+    assertStable('Bearer abc").', 'Bearer [REDACTED]").');
+    assertStable('Bearer )', 'Bearer [REDACTED])');
+  });
+
+  it('writes adjacent hidden runs split only by collapsed label whitespace as one marker', () => {
+    registerSecret('QQQQBasic ');
+    assertStable('QQQQBasic  \tBearer  x', '[REDACTED] [REDACTED]');
+  });
+
+  it('runs in linear time when many Bearer values glue to a secret holding "Bearer "', () => {
+    // Wall-clock bound. Linear code takes tens of milliseconds here; the quadratic glue
+    // extension this guards against took seconds.
+    registerSecret('QZ Bearer '); // allowlist-secret (synthetic value carrying the word)
+    const input = `Bearer ${'QZ Bearer '.repeat(500_000 / 10)}`; // allowlist-secret (synthetic, registered above)
+    const started = performance.now();
+    const out = redactBearerTokens(input);
+    assert.ok(performance.now() - started < 5000, `took ${performance.now() - started} ms`);
+    assert.ok(!out.includes('QZ'), out.slice(0, 80));
+  });
+
+  it('property: hides every character either reference order hides, beyond the restored tail', () => {
+    // Registered secrets are module state shared by this file. The generator's only lowercase
+    // letters are those of "bearer", "basic", "fmu" and "a", and its pieces hold no other QX
+    // secret, so of the secrets registered elsewhere in this file only the first three below can
+    // occur in an input.
+    const secrets = [
+      'QXPQRSTUVW', 'Bearer QXBEARER1', 'QX ER TY)"]', // the pins above
+      'QY Z1)"]', // whitespace and tail characters
+      'Bearer QYB2', // holds "Bearer "
+      'QYNEST)"]', 'QYNEST)"]LONG', // one inside another
+      'QYOVER12', 'ER12QYZ9', // overlapping, neither inside the other
+      ' QYLEAD1', 'QYTRAIL1 ', // leading and trailing whitespace
+    ];
+    for (const s of secrets) registerSecret(s);
+    const pieces = [
+      ...secrets, 'QY Z1', 'QYNEST', 'ER12', 'QYOVER12QYZ9', 'PQRS', 'Z9',
+      'Bearer ', 'bearer\t', 'Basic ', 'BASIC  ', `fmu1-${'a'.repeat(22)}`, 'fmu1-aaaa', 'aaaa', 'dXNl',
+      '"', "'", ',', '.', '…', ')', ']', '}', ';', ' ', '\n', '[REDACTED]', '[redacted]', 'X', '9',
+    ];
+
+    type Ch = { c: string; src: number };
+    const replaceTracked = (chars: Ch[], re: RegExp, rep: string): Ch[] => {
+      const text = chars.map((x) => x.c).join('');
+      const out: Ch[] = [];
+      let last = 0;
+      for (const m of text.matchAll(re)) {
+        out.push(...chars.slice(last, m.index));
+        out.push(...[...rep].map((c) => ({ c, src: -1 })));
+        last = m.index + m[0].length;
+      }
+      return [...out, ...chars.slice(last)];
+    };
+    const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const occurrences = (input: string, needle: RegExp | string): Array<[number, number]> => {
+      if (typeof needle !== 'string') return [...input.matchAll(needle)].map((m) => [m.index, m.index + m[0].length]);
+      const found: Array<[number, number]> = [];
+      for (let at = input.indexOf(needle); at !== -1; at = input.indexOf(needle, at + 1)) found.push([at, at + needle.length]);
+      return found;
+    };
+    // (a) the order before #236: three patterns on the raw input, then each secret.
+    const shownByPatternsFirst = (input: string): Set<number> => {
+      let chars: Ch[] = [...input].map((c, src) => ({ c, src }));
+      chars = replaceTracked(chars, /Bearer\s+\S+/gi, 'Bearer [REDACTED]'); // allowlist-secret (the old pattern, not a credential)
+      chars = replaceTracked(chars, /Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [REDACTED]');
+      chars = replaceTracked(chars, /fmu\d+-[\w-]{20,}/g, 'fmu[REDACTED]');
+      for (const s of secrets) chars = replaceTracked(chars, new RegExp(escape(s), 'g'), '[REDACTED]');
+      return new Set(chars.map((x) => x.src));
+    };
+    // (b) every secret occurrence on the raw input.
+    const hiddenBySecrets = (input: string): Set<number> => {
+      const hidden = new Set<number>();
+      for (const s of secrets) for (const [a, b] of occurrences(input, s)) for (let i = a; i < b; i++) hidden.add(i);
+      return hidden;
+    };
+    // The one exception: up to three closing characters ending a Bearer value, none inside a
+    // secret or a marker, or any closing run after a value that is only a marker.
+    const allowedTail = (input: string): Set<number> => {
+      const sealed = hiddenBySecrets(input);
+      for (const [a, b] of occurrences(input, /\[REDACTED\]/gi)) for (let i = a; i < b; i++) sealed.add(i);
+      const allowed = new Set<number>();
+      for (const m of input.matchAll(/Bearer\s+\S+/gi)) { // allowlist-secret (pattern, not a credential)
+        const end = m.index + m[0].length;
+        const afterMarker = /\s\[REDACTED\](["',;:)\]}.…]*)$/i.exec(m[0]);
+        if (afterMarker) {
+          for (let i = end - afterMarker[1].length; i < end; i++) allowed.add(i);
+          continue;
+        }
+        // A raw value: of its last three closing characters, those outside any secret or marker,
+        // and of those only ones that cannot be in an RFC 6750 b64token, or that follow one
+        // that cannot.
+        const tail = m[0].match(/["',;:)\]}.…]{1,3}$/)?.[0] ?? '';
+        let pastToken = false;
+        for (let i = end - tail.length; i < end; i++) {
+          if (sealed.has(i)) continue;
+          if (!/[A-Za-z0-9\-._~+/=]/.test(input[i])) pastToken = true;
+          if (pastToken) allowed.add(i);
+        }
+      }
+      return allowed;
+    };
+    const isSubsequence = (needle: string, hay: string): boolean => {
+      let j = 0;
+      for (const c of hay) if (j < needle.length && c === needle[j]) j++;
+      return j === needle.length;
+    };
+
+    let seed = 236;
+    const random = (): number => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    for (let k = 0; k < 4000; k++) {
+      let input = random() < 0.5 ? 'Bearer ' : '';
+      for (let j = 1 + Math.floor(random() * 7); j > 0; j--) input += pieces[Math.floor(random() * pieces.length)];
+      const out = redactBearerTokens(input);
+      assert.equal(redactBearerTokens(out), out, `second pass changed ${JSON.stringify(input)}`);
+      const shownA = shownByPatternsFirst(input);
+      const hiddenB = hiddenBySecrets(input);
+      const allowed = allowedTail(input);
+      const visible = [...input].filter((c, i) => (shownA.has(i) && !hiddenB.has(i)) || allowed.has(i)).join('');
+      const strip = (s: string) => s.replace(/\[REDACTED\]|Bearer|Basic|fmu|\s/gi, '');
+      assert.ok(
+        isSubsequence(strip(out), visible.replace(/\s/g, '')),
+        `${JSON.stringify(input)} showed more than either order: ${JSON.stringify(out)}`,
+      );
+    }
+  });
 });
 
 describe('redactedJson', () => {

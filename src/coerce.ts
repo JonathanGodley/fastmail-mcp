@@ -34,7 +34,24 @@ export class InvalidInputError extends Error {
 
 // Credential-shaped substrings scrubbed from anything reflected back to the caller.
 // Deliberately narrow: provider error messages are what the caller recovers from.
-const BEARER_PATTERN = /Bearer\s+\S+/gi;
+//
+// Error text is redacted twice: once as each untrusted value is rendered, and again over the
+// finished message in the CallTool catch. `\S+` runs to the next whitespace, so on that second
+// pass it would take the closing quote, comma or `…` cut marker written after the value. So a
+// marker followed only by closing characters, however many, is left alone: that run can only
+// be what the server wrote. On a raw value up to BEARER_TAIL_MAX closing characters ending the
+// match are put back, never one inside a registered secret or marker, and no restored character
+// can belong to a token: of the set only `.` occurs in an RFC 6750 b64token, so a `.` comes
+// back only after a character that cannot (`").` whole; `abc...` keeps none). Three covers
+// `…",`; a raw value whose own closing run plus the server's passes three keeps only the last
+// three (`"Bearer abc…"),` loses the `…`).
+const BEARER_TAIL_CHARS = `"',;:)\\]}.\u2026`;
+const BEARER_TAIL_MAX = 3;
+const AFTER_MARKER = `\\[REDACTED\\][${BEARER_TAIL_CHARS}]*(?:\\s|$)`;
+const BEARER_PATTERN = new RegExp(`Bearer\\s+(?!${AFTER_MARKER})\\S+`, 'gi');
+const BEARER_BEFORE_MARKER = new RegExp(`Bearer\\s+(?=${AFTER_MARKER})`, 'gi');
+const KEPT_RUN = new RegExp(`\\[REDACTED\\][${BEARER_TAIL_CHARS}]*`, 'iy');
+const BEARER_TAIL = new RegExp(`[${BEARER_TAIL_CHARS}]{1,${BEARER_TAIL_MAX}}$`);
 // The CalDAV path authenticates with HTTP Basic, so a reflected header or a
 // tsdav error carries the base64 credential blob — redact that shape too.
 const BASIC_PATTERN = /Basic\s+[A-Za-z0-9+/=]+/gi;
@@ -56,17 +73,116 @@ export function registerSecret(value: string | undefined): void {
   }
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+const MARKER = '[REDACTED]';
+const MARKER_PATTERN = /\[REDACTED\]/gi;
+const LABEL = /^(?:bearer|basic)\s+/i;
+const BASIC_AT = new RegExp(BASIC_PATTERN.source, 'iy');
 
+/**
+ * Every span is found on the RAW input and the union is hidden, so no pass can cut another's
+ * run short: replacing one match first would leave a marker that ends a Basic blob, a Fastmail
+ * token or a Bearer value early, or would split a registered secret at a space.
+ *
+ * Hidden: each registered secret occurrence and existing marker (sealed: never restored), a
+ * Basic blob, a Fastmail token after `fmu`, and a Bearer value less its restored tail. Each
+ * maximal hidden run is written as one upper-case marker, so a lower-case marker is rewritten
+ * and adjacent markers or secrets merge into one, including across a label's collapsed
+ * whitespace. Where spans overlap, hidden wins: a `Bearer` or `Basic` word inside another span
+ * is hidden with it. A visible `Bearer` or `Basic` label, including one before a marker left
+ * alone, is written in that case with one space after it, even when the space was a secret's
+ * own whitespace; a Bearer value always begins with a marker. So the output keeps the
+ * `Bearer [REDACTED]` + tail, `Basic [REDACTED]` and `fmu[REDACTED]` shapes. When the
+ * whitespace ending a Bearer value, or ending a kept marker's closing run, is hidden (a
+ * secret's own whitespace), nothing in it is restored and hiding extends to the next visible
+ * whitespace, so the output never carries a marker glued to text a later pass would take as
+ * part of the value. That over-hides: a secret containing whitespace right after `Bearer`
+ * takes the delimiters after it up to the next visible whitespace, or the rest of the text
+ * when none follows.
+ */
 export function redactBearerTokens(input: string): string {
-  let out = input
-    .replace(BEARER_PATTERN, 'Bearer [REDACTED]')
-    .replace(BASIC_PATTERN, 'Basic [REDACTED]')
-    .replace(FASTMAIL_TOKEN_PATTERN, 'fmu[REDACTED]');
+  const n = input.length;
+  const hidden = new Uint8Array(n);
+  const sealed = new Uint8Array(n);
+  const label: (string | undefined)[] = [];
+  const valueStarts = new Set<number>();
+  const labelSpaces = new Set<number>();
+  const hide = (from: number, to: number, seal = false): void => {
+    for (let i = from; i < to; i++) {
+      hidden[i] = 1;
+      if (seal) sealed[i] = 1;
+    }
+  };
+  const markLabel = (at: number, match: string, word: string): number => {
+    const head = LABEL.exec(match)![0];
+    for (let i = 0; i < word.length; i++) label[at + i] = word[i];
+    label[at + word.length] = ' ';
+    labelSpaces.add(at + word.length);
+    for (let i = word.length + 1; i < head.length; i++) label[at + i] = '';
+    return at + head.length;
+  };
+
   for (const secret of KNOWN_SECRETS) {
-    out = out.replace(new RegExp(escapeRegExp(secret), 'g'), '[REDACTED]');
+    let covered = 0;
+    for (let at = input.indexOf(secret); at !== -1; at = input.indexOf(secret, at + 1)) {
+      hide(Math.max(at, covered), at + secret.length, true);
+      covered = at + secret.length;
+    }
+  }
+  for (const m of input.matchAll(MARKER_PATTERN)) hide(m.index, m.index + m[0].length, true);
+  for (const m of input.matchAll(FASTMAIL_TOKEN_PATTERN)) hide(m.index + 3, m.index + m[0].length);
+  // Tried at every `basic`, not left to right: in `Basic Basic dXNl` the second word starts a
+  // blob of its own once the first match has taken it.
+  for (const word of input.matchAll(/basic/gi)) {
+    BASIC_AT.lastIndex = word.index;
+    const m = BASIC_AT.exec(input);
+    if (m) hide(markLabel(word.index, m[0], 'Basic'), word.index + m[0].length);
+  }
+
+  // A kept marker and its closing run count as a value here only for the glue rule below.
+  const values: Array<{ start: number; end: number; tail: number }> = [];
+  for (const m of input.matchAll(BEARER_BEFORE_MARKER)) {
+    const start = markLabel(m.index, m[0], 'Bearer');
+    KEPT_RUN.lastIndex = start;
+    values.push({ start, end: start + KEPT_RUN.exec(input)![0].length, tail: 0 });
+  }
+  for (const m of input.matchAll(BEARER_PATTERN)) {
+    const start = markLabel(m.index, m[0], 'Bearer');
+    const end = m.index + m[0].length;
+    hide(start, end);
+    valueStarts.add(start);
+    values.push({ start, end, tail: m[0].match(BEARER_TAIL)?.[0].length ?? 0 });
+  }
+  // In order of end, so an extension starts where an earlier one stopped and the whole pass
+  // stays linear. Order cannot change the result: an extension stops at visible whitespace, and
+  // a restore touches only closing characters before one.
+  values.sort((a, b) => a.end - b.end);
+  let reach = 0;
+  for (const { start, end, tail } of values) {
+    if (end < n && hidden[end]) {
+      hide(start, end);
+      let i = Math.max(end, reach);
+      while (i < n && (hidden[i] || !/\s/.test(input[i]))) hidden[i++] = 1;
+      reach = i;
+    } else {
+      let from = end;
+      while (from > end - tail && !sealed[from - 1]) from--;
+      while (from < end && input[from] === '.') from++;
+      for (let i = from; i < end; i++) hidden[i] = 0;
+    }
+  }
+
+  let out = '';
+  let inRun = false;
+  for (let i = 0; i < n; i++) {
+    if (hidden[i] || (valueStarts.has(i) && !inRun)) {
+      if (!inRun) out += labelSpaces.has(i) && !hidden[i - 1] ? ` ${MARKER}` : MARKER;
+      inRun = true;
+      if (hidden[i]) continue;
+    }
+    const ch = label[i] ?? input[i];
+    if (ch === '') continue; // collapsed label whitespace does not end a hidden run
+    inRun = false;
+    out += ch;
   }
   return out;
 }
@@ -127,9 +243,10 @@ export function describeUntrustedAt(value: unknown, max: number): string {
  * Serialise a value to JSON with every string inside it redacted.
  *
  * The ONLY safe way to redact a structured result item. BEARER_PATTERN's `\S+` runs to the
- * next whitespace, which over a finished document is the string's closing quote and comma,
- * so redacting the serialised text eats delimiters and the item stops parsing (a mailbox
- * named "Bearer Bonds" is enough). Per value there is no trailing delimiter to swallow.
+ * next whitespace, which over a finished document can span several values, and gives back at
+ * most three closing characters: `["Bearer Bonds","Inbox"]` comes out as
+ * `["Bearer [REDACTED]"]`, which parses with "Inbox" silently gone, and a deeper nesting
+ * stops parsing. Per value there is no trailing delimiter to swallow.
  * Prose calls redactBearerTokens directly; anything JSON.stringify touches comes here.
  *
  * Compact like toolJson below: no indent argument.
