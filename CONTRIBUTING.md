@@ -140,6 +140,9 @@ its environment and matches JSON-RPC responses by id.
 Mutation testing changes a source line (a flipped condition, an emptied string)
 and checks that some test fails. `npm run mutation -- <commit>` mutates only the
 `src/` lines that commit changed; the commit must be `HEAD` and the tree clean.
+`npm run mutation -- --base <ref>` mutates the `src/` lines changed between the
+merge base of `<ref>` and `HEAD`, and `HEAD`, so a branch of several commits is
+measured without squashing it; the tree must be clean.
 `npm run mutation -- --all` mutates all of `src/`, reusing earlier results
 through Stryker's incremental file in `reports/`. A surviving mutant is a line
 no test notices changing: add or tighten a test rather than deleting the line.

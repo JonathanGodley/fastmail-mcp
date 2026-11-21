@@ -19,10 +19,20 @@ import {
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-test('parseArgs accepts one commit or --all, and nothing else', () => {
+test('parseArgs accepts one commit, --all or --base <ref>, and nothing else', () => {
   assert.deepEqual(parseArgs(['abc123']), { commit: 'abc123' });
   assert.deepEqual(parseArgs(['--all']), { all: true });
+  assert.deepEqual(parseArgs(['--base', 'main']), { base: 'main' });
   for (const argv of [[], ['a', 'b'], ['--all', 'a'], ['--tests=x'], ['--help']]) {
+    assert.ok('error' in parseArgs(argv), argv.join(' '));
+  }
+});
+
+test('parseArgs rejects --base without one ref, or combined with anything else', () => {
+  for (const argv of [
+    ['--base'], ['--base', '-x'], ['--base', '--all'], ['--base', 'a', 'b'], ['--all', '--base', 'a'],
+    ['--base', 'a', '--all'], ['--base', 'a', '--shard', '1/4'], ['a', '--base', 'b'],
+  ]) {
     assert.ok('error' in parseArgs(argv), argv.join(' '));
   }
 });
@@ -43,6 +53,8 @@ test('every mode writes a json report under its own tag, and only a shard writes
   assert.ok(commit.reporters.includes('json'), commit.reporters.join());
   assert.ok(!commit.reporters.includes('html'), commit.reporters.join());
   assert.equal(commit.tag, '-commit');
+  const base = reportOutputs({ base: 'main' });
+  assert.deepEqual(base, commit);
   const all = reportOutputs({ all: true });
   assert.ok(all.reporters.includes('json'), all.reporters.join());
   assert.ok(!all.reporters.includes('html'), all.reporters.join());
@@ -201,4 +213,62 @@ test('a clean HEAD commit passes every refusal and reaches the dependency check'
   const r = run(work, ['main']);
   assert.equal(r.status, 2, r.out);
   assert.match(r.out, /No node_modules/);
+});
+
+// A branch whose first commit changes a mutable src/ line and whose tip changes only a non-src
+// file, plus an orphan branch sharing no history with it.
+let branch: string;
+
+before(() => {
+  branch = join(root, 'branch');
+  initRepo(branch);
+  git(branch, ['checkout', '--orphan', 'lonely']);
+  git(branch, ['commit', '-m', 'unrelated root']);
+  git(branch, ['checkout', '-b', 'feature', 'main']);
+  writeFileSync(join(branch, 'src', 'foo.ts'), 'export const foo = 2;\n');
+  git(branch, ['commit', '-am', 'change src']);
+  writeFileSync(join(branch, 'notes.txt'), 'notes\n');
+  git(branch, ['add', 'notes.txt']);
+  git(branch, ['commit', '-m', 'change notes']);
+});
+
+test('--base mutates lines an earlier commit on the branch changed, which commit mode at the tip misses', () => {
+  const tip = run(branch, ['HEAD']);
+  assert.equal(tip.status, 2, tip.out);
+  assert.match(tip.out, /changed no mutable src\/ lines/);
+  const r = run(branch, ['--base', 'main']);
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /No node_modules/);
+});
+
+test('--base refuses a ref that does not resolve to a commit', () => {
+  const r = run(branch, ['--base', 'no-such-ref-xyz']);
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /no-such-ref-xyz does not resolve/);
+  assert.doesNotMatch(r.out, /fatal:/);
+});
+
+test('--base refuses a ref that shares no history with HEAD, naming the ref', () => {
+  const r = run(branch, ['--base', 'lonely']);
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /lonely/);
+  assert.match(r.out, /merge base/);
+  assert.doesNotMatch(r.out, /fatal:|No node_modules/);
+});
+
+test('--base refuses a dirty tree, naming HEAD', () => {
+  writeFileSync(join(branch, 'untracked.txt'), 'scratch\n');
+  try {
+    const r = run(branch, ['--base', 'main']);
+    assert.equal(r.status, 2, r.out);
+    assert.match(r.out, /not clean, so it would not describe HEAD[\s\S]*untracked\.txt/);
+  } finally {
+    unlinkSync(join(branch, 'untracked.txt'));
+  }
+});
+
+test('--base refuses a ref whose merge base with HEAD leaves no mutable src/ lines, naming the ref', () => {
+  const r = run(branch, ['--base', 'HEAD']);
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /HEAD.*no mutable src\/ lines/);
 });

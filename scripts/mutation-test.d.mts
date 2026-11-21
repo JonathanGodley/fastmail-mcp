@@ -8,10 +8,11 @@ export const TEST_HEAP_MB: number;
 export function parseArgs(argv: string[]):
   | { all: true; shard?: { i: number; n: number } }
   | { commit: string }
+  | { base: string }
   | { error: string };
 export function partition(files: [path: string, bytes: number][], n: number): string[][];
 export function isMutable(file: string): boolean;
 export function testFiles(srcNames: string[]): string[];
 export function diffToRanges(diff: string): string[];
-export function reportOutputs(args: { all?: true; commit?: string; shard?: { i: number; n: number } }):
+export function reportOutputs(args: { all?: true; commit?: string; base?: string; shard?: { i: number; n: number } }):
   { reporters: string[]; tag: string };
