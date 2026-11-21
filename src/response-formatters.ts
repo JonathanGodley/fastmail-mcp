@@ -3,7 +3,7 @@ import { projectListEmail } from './field-projection.js';
 import { describeUntrusted, describeUntrustedAt, echoCallerText, parseAddress, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, SavedBodySizes, UpdateDraftResult } from './jmap-client.js';
-import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
+import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, buildMalformedStructureNote, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
 import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 import type { BodyEditsReceipt } from './body-edits.js';
@@ -46,6 +46,7 @@ export function formatCalendarEventList(result: CalendarEventQueryResult): strin
   return `${formatQuerySummary({ items: events, total, position }, { paged: true })}\n${toolJson(events)}`
     + buildCalendarWindowNote(result.windowClamp)
     + buildEtcGmtZoneNote(events)
+    + buildMalformedStructureNote(events)
     + buildBrokenCollectionNote(result.brokenCollections, 'read');
 }
 

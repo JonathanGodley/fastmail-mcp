@@ -579,12 +579,19 @@ default with a hidden-count note. The accepted residuals:
   `get_email_attachments` enumerates the same parts on request for the same caller.
 - **The same per-id oracle extends to calendar events and contacts.** `update_calendar_event`,
   `delete_calendar_event`, `update_contact` and `delete_contact` return `InvalidParams` for an id
-  that resolves to nothing, so each confirms whether that event or contact exists. `create_calendar_event`
-  does the same for a `calendarId`. Accepted on exactly the footing above: every one of these ids is
+  that resolves to nothing, so each confirms whether that event or contact exists.
+  `create_calendar_event` does the same for a `calendarId`. Accepted on exactly the footing above: every one of these ids is
   already readable through `list_calendar_events` / `get_calendar_event` / `list_contacts` /
   `get_contact` with the same token, so the rejection discloses nothing a caller holding these tools
   could not already enumerate, and the recoverability it buys is the whole point — a caller who
   cannot tell "wrong id" from "server broke" retries a call that can never succeed.
+- **The calendar writes' refusal of a hit that did not come back whole (#239) is on another
+  footing.** It names the calendar and url of each record matched to the id that this server
+  could not read whole, and `get_calendar_event` skips such a record, so the footing above does
+  not hold. It is `InvalidParams` only where it offers a handle, and a plain error otherwise.
+  Accepted because each record it names sits in a calendar the same token discovered and can
+  query, so the refusal names a resource that token can already reach, and the alternative is a
+  write that lands on a different copy than the one the caller meant.
 - **Two-query hidden-count race.** The visible query and the count query run in the same
   `makeRequest` (one atomic snapshot — no race) where possible; the derivation tolerates a missing/
   garbled count by failing closed to the degraded note. A message moving between *any* two reads is

@@ -235,6 +235,25 @@ two-copy result differs by tool, and the split is the whole convention:
   testable promise rather than an accident), sets `otherCopies` on its result, and appends
   `buildAmbiguousEventNote`'s trailing line.
 
+**The writes act only where every hit for the id came back whole** (#239). A hit the server
+matched to the id, by either path, is readable only with its data as a string, a VEVENT in it
+with a UID, its url and its entity tag. The server matches UIDs case-insensitively, so only
+the parsed UID says whether a hit is a copy, and a hit missing any of those cannot be checked,
+or cannot be written safely. A readable hit whose UID differs from the id is not a copy; any
+other hit goes into `CalendarObjectLookup.unreadable`, and update and delete refuse through
+`refuseUnreadableMatches` without writing. It is the first check either makes on the lookup's
+result, so an unreadable hit never counts toward the ambiguity or the url collision; the
+handlers' argument checks, the eventId's own checks (its type, emptiness and unsendable
+characters) and any request that fails come before it. The refusal offers a handle only where
+one reaches a readable record: a readable copy's url where nothing came back for the id's url
+form, since passing a url makes the UID query ask for that url instead; or, where the caller's
+url addressed a record read whole, that record's own UID if it reaches it alone. Where the
+record at the caller's url is itself the unreadable one, no other record is a way to it, and
+the refusal offers nothing. A hit at its calendar's own url is tsdav's stand-in for an answer it
+could not parse, so the refusal names that calendar's answer, not a record. The lookup reports
+rather than throws because `get_calendar_event` shares it and applies its own rule: it skips a
+hit missing its data, a VEVENT, its url or its etag.
+
 **Addressing a record is not naming it.** Both forms of `eventId` are always tried, so a
 record whose UID literally spells another record's resource `url` puts two records in one
 result. The disambiguation is made on the RESULT rather than on the look of the string: where a
@@ -248,10 +267,11 @@ url, so a caller passing it back may mean either, and acting on the addressed re
 or destroy an event never shown under that id. That holds even when the addressed record's own
 UID is the same url: two rows then list one id. `addressCollisionError` refuses, names both
 records' urls, and quotes the addressed record's own UID where that UID reaches it alone; the
-other record's url reaches that one. Where it does not (no UID, the url itself, a UID that is
-another resource's url, or a UID another record also holds, each of which a refusal would then
-refuse in turn), the refusal offers no
-id rather than one that loops, and names the Fastmail web interface. The url is
+other record's url reaches that one. Where it does not (the url itself, a UID that is another
+resource's url, a UID another record also holds, or a UID whose query hands back a hit that is
+not whole (#239), each of which a refusal would then refuse in turn), the refusal offers no id
+rather than one that loops, and names the Fastmail web interface. An addressed record with no
+UID never reaches this refusal: it is not whole, so the writes refuse it first. The url is
 therefore not an escape hatch in this one case, and saying "pass the url" would send the
 caller back to the id they passed. A url-shaped id with no resource at that address is
 unaffected: nothing is addressed, and it resolves by UID exactly as any other id does.
@@ -841,7 +861,10 @@ calendar rejects raised in `src/caldav-client.ts` itself follow the same rule an
 `InvalidInputError` directly: the start/end frame and ordering checks below, the date
 format and control-character rejects, the participant-address rejects, a `calendarId` or
 `eventId` that resolves to nothing, and the repeating-event refusal that
-`update_calendar_event` / `delete_calendar_event` raise (see below). `src/contacts-calendar.ts` follows it too — its
+`update_calendar_event` / `delete_calendar_event` raise (see below). The refusal those two raise
+for a hit on the id that did not come back whole (#239) is split by the same rule:
+`InvalidInputError` when it offers a handle (a readable copy's url, or the addressed record's
+own UID), a plain `Error` that says to retry otherwise. `src/contacts-calendar.ts` follows it too — its
 input rejects (a contact with neither name nor address, an update naming no field, an
 empty entry array, an ambiguous entry edit, an update aimed at a card that is not an individual) and its
 not-found rejects are `InvalidInputError`, and its create/update/delete set-errors route
@@ -2472,8 +2495,8 @@ field left off: absence of `isRecurring` is the tool's statement that an event d
 repeat, so a row that silently loses the field reports a repeating event as a one-off inside a
 response that looks complete — and the caller most likely to be asking is asking whether a
 slot is free. A failed follow-up is the same class of failure as the expanded fetch itself
-failing, and is reported the same way rather than through a new output field that would give
-absence a second meaning. "Incomplete" includes a response that arrives carrying no readable
+failing, and is reported the same way rather than by leaving the field off rows that say
+nothing about why. "Incomplete" includes a response that arrives carrying no readable
 VEVENT — an empty `<C:calendar-data/>` or an empty VCALENDAR. Component markers are read in
 any case (RFC 5545 §3.1), so a lower-cased payload is readable. `readsAsRecurringSeries`,
 the position-aware test this path uses (`isRecurringSeriesResource` serves only the
@@ -2481,11 +2504,20 @@ update/delete refusal), answers false for both, and false on this
 path is a positive claim about the calendar rather than the fail-closed refusal it is on the
 write path.
 
-The one row that carries no recurrence claim in either direction is the placeholder a resource
+One row that carries no recurrence claim in either direction is the placeholder a resource
 with no parseable VEVENT produces (`{ id, url, title: 'Untitled' }`). It is not set to
 `isRecurring: false`: "does not repeat" would be as unfounded as "does", said about a record
 nothing was read out of. The tool description and `docs/reference/tools.md` carve it out by name rather than
 claiming the field is decided on literally every row.
+
+A row marked `malformedStructure` is the other row whose absences make no claim (#237). Its
+payload fails `walkICalComponents`, so the block-by-block read may have missed the very lines
+an absence would deny. This is not the silent absence refused above: the row says so in its
+own field, and `buildMalformedStructureNote` states once, in a trailing note, what
+that field means, as `buildEtcGmtZoneNote` does for its rows. `parseCalendarObjects` checks
+the payload it parses; `settleAmbiguousRecurrence` checks the stored record it re-reads. A
+multi-block expansion of a series stored malformed is never re-read, so it is not marked on
+the listing; `get_calendar_event`, which reads the stored record, marks it.
 
 ## Local-time formatting and the U+202F trap
 

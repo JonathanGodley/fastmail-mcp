@@ -15,6 +15,9 @@
 // destructive tools refuse on that ambiguity count. So the substring query below, which must
 // return nothing, is the load-bearing check.
 //
+// Step 6 settles a second premise (#239): what a multiget answers for an href that does not
+// exist, which decides whether the url form of an eventId reads a deleted event as not-found.
+//
 // READ-ONLY: it queries an event that already exists (see the README on why calendar probes
 // that write are not a safe default).
 //
@@ -276,6 +279,73 @@ try {
       );
     }
   }
+
+  // Step 6 (#239): the url form of an eventId is resolved by a multiget for that one href, and
+  // a 404 or 410 there is swallowed as "no such record" (`isAddressedResourceMissing`). If the
+  // server instead answered 2xx with a failed `calendar-data` propstat, tsdav would hand back
+  // an object with no data, which the lookup now refuses as unreadable. Only the shape of the
+  // answer is printed: statuses and booleans.
+
+  console.log('\n=== Step 6: multiget an href that does not exist in that collection ===');
+  const missingHref = `${new URL(calendar.url, 'https://caldav.fastmail.com/').pathname.replace(/\/?$/, '/')}${IMPOSSIBLE_SUFFIX}-239.ics`;
+  secrets.push(missingHref);
+  let httpStatus;
+  const capturingFetch = async (url, init) => {
+    const res = await fetch(url, init);
+    httpStatus = res.status;
+    return res;
+  };
+  const statusOf = line => {
+    const m = /\s(\d{3})\b/.exec(String(line ?? ''));
+    return m ? Number(m[1]) : undefined;
+  };
+  try {
+    const entries = await client.davRequest({
+      url: calendar.url,
+      init: {
+        method: 'REPORT',
+        headers: { depth: '1' },
+        namespace: 'c',
+        body: {
+          'calendar-multiget': {
+            _attributes: { 'xmlns:d': 'DAV:', 'xmlns:c': 'urn:ietf:params:xml:ns:caldav' },
+            'd:prop': { 'd:getetag': {}, 'c:calendar-data': {} },
+            'd:href': [missingHref],
+          },
+        },
+      },
+      fetch: capturingFetch,
+    });
+    console.log(`  HTTP status: ${httpStatus}`);
+    const doc = entries?.[0]?.raw;
+    const responses = doc?.multistatus?.response;
+    const list = responses === undefined ? [] : (Array.isArray(responses) ? responses : [responses]);
+    console.log(`  parsed as a multistatus: ${doc?.multistatus !== undefined}`);
+    console.log(`  response elements: ${list.length}`);
+    for (const [i, r] of list.entries()) {
+      const propstats = r?.propstat === undefined ? [] : (Array.isArray(r.propstat) ? r.propstat : [r.propstat]);
+      const propStatuses = propstats.map(p => `${statusOf(p?.status) ?? 'none'}[${Object.keys(p?.prop ?? {}).sort().join(',')}]`);
+      console.log(`  response ${i + 1}: response-level status ${statusOf(r?.status) ?? 'none'}; propstats ${propStatuses.length ? propStatuses.join(' ') : 'none'}`);
+    }
+  } catch (err) {
+    check('step 6: the raw multiget completed', false, redact(err?.message ?? String(err)).slice(0, 300));
+  }
+
+  // The same request through the call production makes, classified as production classifies it.
+  // Mirrors `findCalendarObjectByUID`'s url fetch and `isAddressedResourceMissing` in src/caldav-client.ts.
+  let productionOutcome;
+  try {
+    const objects = await client.fetchCalendarObjects({ calendar, objectUrls: [missingHref] });
+    productionOutcome = `resolved with ${objects.length} object(s); with data: ${objects.filter(o => typeof o.data === 'string' && o.data !== '').length}`;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    productionOutcome = `threw; read as not-found by isAddressedResourceMissing: ${/^Collection query failed: 4(?:04|10)\b/.test(message)}`;
+  }
+  console.log(`  fetchCalendarObjects: ${productionOutcome}`);
+  check(
+    'step 6: a missing href is a response-level 404 or 410, which the url form reads as not-found',
+    productionOutcome.startsWith('threw; read as not-found by isAddressedResourceMissing: true'),
+  );
 } catch (err) {
   check('probe ran to completion', false, redact(err?.message ?? String(err)));
 }
