@@ -355,10 +355,7 @@ export function calendarEventBody(
   };
 }
 
-/**
- * The trailing note `get_calendar_event` carries beside `unreadableCopies` (#239). "Could not use
- * as this event" because the list holds records read whole but unusable too, a task among them.
- */
+/** The trailing note beside `unreadableCopies` (#239); worded as `unusableMatchError` is. */
 export function buildUnusableCopiesNote(unreadableCopies?: CalendarEventCopy[]): string {
   if (!unreadableCopies || unreadableCopies.length === 0) return '';
   const one = unreadableCopies.length === 1;

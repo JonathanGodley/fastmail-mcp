@@ -96,9 +96,7 @@ export interface CalendarEvent {
   // owns the wording. Never on an `unreadable` row, which already reads nothing.
   malformedStructure?: true;
   // Set on, and only on, the "Untitled" placeholder for a record no VEVENT could be read out of
-  // (#239): a failed or empty `calendar-data`, a non-string, or a payload with no block found.
-  // Not always a server fault (see docs/reference/calendar.md). `buildUnreadableEventNote` owns
-  // the wording.
+  // (#239). `buildUnreadableEventNote` owns the wording.
   unreadable?: true;
 }
 

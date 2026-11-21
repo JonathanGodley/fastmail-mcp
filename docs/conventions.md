@@ -2514,11 +2514,9 @@ read and on every other calendar-object read: the listing, the lookup's UID quer
 and the occurrence delete's expansion. tsdav hands back one stand-in entry for a 2xx body it
 cannot parse, and the query leg filters that entry out, so the calendar reads as empty; xml-js
 also recovers a body cut after a complete `response` as if it were whole. RFC 4791 §7.8 and §7.9
-require a multistatus. So every such read passes `checkedReadFetch`, which re-reads a 2xx body
-through tsdav's own `davRequest` (the stand-in means it did not parse, had no `multistatus`, was
-empty, or was not sent as XML) and then checks that the root `multistatus` closes, with only
-whitespace, comments and processing instructions after it; either failing throws
-`UnreadableDavAnswerError`. An empty multistatus, self-closed or not, is the valid empty window
+require a multistatus. So every such read passes `checkedReadFetch`, which throws
+`UnreadableDavAnswerError` when tsdav's own parse of a 2xx body yields the stand-in or the root
+`multistatus` does not close. An empty multistatus, self-closed or not, is the valid empty window
 (RFC 4918 §13). A non-2xx answer passes untouched, so tsdav's own throw and the url fetch's
 not-found classification see it as before. The check lives in the fetch, not in what tsdav
 returns, because the stand-in never reaches the caller of a query. The only read after a write,
