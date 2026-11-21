@@ -21,6 +21,7 @@
     "test": "node scripts/run-tests.mjs src/*.test.ts",
     "typecheck:tests": "tsc --noEmit -p tsconfig.tests.json",
     "scan:secrets": "node scripts/scan-secrets.mjs --all",
+    "check:links": "node scripts/check-doc-links.mjs",
     "payload:sizes": "tsx scripts/payload-sizes.mts",
     "mutation": "node scripts/mutation-test.mjs"
   },

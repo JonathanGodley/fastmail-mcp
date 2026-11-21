@@ -5389,6 +5389,7 @@ describe('deleteMailbox', () => {
         if (cls === 'input') assert.ok(err instanceof InvalidInputError, err.message);
         else assert.equal(err.name, 'Error', err.message);
         assert.match(err.message, pattern);
+        assert.doesNotMatch(err.message, /web interface|Fastmail client/i);
         return true;
       },
     );
@@ -5396,7 +5397,7 @@ describe('deleteMailbox', () => {
   }
 
   it('refuses a role mailbox even when mayDelete is true', async () => {
-    await assertRefused([ROLE_ARCHIVE], 'mb-archive', 'input', /role "archive".*Fastmail web interface/);
+    await assertRefused([ROLE_ARCHIVE], 'mb-archive', 'input', /role "archive".*so this tool will not destroy one it could never put back\.$/);
   });
 
   it('names the mailbox by its path and id in a refusal, or by its name when it has no path', async () => {
@@ -5623,7 +5624,7 @@ describe('deleteMailbox', () => {
       deletedMailbox: echoed,
       warning:
         'WARNING: the server destroyed mailbox "Projects/Old" (id "mb-old"), which at the moment of the destroy held 4 messages. ' +
-        'Its mail may have been removed with it; check Trash and the Fastmail web interface.',
+        'Its mail may have been removed with it; check Trash.',
     });
   });
 
@@ -5653,7 +5654,7 @@ describe('deleteMailbox', () => {
         (await client.deleteMailbox('mb-old')).warning,
         'WARNING: the server destroyed mailbox "Projects/Old" (id "mb-old"). The server did not report a valid message ' +
           'count for it at the moment of the destroy, so it cannot be shown to have been empty. ' +
-          'Check Trash and the Fastmail web interface.',
+          'Check Trash.',
         JSON.stringify(totalEmails),
       );
     }
@@ -5667,7 +5668,7 @@ describe('deleteMailbox', () => {
         (await client.deleteMailbox('mb-old')).warning,
         'WARNING: the server destroyed mailbox "Projects/Old" (id "mb-old"). The server reported its role in a form ' +
           'that is not a role name, so it cannot be shown to have been an ordinary folder. ' +
-          'Check Trash and the Fastmail web interface.',
+          'Check Trash.',
         JSON.stringify(role),
       );
     }

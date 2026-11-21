@@ -277,7 +277,7 @@ records' urls, and quotes the addressed record's own UID where that UID reaches 
 other record's url reaches that one. Where it does not (the url itself, a UID that is another
 resource's url, a UID another record also holds, or a UID whose query hands back a hit that is
 not whole (#239), each of which a refusal would then refuse in turn), the refusal offers no id
-rather than one that loops, and names the Fastmail web interface. An addressed record with no
+rather than one that loops. An addressed record with no
 UID never reaches this refusal: it is not whole, so the writes refuse it first. The url is
 therefore not an escape hatch in this one case, and saying "pass the url" would send the
 caller back to the id they passed. A url-shaped id with no resource at that address is
@@ -2350,10 +2350,9 @@ that covers it (unless scoped to another calendar) until the caller narrows the 
 far more expensive than parsing a few thousand extra blocks.
 
 **The residual of the refusal, stated plainly: a hostile series DOES fail every listing whose
-window covers it**, until the caller narrows the window past it, scopes the call to a calendar
-that does not hold it (`calendarId`), or removes the event in the Fastmail client - this server
-refuses to delete any recurring series (#146), so removal is never something a caller can do from
-here. Leaving the series out with a note would keep the listing answering; the refusal gives
+window covers it**, until the caller narrows the window past it or scopes the call to a calendar
+that does not hold it (`calendarId`). This server refuses to delete any recurring series (#146),
+so removal is never something a caller can do from here. Leaving the series out with a note would keep the listing answering; the refusal gives
 that up, so nothing here promises that one hostile invitation cannot blank a listing - it can,
 and that is the accepted price of the caller being told rather than left to notice.
 

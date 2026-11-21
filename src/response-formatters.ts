@@ -315,10 +315,9 @@ export function buildAmbiguousEventNote(
         ? 'picked from the set. Because the listing shows another record under this same id, '
           + 'update_calendar_event and delete_calendar_event REFUSE this id. '
           + (addressCollision.addressedUid
-            ? 'Pass the event\'s own `id` (its UID) to act on the event above'
-            : 'No event id reaches the event above alone through this server; change it in the '
-              + 'Fastmail web interface')
-          + ', or pass its own `url` to act on one of the others.'
+            ? 'Pass the event\'s own `id` (its UID) to act on the event above, or'
+            : 'No event id reaches the event above alone through this server;')
+          + ' pass the `url` of one of the others to act on that one.'
         : 'picked from the set, and update_calendar_event and delete_calendar_event act on that '
           + 'same record when given this id. To reach one of the others, pass its own `url`.')
     );
@@ -600,7 +599,7 @@ export function formatArchiveResult(result: ArchiveResult): string {
     const stillSnoozed = removed.filter(r => (r.roles || []).includes('snoozed'));
     if (stillSnoozed.length > 0) {
       lines.push(
-        `${stillSnoozed.length} of the messages removed from the Inbox ${stillSnoozed.length === 1 ? 'is' : 'are'} still in a snooze mailbox. Whether the snooze was cancelled depends on which mailbox held it, which this server cannot see — if it is still active the message will return to the Inbox at its wake time. Check it in a Fastmail client.`,
+        `${stillSnoozed.length} of the messages removed from the Inbox ${stillSnoozed.length === 1 ? 'is' : 'are'} still in a snooze mailbox. Whether the snooze was cancelled depends on which mailbox held it, which this server cannot see — if it is still active the message will return to the Inbox at its wake time.`,
       );
     }
   }
@@ -856,6 +855,8 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
       'id', 'name', 'emails', 'phones', 'organizations', 'notes',
       'addresses', 'titles', 'online', 'photos', 'anniversaries',
     ]);
+    // A field the card itself names `organization` is dropped when the card's first organization
+    // has a name, which already fills `result.organization`; otherwise it is copied.
     for (const key of Object.keys(raw)) {
       if (!handledKeys.has(key) && result[key] === undefined && raw[key] !== undefined) {
         result[key] = raw[key];

@@ -467,7 +467,6 @@ export class ContactsCalendarClient extends JmapClient {
         because:
           'name/emails/phones/addresses/notes describe a person card, this server can create only individual ' +
           'cards, and group members are not editable here.',
-        recovery: 'Edit it in the Fastmail web interface instead.',
       }));
     }
     const guardState = this.requireReadState(readState, id, 'written');
@@ -572,7 +571,6 @@ export class ContactsCalendarClient extends JmapClient {
           'this server can create only individual cards (it cannot create a group or any other kind; ' +
           'create_contact has no kind or members parameter), so it will not destroy one it could never ' +
           'put back, and the deletedCard echo could not rebuild it either.',
-        recovery: 'Delete it in the Fastmail web interface instead.',
       }));
     }
     const guardState = this.requireReadState(readState, id, 'deleted');

@@ -1953,7 +1953,8 @@ describe('formatArchiveResult', () => {
       { id: 'a', action: 'removedFromInbox', mailboxes: ['Snoozed'], roles: ['snoozed'] },
     ]);
     assert.match(text, /still in a snooze mailbox/);
-    assert.match(text, /wake time/);
+    assert.match(text, /return to the Inbox at its wake time\.$/m);
+    assert.doesNotMatch(text, /web interface|Fastmail client/i);
   });
 
   it('does not mention a snooze when nothing was left in one', () => {
@@ -2700,15 +2701,16 @@ describe('buildAmbiguousEventNote', () => {
     assert.doesNotMatch(note, /act on that same record/);
     assert.match(note, /update_calendar_event and delete_calendar_event REFUSE this id/);
     assert.match(note, /Pass the event's own `id` \(its UID\) to act on the event above/);
-    assert.match(note, /pass its own `url` to act on one of the others\.$/);
+    assert.match(note, /Pass the event's own `id` \(its UID\) to act on the event above, or pass the `url` of one of the others to act on that one\.$/);
     assert.ok(note.includes(`"Work" ("${WORK}")`), note);
   });
 
   // No UID reaches it alone (none, the url itself, or shared): the note says what the refusal says.
   it('offers no UID when none reaches the addressed record alone', () => {
     const note = buildAmbiguousEventNote([{ calendar: 'Work', url: WORK }], true, { addressedUid: undefined });
-    assert.match(note, /REFUSE this id\. No event id reaches the event above alone through this server; change it in the Fastmail web interface, or pass its own `url` to act on one of the others\.$/);
+    assert.match(note, /REFUSE this id\. No event id reaches the event above alone through this server; pass the `url` of one of the others to act on that one\.$/);
     assert.doesNotMatch(note, /its UID/);
+    assert.doesNotMatch(note, /web interface|Fastmail client/i);
   });
 
   it('stays silent on an addressed id that named exactly one record', () => {
