@@ -37,11 +37,10 @@ export class InvalidInputError extends Error {
 //
 // Error text is redacted twice: once as each untrusted value is rendered, and again over the
 // finished message in the CallTool catch. `\S+` runs to the next whitespace, so on that second
-// pass it would take the closing quote, comma or `…` cut marker the server wrote after the
-// value. Two rules keep those: a marker followed only by such a tail is left alone, and up to
-// BEARER_TAIL_MAX closing characters ending a matched value are put back after the marker.
-// Of them only `.` can occur in an RFC 6750 token, so the most a restore shows of a
-// credential is three trailing dots. The longest tail the server writes is `…",`.
+// pass it would take the closing quote, comma or `…` cut marker written after the value. So a
+// marker followed only by such a tail is left alone, and up to BEARER_TAIL_MAX closing
+// characters ending a match are put back. Three covers `…",`. Of the set only `.` can occur
+// in an RFC 6750 token, so a restore shows at most three trailing dots of a credential.
 const BEARER_TAIL_CHARS = `"',;:)\\]}.\u2026`;
 const BEARER_TAIL_MAX = 3;
 const BEARER_PATTERN = new RegExp(
