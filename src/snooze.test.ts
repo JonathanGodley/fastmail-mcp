@@ -4,7 +4,7 @@
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { InvalidInputError } from './coerce.js';
+import { InvalidInputError, LENIENT_BOOL_DESC } from './coerce.js';
 import {
   SNOOZE_CAPABILITY, SNOOZE_TOOLS, WAKE_KEYWORDS, WEB_SESSION_EXPIRED, WebSessionError, WebSessionTransport,
   listSnoozedEmails, parseWakeTime, snoozeEmail, unsnoozeEmail,
@@ -300,5 +300,33 @@ describe('snooze tool surface', () => {
     const section = readme.slice(start, end === -1 ? undefined : end);
     const documented = [...section.matchAll(/^- \*\*([a-z_]+)\*\*:/gm)].map(m => m[1]);
     assert.deepEqual(documented, SNOOZE_TOOLS.map(t => t.name));
+  });
+
+  // The lenient-boolean guard in src/tool-schema.test.ts scans src/index.ts as text, so it
+  // never sees these tools (#54, #244).
+  it('declares every coerced boolean parameter as type: [boolean, string] with the lenient wording', () => {
+    const coerced: Record<string, string[]> = { list_snoozed_emails: ['raw'] };
+    const expected = Object.entries(coerced).flatMap(([tool, params]) => params.map(p => `${tool}.${p}`));
+    const source = readFileSync(new URL('./snooze.ts', import.meta.url), 'utf8');
+    const calls = [...source.matchAll(/coerceBool\(/g)].length;
+    const coercedInSource = [...source.matchAll(/coerceBool\(args\?\.(\w+), '\1'\)/g)].map(m => m[1]);
+    assert.equal(coercedInSource.length, calls, 'a coerceBool call in src/snooze.ts does not have the coerceBool(args?.x, \'x\') shape this test reads');
+    assert.deepEqual(coercedInSource.sort(), Object.values(coerced).flat().sort());
+
+    for (const [toolName, params] of Object.entries(coerced)) {
+      const tool = SNOOZE_TOOLS.find(t => t.name === toolName)!;
+      for (const p of params) {
+        const prop = (tool.inputSchema.properties as any)[p];
+        assert.deepEqual(prop?.type, ['boolean', 'string'], `${toolName}.${p} is not declared type: ['boolean', 'string']`);
+        assert.ok(prop.description.endsWith(LENIENT_BOOL_DESC), `${toolName}.${p}'s description does not end with LENIENT_BOOL_DESC`);
+      }
+    }
+
+    // Any boolean-typed parameter, narrow or lenient, has to be in `coerced` above.
+    const booleanTyped = SNOOZE_TOOLS.flatMap(t =>
+      Object.entries(t.inputSchema.properties as any)
+        .filter(([, prop]: [string, any]) => prop.type === 'boolean' || (Array.isArray(prop.type) && prop.type.includes('boolean')))
+        .map(([p]) => `${t.name}.${p}`));
+    assert.deepEqual(booleanTyped.sort(), expected.sort(), 'a snooze tool declares a boolean parameter this test does not pin');
   });
 });
