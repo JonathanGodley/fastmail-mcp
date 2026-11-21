@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CalDAVCalendarClient } from './caldav-client.js';
+import { formatCalendarEventList } from './response-formatters.js';
 import {
   dataProp,
   etagProp,
@@ -215,6 +216,54 @@ describe('a success answer that is not a complete multistatus is an error (#239)
       const result = await listWindow(client);
       assert.deepEqual(result.events.map(e => e.title).sort(), ['Alpha', 'Beta'], JSON.stringify(body.slice(-30)));
     }
+  });
+});
+
+const UNREADABLE_NOTE = '\n\nNote: an event marked `unreadable` is a record the calendar server reported in or near '
+  + 'this window whose event data this server could not read, so only its `url` is known; its title, times, '
+  + 'free/busy and whether it repeats are not. A retry helps only if the server failed to send the data.';
+
+describe('a listed record that came back unreadable is listed with a warning (#239)', () => {
+  const failedData = '<d:propstat><d:prop><c:calendar-data/></d:prop><d:status>HTTP/1.1 500 Internal Server Error</d:status></d:propstat>';
+  const rows: Array<[string, string, string]> = [
+    ['a calendar-data propstat that failed', etagProp('"e"'), failedData],
+    ['an empty calendar-data element', etagProp('"e"') + '<c:calendar-data/>', ''],
+    ['calendar-data that tsdav reads as a number', etagProp('"e"') + '<c:calendar-data>12345</c:calendar-data>', ''],
+    // Three layouts that read the same on every retry (docs/reference/calendar.md).
+    ['calendar-data split across two CDATA sections', etagProp('"e"')
+      + `<c:calendar-data><![CDATA[${ical('split@fm').slice(0, 40)}]]><![CDATA[${ical('split@fm').slice(40)}]]></c:calendar-data>`, ''],
+    ['calendar-data mixing text with a CDATA section', etagProp('"e"')
+      + `<c:calendar-data>BEGIN:VCALENDAR<![CDATA[${ical('mixed@fm').slice('BEGIN:VCALENDAR'.length)}]]></c:calendar-data>`, ''],
+    ['its only BEGIN:VEVENT line legally folded', etagProp('"e"') + dataProp(ical('folded@fm').replace('BEGIN:VEVENT', 'BEGIN:VEV\r\n ENT')), ''],
+  ];
+  for (const [label, props, extraPropstat] of rows) {
+    it(`marks a listed record with ${label} unreadable, with one note`, async () => {
+      const path = '/dav/calendars/user/probe/personal/';
+      const body = multistatus(
+        resp(`${path}broken-1.ics`, props, '200 OK', extraPropstat)
+        + resp(`${path}fine.ics`, etagProp('"ef"') + dataProp(ical('fine@fm', 'Fine')))
+        + resp(`${path}broken-2.ics`, props, '200 OK', extraPropstat),
+      );
+      const { client } = setup(
+        { [PERSONAL]: [{ href: `${PERSONAL}fine.ics`, data: ical('fine@fm', 'Fine'), etag: '"ef"' }] },
+        (request) => (request.url === PERSONAL && request.kind === 'query' ? { body, contentType: XML } : undefined),
+      );
+      const result = await listWindow(client);
+      for (const name of ['broken-1.ics', 'broken-2.ics']) {
+        const url = `${PERSONAL}${name}`;
+        assert.deepEqual(result.events.find(e => e.url === url), { id: url, url, title: 'Untitled', unreadable: true });
+      }
+      const text = formatCalendarEventList(result);
+      assert.equal(text.split(UNREADABLE_NOTE).length - 1, 1, text);
+    });
+  }
+
+  it('a readable row carries no unreadable key and no note', async () => {
+    const { client } = setup({ [PERSONAL]: [{ href: `${PERSONAL}fine.ics`, data: ical('fine@fm', 'Fine'), etag: '"ef"' }] });
+    const result = await listWindow(client);
+    assert.equal(result.events.length, 1);
+    assert.equal('unreadable' in result.events[0], false);
+    assert.equal(formatCalendarEventList(result).includes('unreadable'), false);
   });
 });
 

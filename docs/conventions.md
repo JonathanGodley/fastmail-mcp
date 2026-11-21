@@ -2521,10 +2521,18 @@ the occurrence delete's confirmation, already catches every throw as NOT CONFIRM
 error's "Nothing was changed" holds.
 
 One row that carries no recurrence claim in either direction is the placeholder a resource
-with no parseable VEVENT produces (`{ id, url, title: 'Untitled' }`). It is not set to
-`isRecurring: false`: "does not repeat" would be as unfounded as "does", said about a record
-nothing was read out of. The tool description and `docs/reference/tools.md` carve it out by name rather than
-claiming the field is decided on literally every row.
+with no parseable VEVENT produces (`{ id, url, title: 'Untitled', unreadable: true }`). It is
+not set to `isRecurring: false`: "does not repeat" would be as unfounded as "does", said about a
+record nothing was read out of. The tool description and `docs/reference/tools.md` carve it out
+by name rather than claiming the field is decided on literally every row.
+
+The placeholder is listed rather than dropped or failed (#239): the listing's comp-filter means
+the server reported a VEVENT there, so a row that silently vanished would leave a busy slot
+looking free, and failing the call would let one broken record hide a whole calendar. Every
+placeholder carries `unreadable: true` and `buildUnreadableEventNote` states once what it means.
+The flag is set whatever the cause (a failed or empty `calendar-data`, a non-string, a payload
+with no block found), and some causes are this server's reader rather than the server, so the
+note promises nothing from a retry.
 
 A row marked `malformedStructure` is the other row whose absences make no claim (#237). Its
 payload fails `walkICalComponents`, so the block-by-block read may have missed the very lines

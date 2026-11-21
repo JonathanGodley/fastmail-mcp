@@ -5999,7 +5999,7 @@ describe('the read tools flag an event whose data is not well formed (#237)', ()
 
   // tsdav makes an empty `<c:calendar-data/>` into `{}`, which is no payload to read.
   it('gives a resource whose payload is not a string the placeholder row', async () => {
-    const placeholder = { id: CAL_URL + 'empty.ics', url: CAL_URL + 'empty.ics', title: 'Untitled' };
+    const placeholder = { id: CAL_URL + 'empty.ics', url: CAL_URL + 'empty.ics', title: 'Untitled', unreadable: true };
     const result = await list(listingClient([
       { url: CAL_URL + 'empty.ics', data: {} as unknown as string },
       { url: CAL_URL + 'fine.ics', data: event('fine@fm') },
@@ -6014,9 +6014,10 @@ describe('the read tools flag an event whose data is not well formed (#237)', ()
     assert.deepEqual(row, placeholder);
   });
 
-  it('does not flag the placeholder row for a record with no readable event', () => {
+  it('flags the placeholder row for a record with no readable event unreadable, not malformedStructure', () => {
     const row = parseCalendarObject({ data: 'BEGIN:VCALENDAR\r\nBEGIN:X-OPEN\r\nEND:VCALENDAR', url: CAL_URL + 'x.ics' });
     assert.equal(row.title, 'Untitled');
+    assert.equal(row.unreadable, true);
     assert.equal('malformedStructure' in row, false);
     assert.equal(buildMalformedStructureNote([row]), '');
   });
@@ -10697,7 +10698,7 @@ describe('parseCalendarObjects', () => {
     const events = parseCalendarObjects({ data, url: '/cal/empty.ics' });
 
     assert.equal(events.length, 1);
-    assert.deepEqual(events[0], { id: '/cal/empty.ics', url: '/cal/empty.ics', title: 'Untitled' });
+    assert.deepEqual(events[0], { id: '/cal/empty.ics', url: '/cal/empty.ics', title: 'Untitled', unreadable: true });
   });
 
   it('parses timed occurrences as datetimes and all-day occurrences as dates', () => {

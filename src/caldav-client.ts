@@ -93,8 +93,13 @@ export interface CalendarEvent {
   transparency?: string;
   // Set when the payload this row was read from fails `walkICalComponents`, the structure the
   // writes refuse (#237): fields read block by block may be missing. `buildMalformedStructureNote`
-  // owns the wording. Never on the "Untitled" placeholder, which already reads nothing.
+  // owns the wording. Never on an `unreadable` row, which already reads nothing.
   malformedStructure?: true;
+  // Set on, and only on, the "Untitled" placeholder for a record no VEVENT could be read out of
+  // (#239): a failed or empty `calendar-data`, a non-string, or a payload with no block found.
+  // Not always a server fault (see docs/reference/calendar.md). `buildUnreadableEventNote` owns
+  // the wording.
+  unreadable?: true;
 }
 
 // `total` is how many matched before the page was cut, since a capped page read as the whole
@@ -1494,6 +1499,7 @@ export function parseCalendarObjects(
       id: obj.url || '',
       url: obj.url || '',
       title: 'Untitled',
+      unreadable: true,
     }];
   }
 
@@ -3865,6 +3871,17 @@ export function buildMalformedStructureNote(events: CalendarEvent[]): string {
   if (!events.some(e => e.malformedStructure)) return '';
   return '\n\nNote: an event marked `malformedStructure` has data that is not well formed, so the details '
     + 'shown for it may be incomplete.';
+}
+
+/**
+ * The trailing note a listing carries when any row is `unreadable` (#239). It claims no transient
+ * fault: some layouts this server cannot read come back the same on every retry.
+ */
+export function buildUnreadableEventNote(events: CalendarEvent[]): string {
+  if (!events.some(e => e.unreadable)) return '';
+  return '\n\nNote: an event marked `unreadable` is a record the calendar server reported in or near this window '
+    + 'whose event data this server could not read, so only its `url` is known; its title, times, free/busy and '
+    + 'whether it repeats are not. A retry helps only if the server failed to send the data.';
 }
 
 // The sentence create_calendar_event appends, from the written result only (#157).
