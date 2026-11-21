@@ -180,8 +180,9 @@ describe('list_snoozed_emails', () => {
     const [email] = out(await listSnoozedEmails({}, t, 50)).emails;
     const get = calls.flat().find(([m]) => m === 'Email/get')[1];
     assert.deepEqual(get.properties, [...EMAIL_PROPERTIES_COMPACT, 'snoozed']);
+    const { snoozed: _notFetchedByListEmails, ...asListEmailsFetches } = LISTED.a;
     assert.deepEqual(email, {
-      ...projectListEmail(simplifyEmail({ id: 'a', ...LISTED.a }), undefined),
+      ...projectListEmail(simplifyEmail({ id: 'a', ...asListEmailsFetches }), undefined),
       mailboxes: ['Snoozed', 'Receipts'],
       roles: ['snoozed'],
       wakeAt: '2026-11-03T11:00:00+11:00',
