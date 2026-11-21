@@ -1321,8 +1321,9 @@ credentials**, so no value that could carry one goes through it. That bound is a
 not about who wrote it: server-authored strings do pass through it — the DAV reason phrase on a
 failed request, and the collection paths in the broken-collection clause — and they sit inside
 the bound because nothing in a status line or a collection href on this account is this
-account's token. A value that could carry one belongs in `describeUntrusted`, which redacts
-before it truncates.
+account's token; that a remote server could still put one there is the accepted residual under
+**What redaction does and does not cover**. A value that could carry one belongs in
+`describeUntrusted`, which redacts before it truncates.
 
 **The path spelling: `echoPath`.** A filesystem path needs both halves — the redaction
 `describeUntrusted` runs, and a bound wider than its 64 code points — so `echoPath` is

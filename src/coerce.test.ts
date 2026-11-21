@@ -769,7 +769,7 @@ describe('redactSecrets', () => {
     assertStable('a QXQXQXQXQXQX b', 'a [REDACTED] b');
   });
 
-  it('hides a value carrying whitespace or a word the shapes once matched', () => {
+  it('hides a value carrying whitespace and the word "Bearer"', () => {
     registerSecret('zzQX holds Bearer inside'); // allowlist-secret (synthetic value carrying the word, not a credential)
     assertStable('auth zzQX holds Bearer inside tail', 'auth [REDACTED] tail'); // allowlist-secret (synthetic value registered above)
   });
