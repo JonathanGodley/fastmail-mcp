@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CalDAVCalendarClient } from './caldav-client.js';
-import { formatCalendarEventList } from './response-formatters.js';
+import { buildUnusableCopiesNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
 import {
   dataProp,
   etagProp,
@@ -264,6 +264,72 @@ describe('a listed record that came back unreadable is listed with a warning (#2
     assert.equal(result.events.length, 1);
     assert.equal('unreadable' in result.events[0], false);
     assert.equal(formatCalendarEventList(result).includes('unreadable'), false);
+  });
+});
+
+describe('get_calendar_event names a record it matched and could not use (#239)', () => {
+  const unusable = (id: string, copies: string) =>
+    `The event id "${id}" matched a record this server could not use as this event: ${copies}. `
+    + 'Retry the call: this lifts if what was missing comes back.';
+
+  it('get names the record it could not read instead of answering not found', async () => {
+    const byUid = setup({ [WORK]: [{ href: `${WORK}solo.ics`, data: ical('solo@fm'), etag: '"e2"', query: 'nodata' }] });
+    await assert.rejects(byUid.client.getCalendarEventById('solo@fm'), {
+      name: 'Error',
+      message: unusable('solo@fm', `"Work" ("${WORK}solo.ics")`),
+    });
+    const url = `${PERSONAL}real.ics`;
+    const byUrl = setup({ [PERSONAL]: [{ href: url, data: ical('real@fm'), etag: '"ex"', fetch: 'nodata' }] });
+    await assert.rejects(byUrl.client.getCalendarEventById(url), {
+      name: 'Error',
+      message: unusable(url, `"Personal" ("${url}")`),
+    });
+  });
+
+  it('answers with the copy it could use and discloses the one it could not', async () => {
+    const { client } = setup({
+      [PERSONAL]: [{ href: `${PERSONAL}solo.ics`, data: ical('solo@fm', 'Personal copy'), etag: '"e1"' }],
+      [WORK]: [{ href: `${WORK}solo.ics`, data: ical('solo@fm', 'Work copy'), etag: '"e2"', query: 'nodata' }],
+    });
+    const result = await client.getCalendarEventById('solo@fm');
+    assert.equal(result.event.title, 'Personal copy');
+    assert.equal(result.otherCopies, undefined);
+    assert.deepEqual(result.unreadableCopies, [{ calendar: 'Work', url: `${WORK}solo.ics` }]);
+    assert.deepEqual(calendarEventBody(result.event, result.otherCopies, result.unreadableCopies), {
+      ...result.event,
+      unreadableCopies: [{ calendar: 'Work', url: `${WORK}solo.ics` }],
+    });
+    assert.equal(
+      buildUnusableCopiesNote(result.unreadableCopies),
+      `\n\nNote: this event id also matched a record this server could not use as this event: "Work" ("${WORK}solo.ics"). `
+      + 'The event above is a record it could use. update_calendar_event and delete_calendar_event refuse this id while '
+      + 'that record cannot be used.',
+    );
+  });
+
+  // Matched by its url and answered, but with no UID it fails the writes' rule as well.
+  it('does not disclose the answered record as an unusable copy of itself', async () => {
+    const url = `${PERSONAL}nouid.ics`;
+    const noUid = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', 'DTSTART:20260401T100000Z', 'SUMMARY:No UID',
+      'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+    const { client } = setup({ [PERSONAL]: [{ href: url, data: noUid, etag: '"en"' }] });
+    const result = await client.getCalendarEventById(url);
+    assert.equal(result.event.title, 'No UID');
+    assert.equal(result.unreadableCopies, undefined);
+  });
+
+  // A response whose href is the calendar's own names the collection, not a record.
+  it('still answers not found when the only hit is the calendar itself', async () => {
+    const url = `${PERSONAL}real.ics`;
+    const { client } = setup({}, (request) => (request.url === PERSONAL && request.kind === 'multiget'
+      ? { body: multistatus(resp('/dav/calendars/user/probe/personal/', etagProp('"ec"'))), contentType: XML }
+      : undefined));
+    await assert.rejects(client.getCalendarEventById(url), { message: /^Calendar event not found: / });
+  });
+
+  it('has no note when every match could be used', () => {
+    assert.equal(buildUnusableCopiesNote(undefined), '');
+    assert.equal(buildUnusableCopiesNote([]), '');
   });
 });
 

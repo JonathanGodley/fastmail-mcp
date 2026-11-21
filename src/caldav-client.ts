@@ -153,6 +153,11 @@ export interface CalendarEventResult {
   addressedByUrl?: boolean;
   /** Set when the writes would refuse the addressed id (`CalendarObjectLookup.collision`). */
   addressCollision?: { addressedUid: string | undefined };
+  /**
+   * The records the id matched that this server could not use as this event, beside the one it
+   * answered with (#239). Absent, never empty. Never the answered record itself.
+   */
+  unreadableCopies?: CalendarEventCopy[];
   brokenCollections?: BrokenCollections;
 }
 
@@ -3588,6 +3593,20 @@ function eventNotFoundError(eventId: string, broken?: BrokenCollections): Invali
 }
 
 /**
+ * `get_calendar_event`'s answer where the id matched only records it could not use (#239): a
+ * record is there, so "not found" would be false. "Could not use as this event" because the hits
+ * include records read whole but unusable, a task among them.
+ */
+function unusableMatchError(eventId: string, hits: CalendarEventCopy[], broken?: BrokenCollections): Error {
+  return new Error(
+    `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" matched `
+    + `${hits.length === 1 ? 'a record' : `${hits.length} records`} this server could not use as this event: `
+    + `${describeEventCopies(hits)}. Retry the call: this lifts if what was missing comes back.`
+    + describeBrokenCollections(broken),
+  );
+}
+
+/**
  * One copy of an event as a CALLER sees it. The url is the point: it is the only thing that
  * picks out one copy of a duplicated id.
  */
@@ -4457,9 +4476,15 @@ export class CalDAVCalendarClient {
   }
 
   async getCalendarEventById(eventId: string): Promise<CalendarEventResult> {
-    const { matches, addressed, collision, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    const { matches, addressed, collision, unreadable, brokenCollections } = await this.findCalendarObjectByUID(eventId);
+    // A hit at a match's own url is that match failing the writes' stricter rule, not a copy.
+    const answered = new Set(matches.map(m => addressComparisonKey(m.object.url)));
+    const unusable: CalendarEventCopy[] = unreadable
+      .filter(h => !h.wholeAnswer && !answered.has(addressComparisonKey(h.url)))
+      .map(h => ({ calendar: h.calendar, url: h.url }));
     const obj = matches[0]?.object;
     if (!obj) {
+      if (unusable.length > 0) throw unusableMatchError(eventId, unusable, brokenCollections);
       throw eventNotFoundError(eventId, brokenCollections);
     }
     return {
@@ -4470,6 +4495,7 @@ export class CalDAVCalendarClient {
       otherCopies: matches.length > 1 ? matchesToCopies(matches.slice(1)) : undefined,
       addressedByUrl: addressed,
       addressCollision: collision,
+      unreadableCopies: unusable.length > 0 ? unusable : undefined,
       brokenCollections: asBrokenCollectionsField(brokenCollections),
     };
   }

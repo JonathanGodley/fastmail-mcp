@@ -345,9 +345,27 @@ export function buildAmbiguousEventNote(
 export function calendarEventBody(
   event: CalendarEvent,
   otherCopies?: CalendarEventCopy[],
-): CalendarEvent | (CalendarEvent & { otherCopies: CalendarEventCopy[] }) {
+  unreadableCopies?: CalendarEventCopy[],
+): CalendarEvent & { otherCopies?: CalendarEventCopy[]; unreadableCopies?: CalendarEventCopy[] } {
   // Presence is the signal, so an empty list is omitted.
-  return otherCopies && otherCopies.length > 0 ? { ...event, otherCopies } : event;
+  return {
+    ...event,
+    ...(otherCopies && otherCopies.length > 0 && { otherCopies }),
+    ...(unreadableCopies && unreadableCopies.length > 0 && { unreadableCopies }),
+  };
+}
+
+/**
+ * The trailing note `get_calendar_event` carries beside `unreadableCopies` (#239). "Could not use
+ * as this event" because the list holds records read whole but unusable too, a task among them.
+ */
+export function buildUnusableCopiesNote(unreadableCopies?: CalendarEventCopy[]): string {
+  if (!unreadableCopies || unreadableCopies.length === 0) return '';
+  const one = unreadableCopies.length === 1;
+  return `\n\nNote: this event id also matched ${one ? 'a record' : `${unreadableCopies.length} records`} this server `
+    + `could not use as this event: ${describeEventCopies(unreadableCopies)}. The event above is a record it could use. `
+    + 'update_calendar_event and delete_calendar_event refuse this id while '
+    + `${one ? 'that record cannot' : 'those records cannot'} be used.`;
 }
 
 // Appended by the handler after the JSON, so the block stays parseable. Fail-loud signals
