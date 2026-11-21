@@ -856,6 +856,8 @@ export function simplifyContact(raw: any, options?: { verbose?: boolean }): any 
       'id', 'name', 'emails', 'phones', 'organizations', 'notes',
       'addresses', 'titles', 'online', 'photos', 'anniversaries',
     ]);
+    // A field the card itself names `organization` is dropped when the card has a named
+    // organization, whose name already fills `result.organization`; with none, it is copied.
     for (const key of Object.keys(raw)) {
       if (!handledKeys.has(key) && result[key] === undefined && raw[key] !== undefined) {
         result[key] = raw[key];

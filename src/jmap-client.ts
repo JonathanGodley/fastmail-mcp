@@ -1972,6 +1972,7 @@ export class JmapClient {
       ],
     });
 
+    // Read by position, as CONTRIBUTING.md ("JMAP properties") says is safe for a batch like this one.
     const setEntry = response.methodResponses?.[1];
     if (setEntry?.[0] === 'error' && setEntry[1]?.type === 'stateMismatch') {
       throw new Error(
