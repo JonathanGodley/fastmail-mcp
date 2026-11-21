@@ -1539,7 +1539,7 @@ describe('CalDAVCalendarClient event lookup', () => {
   /** get_calendar_event where the id matched only records it could not use (#239). */
   const unusableMatchText = (id: string, copies: string) =>
     `The event id "${id}" matched a record this server could not use as this event: ${copies}. `
-    + 'Retry the call: this lifts if what was missing comes back.';
+    + 'A retry helps only if the server failed to send the record whole.';
 
   // Not "Calendar event not found": that answers about the account, for a call that never named
   // an event.

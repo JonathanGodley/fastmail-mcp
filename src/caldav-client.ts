@@ -3599,7 +3599,7 @@ function unusableMatchError(eventId: string, hits: CalendarEventCopy[], broken?:
   return new Error(
     `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" matched `
     + `${hits.length === 1 ? 'a record' : `${hits.length} records`} this server could not use as this event: `
-    + `${describeEventCopies(hits)}. Retry the call: this lifts if what was missing comes back.`
+    + `${describeEventCopies(hits)}. A retry helps only if the server failed to send the record whole.`
     + describeBrokenCollections(broken),
   );
 }

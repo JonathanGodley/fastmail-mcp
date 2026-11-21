@@ -270,7 +270,7 @@ describe('a listed record that came back unreadable is listed with a warning (#2
 describe('get_calendar_event names a record it matched and could not use (#239)', () => {
   const unusable = (id: string, copies: string) =>
     `The event id "${id}" matched a record this server could not use as this event: ${copies}. `
-    + 'Retry the call: this lifts if what was missing comes back.';
+    + 'A retry helps only if the server failed to send the record whole.';
 
   it('get names the record it could not read instead of answering not found', async () => {
     const byUid = setup({ [WORK]: [{ href: `${WORK}solo.ics`, data: ical('solo@fm'), etag: '"e2"', query: 'nodata' }] });
