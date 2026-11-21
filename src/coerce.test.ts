@@ -887,8 +887,9 @@ describe('redactBearerTokens', () => {
 
   it('property: hides every character either reference order hides, beyond the restored tail', () => {
     // Registered secrets are module state shared by this file. The generator's only lowercase
-    // letters are those of "bearer", "basic", "fmu" and "a", so no secret registered elsewhere in
-    // this file can occur in an input except the QX ones above, which are listed here too.
+    // letters are those of "bearer", "basic", "fmu" and "a", and its pieces hold no other QX
+    // secret, so of the secrets registered elsewhere in this file only the first three below can
+    // occur in an input.
     const secrets = [
       'QXPQRSTUVW', 'Bearer QXBEARER1', 'QX ER TY)"]', // the pins above
       'QY Z1)"]', // whitespace and tail characters
