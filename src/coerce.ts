@@ -40,9 +40,11 @@ export class InvalidInputError extends Error {
 // pass it would take the closing quote, comma or `…` cut marker written after the value. So a
 // marker followed only by closing characters, however many, is left alone: that run can only
 // be what the server wrote. On a raw value up to BEARER_TAIL_MAX closing characters ending the
-// match are put back, never one inside a registered secret or marker; of the set only `.` can
-// occur in an RFC 6750 token. Three covers `…",`; a raw value whose own closing run plus the
-// server's passes three keeps only the last three (`"Bearer abc…"),` loses the `…`).
+// match are put back, never one inside a registered secret or marker, and no restored character
+// can belong to a token: of the set only `.` occurs in an RFC 6750 b64token, so a `.` comes
+// back only after a character that cannot (`").` whole; `abc...` keeps none). Three covers
+// `…",`; a raw value whose own closing run plus the server's passes three keeps only the last
+// three (`"Bearer abc…"),` loses the `…`).
 const BEARER_TAIL_CHARS = `"',;:)\\]}.\u2026`;
 const BEARER_TAIL_MAX = 3;
 const AFTER_MARKER = `\\[REDACTED\\][${BEARER_TAIL_CHARS}]*(?:\\s|$)`;
@@ -84,7 +86,8 @@ const BASIC_AT = new RegExp(BASIC_PATTERN.source, 'iy');
  * Hidden: each registered secret occurrence and existing marker (sealed: never restored), a
  * Basic blob, a Fastmail token after `fmu`, and a Bearer value less its restored tail. Each
  * maximal hidden run is written as one upper-case marker, so a lower-case marker is rewritten
- * and adjacent markers or secrets merge into one. Where spans overlap, hidden wins: a `Bearer`
+ * and adjacent markers or secrets merge into one, including across a label's collapsed
+ * whitespace. Where spans overlap, hidden wins: a `Bearer`
  * or `Basic` word inside another span is hidden with it. A visible `Bearer` or `Basic` label,
  * including one before a marker left alone, is written in that case with one space after it,
  * even when the space was a secret's own whitespace; a Bearer value always begins with a marker.
@@ -92,7 +95,9 @@ const BASIC_AT = new RegExp(BASIC_PATTERN.source, 'iy');
  * shapes. When the whitespace ending a Bearer value, or ending a kept marker's closing run, is
  * hidden (a secret's own whitespace), nothing in it is restored and hiding extends to the next
  * visible whitespace, so the output never carries a marker glued to text a later pass would
- * take as part of the value.
+ * take as part of the value. That over-hides: a secret containing whitespace right after
+ * `Bearer` takes the delimiters after it up to the next visible whitespace, or the rest of the
+ * text when none follows.
  */
 export function redactBearerTokens(input: string): string {
   const n = input.length;
@@ -117,8 +122,10 @@ export function redactBearerTokens(input: string): string {
   };
 
   for (const secret of KNOWN_SECRETS) {
+    let covered = 0;
     for (let at = input.indexOf(secret); at !== -1; at = input.indexOf(secret, at + 1)) {
-      hide(at, at + secret.length, true);
+      hide(Math.max(at, covered), at + secret.length, true);
+      covered = at + secret.length;
     }
   }
   for (const m of input.matchAll(MARKER_PATTERN)) hide(m.index, m.index + m[0].length, true);
@@ -145,12 +152,22 @@ export function redactBearerTokens(input: string): string {
     valueStarts.add(start);
     values.push({ start, end, tail: m[0].match(BEARER_TAIL)?.[0].length ?? 0 });
   }
+  // In order of end, so an extension starts where an earlier one stopped and the whole pass
+  // stays linear. Order cannot change the result: an extension stops at visible whitespace, and
+  // a restore touches only closing characters before one.
+  values.sort((a, b) => a.end - b.end);
+  let reach = 0;
   for (const { start, end, tail } of values) {
     if (end < n && hidden[end]) {
       hide(start, end);
-      for (let i = end; i < n && (hidden[i] || !/\s/.test(input[i])); i++) hidden[i] = 1;
+      let i = Math.max(end, reach);
+      while (i < n && (hidden[i] || !/\s/.test(input[i]))) hidden[i++] = 1;
+      reach = i;
     } else {
-      for (let i = end - tail; i < end; i++) if (!sealed[i]) hidden[i] = 0;
+      let from = end;
+      while (from > end - tail && !sealed[from - 1]) from--;
+      while (from < end && input[from] === '.') from++;
+      for (let i = from; i < end; i++) hidden[i] = 0;
     }
   }
 
@@ -162,8 +179,10 @@ export function redactBearerTokens(input: string): string {
       inRun = true;
       if (hidden[i]) continue;
     }
+    const ch = label[i] ?? input[i];
+    if (ch === '') continue; // collapsed label whitespace does not end a hidden run
     inRun = false;
-    out += label[i] ?? input[i];
+    out += ch;
   }
   return out;
 }

@@ -740,7 +740,8 @@ describe('redactBearerTokens', () => {
     assert.equal(redactBearerTokens(once), once);
   });
 
-  for (const ch of ['"', "'", ',', ';', ':', ')', ']', '}', '.', '…']) {
+  // `.` is pinned below: alone it could end a token, so it is not put back.
+  for (const ch of ['"', "'", ',', ';', ':', ')', ']', '}', '…']) {
     it(`puts back a closing ${JSON.stringify(ch)} that ends a raw value`, () => {
       assert.equal(redactBearerTokens(`Bearer abc${ch} next`), `Bearer [REDACTED]${ch} next`);
     });
@@ -756,7 +757,7 @@ describe('redactBearerTokens', () => {
 
   it('puts back at most three closing characters', () => {
     assert.equal(redactBearerTokens(`Bearer s3cr3t);:,.'"]}`), 'Bearer [REDACTED]"]}');
-    assert.equal(redactBearerTokens('Bearer ....'), 'Bearer [REDACTED]...');
+    assert.equal(redactBearerTokens('Bearer ,,,,'), 'Bearer [REDACTED],,,');
   });
 
   for (const input of [
@@ -830,7 +831,7 @@ describe('redactBearerTokens', () => {
   it('hides the rest of a Bearer value when a registered secret holds "Bearer "', () => {
     registerSecret('Bearer QXBEARER1'); // allowlist-secret (synthetic value carrying the word)
     // The word is part of the secret, so it is hidden with it.
-    assertStable('Bearer QXBEARER1Z9PQRS.', '[REDACTED].'); // allowlist-secret (synthetic value registered above)
+    assertStable('Bearer QXBEARER1Z9PQRS.', '[REDACTED]'); // allowlist-secret (synthetic value registered above)
   });
 
   it('hides a Basic blob that follows a registered secret with whitespace after Bearer', () => {
@@ -883,6 +884,29 @@ describe('redactBearerTokens', () => {
     registerSecret('QXADJ001');
     registerSecret('QXADJ002');
     assertStable('a QXADJ001QXADJ002 b', 'a [REDACTED] b');
+  });
+
+  it('restores no "." that could end a token, only one after a character that cannot', () => {
+    assertStable('Bearer abc... next', 'Bearer [REDACTED] next');
+    assertStable('Bearer abc.', 'Bearer [REDACTED]');
+    assertStable('Bearer abc").', 'Bearer [REDACTED]").');
+    assertStable('Bearer )', 'Bearer [REDACTED])');
+  });
+
+  it('writes adjacent hidden runs split only by collapsed label whitespace as one marker', () => {
+    registerSecret('QQQQBasic ');
+    assertStable('QQQQBasic  \tBearer  x', '[REDACTED] [REDACTED]');
+  });
+
+  it('runs in linear time when many Bearer values glue to a secret holding "Bearer "', () => {
+    // Wall-clock bound. Linear code takes tens of milliseconds here; the quadratic glue
+    // extension this guards against took seconds.
+    registerSecret('x Bearer '); // allowlist-secret (synthetic value carrying the word)
+    const input = `Bearer ${'x Bearer '.repeat(500_000 / 9)}`; // allowlist-secret (synthetic, registered above)
+    const started = performance.now();
+    const out = redactBearerTokens(input);
+    assert.ok(performance.now() - started < 5000, `took ${performance.now() - started} ms`);
+    assert.ok(!out.includes('x'), out.slice(0, 80));
   });
 
   it('property: hides every character either reference order hides, beyond the restored tail', () => {
@@ -948,8 +972,20 @@ describe('redactBearerTokens', () => {
       for (const m of input.matchAll(/Bearer\s+\S+/gi)) { // allowlist-secret (pattern, not a credential)
         const end = m.index + m[0].length;
         const afterMarker = /\s\[REDACTED\](["',;:)\]}.…]*)$/i.exec(m[0]);
-        const tail = afterMarker ? afterMarker[1] : (m[0].match(/["',;:)\]}.…]{1,3}$/)?.[0] ?? '');
-        for (let i = end - tail.length; i < end; i++) if (!sealed.has(i)) allowed.add(i);
+        if (afterMarker) {
+          for (let i = end - afterMarker[1].length; i < end; i++) allowed.add(i);
+          continue;
+        }
+        // A raw value: of its last three closing characters, those outside any secret or marker,
+        // and of those only ones that cannot be in an RFC 6750 b64token, or that follow one
+        // that cannot.
+        const tail = m[0].match(/["',;:)\]}.…]{1,3}$/)?.[0] ?? '';
+        let pastToken = false;
+        for (let i = end - tail.length; i < end; i++) {
+          if (sealed.has(i)) continue;
+          if (!/[A-Za-z0-9\-._~+/=]/.test(input[i])) pastToken = true;
+          if (pastToken) allowed.add(i);
+        }
       }
       return allowed;
     };
