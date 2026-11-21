@@ -3272,7 +3272,7 @@ interface UnreadableHit extends CalendarEventCopy {
   addressed: boolean;
   /** The hit sits at its calendar's own url, which names the collection, so it is not a record. */
   wholeAnswer: boolean;
-  /** The UID its data holds, where that parses; a different one makes it no copy for the read. */
+  /** The UID its data holds, where that parses. */
   ownUid: string | undefined;
   /**
    * Its url lies under the calendar it was read from. The server chooses a response's href and
@@ -4516,7 +4516,7 @@ export class CalDAVCalendarClient {
     const { matches, addressed, collision, unreadable, brokenCollections } = await this.findCalendarObjectByUID(eventId);
     // A hit at a match's own url is that match failing the writes' stricter rule, not a copy.
     const answered = new Set(matches.map(m => addressComparisonKey(m.object.url)));
-    // A UID-query hit read whole under another UID is not a copy (the server matches case-
+    // A UID-query hit whose data holds another UID is not a copy (the server matches case-
     // insensitively); the writes still refuse on it, as they cannot tell what they did not write.
     const otherUid = (h: UnreadableHit) => !h.addressed && !!h.ownUid && h.ownUid !== eventId.trim();
     const unusable: UnusableCopy[] = unreadable
