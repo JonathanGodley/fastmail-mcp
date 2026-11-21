@@ -5478,9 +5478,10 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     });
 
     it('refuses an occurrence that has been edited on its own', async () => {
-      await refuses(GOLDEN, '2026-08-28T23:00:00Z', /has been edited on its own/);
+      const EDITED = /has been edited on its own, and this server does not delete an edited occurrence\. Nothing was deleted\.$/;
+      await refuses(GOLDEN, '2026-08-28T23:00:00Z', EDITED);
       // Named in another frame, it is still the same occurrence.
-      await refuses(GOLDEN, '2026-08-29T09:00:00', /has been edited on its own/);
+      await refuses(GOLDEN, '2026-08-29T09:00:00', EDITED);
     });
 
     it('refuses when the server\'s expansion lacks the resource or the occurrence', async () => {
@@ -5517,8 +5518,8 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       assertNothingWritten(unexpanded.mockDAVClient);
     });
 
-    const FIRST = /is the first occurrence of "[^"]+", which this server never removes/;
-    const FIRST_NOT_LISTED = /the calendar server does not list the first occurrence of "[^"]+", unedited, at the start this server reads/;
+    const FIRST = /is the first occurrence of "[^"]+", which this server never removes, so a series can never be left empty\. Nothing was deleted\.$/;
+    const FIRST_NOT_LISTED = /the calendar server does not list the first occurrence of "[^"]+", unedited, at the start this server reads.* Nothing was deleted\.$/;
 
     it('refuses the first occurrence of any series, bounded or not', async () => {
       await refuses(GOLDEN, '2026-08-21T23:00:00Z', FIRST);
