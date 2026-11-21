@@ -734,6 +734,47 @@ describe('redactBearerTokens', () => {
     assert.equal(redactBearerTokens(original), original);
   });
 
+  it('leaves an already-redacted value and its closing quote alone on a second pass', () => {
+    const once = redactBearerTokens('unknown key(s): "Bearer x", "k2".');
+    assert.equal(once, 'unknown key(s): "Bearer [REDACTED]", "k2".');
+    assert.equal(redactBearerTokens(once), once);
+  });
+
+  for (const ch of ['"', "'", ',', ';', ':', ')', ']', '}', '.', '…']) {
+    it(`puts back a closing ${JSON.stringify(ch)} that ends a raw value`, () => {
+      assert.equal(redactBearerTokens(`Bearer abc${ch} next`), `Bearer [REDACTED]${ch} next`);
+    });
+  }
+
+  it('keeps the cut marker and closing quote after a truncated value', () => {
+    assert.equal(redactBearerTokens('failed: "Bearer abc…"'), 'failed: "Bearer [REDACTED]…"');
+  });
+
+  it('puts back at most three closing characters', () => {
+    assert.equal(redactBearerTokens(`Bearer s3cr3t);:,.'"]}`), 'Bearer [REDACTED]"]}');
+    assert.equal(redactBearerTokens('Bearer ....'), 'Bearer [REDACTED]...');
+  });
+
+  for (const input of [
+    'Bearer [REDACTED]sk-SECRET',
+    'Bearer [redacted]SECRET',
+    'Bearer\t[REDACTED]SECRET',
+    'Bearer [REDACTED].SECRET',
+  ]) {
+    it(`still hides a value glued to, or spelled like, an earlier marker: ${JSON.stringify(input)}`, () => {
+      assert.equal(redactBearerTokens(input), 'Bearer [REDACTED]');
+    });
+  }
+
+  it('still hides a real-looking token followed by punctuation', () => {
+    const out = redactBearerTokens('auth "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl", retry'); // allowlist-secret (synthetic JWT shape: base64 of {"alg":"HS256"}, {"sub":"1"}, "signature")
+    assert.equal(out, 'auth "Bearer [REDACTED]", retry');
+  });
+
+  it('accepted residue: in unspaced JSON-like text the rest of the run is still lost', () => {
+    // Nothing leaks; the values after the token are dropped. Structured output uses redactedJson.
+    assert.equal(redactBearerTokens('{"a":"Bearer x","b":"y"}'), '{"a":"Bearer [REDACTED]"}');
+  });
 });
 
 describe('redactedJson', () => {

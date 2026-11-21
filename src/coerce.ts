@@ -34,7 +34,21 @@ export class InvalidInputError extends Error {
 
 // Credential-shaped substrings scrubbed from anything reflected back to the caller.
 // Deliberately narrow: provider error messages are what the caller recovers from.
-const BEARER_PATTERN = /Bearer\s+\S+/gi;
+//
+// Error text is redacted twice: once as each untrusted value is rendered, and again over the
+// finished message in the CallTool catch. `\S+` runs to the next whitespace, so on that second
+// pass it would take the closing quote, comma or `…` cut marker the server wrote after the
+// value. Two rules keep those: a marker followed only by such a tail is left alone, and up to
+// BEARER_TAIL_MAX closing characters ending a matched value are put back after the marker.
+// Of them only `.` can occur in an RFC 6750 token, so the most a restore shows of a
+// credential is three trailing dots. The longest tail the server writes is `…",`.
+const BEARER_TAIL_CHARS = `"',;:)\\]}.\u2026`;
+const BEARER_TAIL_MAX = 3;
+const BEARER_PATTERN = new RegExp(
+  `Bearer\\s+(?!\\[REDACTED\\][${BEARER_TAIL_CHARS}]{0,${BEARER_TAIL_MAX}}(?:\\s|$))\\S+`,
+  'gi',
+);
+const BEARER_TAIL = new RegExp(`[${BEARER_TAIL_CHARS}]{1,${BEARER_TAIL_MAX}}$`);
 // The CalDAV path authenticates with HTTP Basic, so a reflected header or a
 // tsdav error carries the base64 credential blob — redact that shape too.
 const BASIC_PATTERN = /Basic\s+[A-Za-z0-9+/=]+/gi;
@@ -62,7 +76,7 @@ function escapeRegExp(s: string): string {
 
 export function redactBearerTokens(input: string): string {
   let out = input
-    .replace(BEARER_PATTERN, 'Bearer [REDACTED]')
+    .replace(BEARER_PATTERN, (match) => `Bearer [REDACTED]${match.match(BEARER_TAIL)?.[0] ?? ''}`)
     .replace(BASIC_PATTERN, 'Basic [REDACTED]')
     .replace(FASTMAIL_TOKEN_PATTERN, 'fmu[REDACTED]');
   for (const secret of KNOWN_SECRETS) {
@@ -127,9 +141,10 @@ export function describeUntrustedAt(value: unknown, max: number): string {
  * Serialise a value to JSON with every string inside it redacted.
  *
  * The ONLY safe way to redact a structured result item. BEARER_PATTERN's `\S+` runs to the
- * next whitespace, which over a finished document is the string's closing quote and comma,
- * so redacting the serialised text eats delimiters and the item stops parsing (a mailbox
- * named "Bearer Bonds" is enough). Per value there is no trailing delimiter to swallow.
+ * next whitespace, which over a finished document can span several values, and gives back at
+ * most three closing characters: `["Bearer Bonds","Inbox"]` comes out as
+ * `["Bearer [REDACTED]"]`, which parses with "Inbox" silently gone, and a deeper nesting
+ * stops parsing. Per value there is no trailing delimiter to swallow.
  * Prose calls redactBearerTokens directly; anything JSON.stringify touches comes here.
  *
  * Compact like toolJson below: no indent argument.
