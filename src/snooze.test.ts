@@ -322,7 +322,6 @@ describe('snooze tool surface', () => {
       }
     }
 
-    // Any boolean-typed parameter, narrow or lenient, has to be in `coerced` above.
     const booleanTyped = SNOOZE_TOOLS.flatMap(t =>
       Object.entries(t.inputSchema.properties as any)
         .filter(([, prop]: [string, any]) => prop.type === 'boolean' || (Array.isArray(prop.type) && prop.type.includes('boolean')))
