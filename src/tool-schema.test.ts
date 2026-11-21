@@ -58,7 +58,7 @@
 // Where redaction does run: redactedJson is the only serialiser that redacts, and it has one
 // call site (the bulk-operations result in index.ts). Success payloads on every other path
 // are not redacted. Every error reply is redacted centrally in index.ts's CallTool catch, so
-// a bearer token in a server error description is caught there, not here.
+// a registered credential in a server error description is caught there, not here.
 //
 // It is not a small cost. Indentation is bytes the reader pays for that nothing parses, and
 // it scales with the number of JSON tokens rather than with the content, so it varies with a
@@ -778,6 +778,7 @@ describe('archive_email is wired to the strict string-array coercer', () => {
     // test in the repo.
     const lines = readLines('index.ts');
     const start = lines.findIndex((l) => l.includes("case 'archive_email':"));
+    assert.ok(start !== -1, "index.ts has no case 'archive_email'");
     const end = lines.findIndex((l, i) => i > start && /^\s*case '/.test(l));
     const body = lines.slice(start, end > start ? end : start + 60).join('\n');
     assert.match(
@@ -785,17 +786,18 @@ describe('archive_email is wired to the strict string-array coercer', () => {
       /redactedJson\(\{\s*counts: result\.counts,\s*results: result\.results\s*\}/,
       'the archive_email JSON content item must carry counts as well as results',
     );
-    // And it must go through redactedJson rather than redacting the finished document:
-    // BEARER_PATTERN runs to the next whitespace, so over serialised JSON it eats the quote
-    // and comma that terminate a value and the item stops parsing. See redactedJson in
-    // coerce.ts; the failing input is a mailbox named "Bearer Bonds".
+    // And it must go through redactedJson rather than redacting the finished document, where
+    // a secret carrying a quote or backslash is escaped and no longer matches. See redactedJson
+    // in coerce.ts. The name checked below must be the redaction function's real name, or the
+    // negative match passes whatever the code does.
+    assert.match(readLines('coerce.ts').join('\n'), /export function redactSecrets\(/, 'coerce.ts no longer exports redactSecrets');
     // Comment lines are stripped first: the code carries a comment naming the wrong form in
     // order to warn against it, and a negative match over the raw text would fire on the
     // warning rather than on a real regression.
     const code = body.split('\n').filter((l) => !l.trimStart().startsWith('//')).join('\n');
     assert.doesNotMatch(
       code,
-      /redactBearerTokens\(\s*JSON\.stringify/,
+      /redactSecrets\(\s*JSON\.stringify/,
       'the archive_email JSON item must not be redacted after serialisation',
     );
   });
@@ -1238,7 +1240,7 @@ describe('the compact-serialisation scan sees the forms that used to escape it',
     ['an indent held in a constant', 'const s = JSON.stringify(v, null, INDENT);'],
     ['a named replacer function', 'const s = JSON.stringify(v, redact, 2);'],
     ['an inline arrow replacer, whose parameter list contains a comma', 'const s = JSON.stringify(v, (k, val) => val, 2);'],
-    ['the exact shape redactedJson had before the indent was removed', 'return JSON.stringify(value, (_key, v) => (typeof v === "string" ? redactBearerTokens(v) : v), 2);'],
+    ['the exact shape redactedJson had before the indent was removed', 'return JSON.stringify(value, (_key, v) => (typeof v === "string" ? redactSecrets(v) : v), 2);'],
     ['a call wrapped across several lines', 'const s = JSON.stringify(\n  payload,\n  null,\n  2\n);'],
     ['an object argument whose own commas are nested', 'const s = JSON.stringify({ a: 1, b: [2, 3] }, null, 2);'],
     ['a call inside a template interpolation', 'const s = `x ${JSON.stringify(v, null, 2)} y`;'],

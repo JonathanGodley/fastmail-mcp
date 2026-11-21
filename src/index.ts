@@ -14,7 +14,7 @@ import { ContactsCalendarClient } from './contacts-calendar.js';
 import { BROKEN_COLLECTION_PHRASE, CALENDAR_MAX_OCCURRENCES_PER_SERIES, CALENDAR_UID_ECHO_LIMIT, CalDAVCalendarClient, TRANSPARENCY_VALUES, buildEtcGmtZoneNote, buildMalformedStructureNote, deleteCalendarEventContent, describeCreateCalendarEventResult, describeUpdateCalendarEventResult } from './caldav-client.js';
 import { setDefaultTimezone } from './email-formatter.js';
 import { buildBrokenCollectionNote, buildAmbiguousEventNote, buildUnusableCopiesNote, calendarEventBody, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE, buildAttachmentListContent, simplifyIdentity, formatDraftEmailResult, formatEditDraftResult, formatSendDraftResult, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, formatSavedAttachment } from './response-formatters.js';
-import { coerceStringArray, coerceStringArrayStrict, coerceBool, LENIENT_BOOL_DESC, describeUntrusted, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactBearerTokens, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
+import { coerceStringArray, coerceStringArrayStrict, coerceBool, LENIENT_BOOL_DESC, describeUntrusted, describeUntrustedAt, etcGmtOffsetNote, clampLimit, redactSecrets, redactedJson, toolJson, registerSecret, assertKnownParams, coerceParticipants, PathAccessError, InvalidInputError, resolveUsableTimezone, resolveConfiguredTimezone } from './coerce.js';
 import { composeDraftEmail } from './draft-email-handler.js';
 import { sendDraftAndMaintainKeywords } from './send-draft-handler.js';
 import { editDraft } from './edit-draft-handler.js';
@@ -28,6 +28,7 @@ import { listEmailsTool, searchEmailsTool } from './email-list-handler.js';
 import { getEmailTool } from './email-get-handler.js';
 import { SNOOZE_TOOLS, WebSessionTransport, listSnoozedEmails, snoozeEmail, unsnoozeEmail } from './snooze.js';
 import createDebug from 'debug';
+import { getBasicAuthHeaders } from 'tsdav';
 
 // The calendar text bounds, rendered once in KB for the tool descriptions below so the
 // documented numbers can never drift from the numbers actually enforced.
@@ -37,7 +38,7 @@ const MAX_ICAL_TOTAL_KB = MAX_ICAL_TOTAL_BYTES / 1024;
 // Silence tsdav's debug logging. tsdav logs the HTTP Basic credential as bare base64
 // ("tsdav:authHelper Basic auth token generated: <base64 of user:password>") whenever
 // DEBUG is set, straight to stderr — it never passes through this file's redaction
-// boundary, so redactBearerTokens cannot help. Suppressing the namespaces is the only
+// boundary, so redactSecrets cannot help. Suppressing the namespaces is the only
 // control. Each detail below was established by running it; re-establish before changing:
 //
 //   * The skip is `-tsdav*` with NO colon. `-tsdav:*` matches only colon-prefixed
@@ -102,9 +103,6 @@ function getAuthConfig(): FastmailConfig {
       'FASTMAIL_API_TOKEN is required: set it in the environment or in ~/.fastmail-mcp/.env'
     );
   }
-  // Register for value-based redaction so an exact token occurrence in any error
-  // string is scrubbed even when it doesn't match the `fmu…` token-shape pattern
-  // (self-hosted JMAP servers issue tokens of any shape).
   registerSecret(apiToken);
 
   const baseInfo = findEnvValue([
@@ -182,17 +180,17 @@ function initializeCalDAVClient(): CalDAVCalendarClient | null {
 
   if (!username || !password) return null;
 
-  // Register the CalDAV password for value-based redaction — a Basic-auth
-  // credential matches none of the token-shape patterns. The username is
-  // deliberately NOT registered: it is an email address, and exact-match
-  // scrubbing of it would mangle legitimate output (every message from or to
-  // that address). Note the scrubber ignores values under 8 characters, so a
-  // very short password is not covered either.
+  // The username is deliberately NOT registered: it is an email address, and hiding it would
+  // mangle every message from or to that address.
   registerSecret(password);
-  // tsdav transmits and logs the Basic credential as bare base64 with no
-  // "Basic " prefix, which BASIC_PATTERN cannot match — register the encoded
-  // form as its own literal secret.
-  registerSecret(Buffer.from(`${username}:${password}`).toString('base64'));
+  // The base64 credential in the form tsdav sends (Latin-1, not UTF-8). tsdav throws on a
+  // character above U+00FF, and then cannot send the credential either, so there is nothing
+  // more to register.
+  try {
+    registerSecret(getBasicAuthHeaders({ username, password }).authorization?.replace(/^Basic /, ''));
+  } catch {
+    // Nothing tsdav can send.
+  }
 
   // The ORGANIZER display name is resolved here, not read from process.env inside the
   // CalDAV client, so every env-derived setting goes through the one four-name lookup
@@ -2397,8 +2395,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             // catch never sees it. Redaction is ALL it gets, deliberately: unlike the prose it
             // is not passed through describePart (a bidi override survives JSON quoting),
             // because it is DATA and rewriting names would corrupt the values it conveys.
-            // redactedJson, NOT redactBearerTokens(JSON.stringify(...)): redacting a finished
-            // document lets the bearer pattern eat a value's delimiters. See coerce.ts.
+            // redactedJson, NOT redactSecrets(JSON.stringify(...)): in a finished document an
+            // escaped secret no longer matches. See coerce.ts.
             { type: 'text', text: redactedJson({ counts: result.counts, results: result.results }) },
           ],
         };
@@ -2490,7 +2488,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Path-confinement rejections go out as InvalidParams so the caller sees why.
           // Redacted here because this branch short-circuits the top-level catch.
           if (error instanceof PathAccessError) {
-            throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
+            throw new McpError(ErrorCode.InvalidParams, redactSecrets(error.message));
           }
           throw error;
         }
@@ -2524,7 +2522,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (error instanceof PathAccessError || error instanceof InvalidInputError) {
             throw error;
           }
-          throw new McpError(ErrorCode.InternalError, `Thread access failed: ${redactBearerTokens(error instanceof Error ? error.message : String(error))}`);
+          throw new McpError(ErrorCode.InternalError, `Thread access failed: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
         }
       }
 
@@ -2784,7 +2782,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: "${describeUntrusted(name)}"`);
     }
   } catch (error) {
-    // EVERY branch below runs its message through redactBearerTokens, with no exemption:
+    // EVERY branch below runs its message through redactSecrets, with no exemption:
     // this is the single choke point where error text becomes tool output, so "no
     // unredacted error text reaches tool output" stays a grep anyone can verify.
     if (error instanceof McpError) {
@@ -2792,21 +2790,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // message with "MCP error <code>: ", so re-wrapping would double the prefix.
       // `.data` is deliberately left alone: nothing here populates it. Revisit if
       // anything starts setting it.
-      error.message = redactBearerTokens(error.message);
+      error.message = redactSecrets(error.message);
       throw error;
     }
     // Caller-input errors (e.g. an attachment rejection from the compose handlers, which
     // have no local catch) map to InvalidParams rather than the generic wrap below.
     if (error instanceof PathAccessError) {
-      throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
+      throw new McpError(ErrorCode.InvalidParams, redactSecrets(error.message));
     }
     if (error instanceof InvalidInputError) {
-      throw new McpError(ErrorCode.InvalidParams, redactBearerTokens(error.message));
+      throw new McpError(ErrorCode.InvalidParams, redactSecrets(error.message));
     }
     const raw = error instanceof Error ? error.message : String(error);
     throw new McpError(
       ErrorCode.InternalError,
-      `Tool execution failed: ${redactBearerTokens(raw)}`
+      `Tool execution failed: ${redactSecrets(raw)}`
     );
   }
 });

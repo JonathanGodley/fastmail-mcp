@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import { buildJoins, echoJoinLine, insertedBlocks, JOIN_LINE_ECHO_LIMIT, JOIN_MARKUP_ECHO_LIMIT } from './body-joins.js';
 import type { InsertedBlock } from './body-joins.js';
 import { expandBodyTokens } from './body-tokens.js';
+import { registerSecret } from './coerce.js';
+
+// A join shows the account's own body text, so even a registered secret in it is shown as
+// written. Each test below that carries this value would go red if a join path redacted.
+const REGISTERED = 'zzQX-body-text-synthetic';
+registerSecret(REGISTERED);
 
 /** Expand `authored` with the given blocks and return the stored text and where each landed. */
 function expand(authored: string, signature = 'SIG', quote?: string): { text: string; blocks: InsertedBlock[] } {
@@ -53,19 +59,19 @@ describe('body joins — text parts', () => {
     assert.equal(quote.blockOmitted, 2);
   });
 
-  it('redacts, neutralises and bounds a history line, beside a join and in its own', () => {
+  it('neutralises and bounds a history line, beside a join and in its own, and does not redact it', () => {
     const hostile = 'A' + String.fromCharCode(0x202e) + '"B' + 'x'.repeat(200);
-    const { text, blocks } = expand('{{signature}}\n{{quote}}', 'SIG', `token Bearer\nabcdefghijklmnopqrstuvwxyz\n${hostile}`);
+    const { text, blocks } = expand('{{signature}}\n{{quote}}', 'SIG', `token ${REGISTERED}\n${hostile}`);
     const [sig, quote] = buildJoins('textBody', text, blocks);
-    assert.equal(sig.below[0], 'token Bearer [REDACTED]');
+    assert.equal(sig.below[0], `token ${REGISTERED}`);
     assert.equal(sig.below[1], quote.block[quote.block.length - 1]);
     const last = quote.block[quote.block.length - 1];
     assert.ok(last.startsWith("A'B") && last.endsWith('…') && [...last].length === JOIN_LINE_ECHO_LIMIT + 1, last);
   });
 
-  it('redacts the text before the block whole, so a credential split across lines is caught', () => {
-    const { text, blocks } = expand('auth Bearer\n\nabcdefghijklmnopqrstuvwxyz\n{{signature}}');
-    assert.deepEqual(buildJoins('textBody', text, blocks)[0].above, ['auth Bearer [REDACTED]']);
+  it('shows the text before the block as written', () => {
+    const { text, blocks } = expand(`auth ${REGISTERED}\n{{signature}}`);
+    assert.deepEqual(buildJoins('textBody', text, blocks)[0].above, [`auth ${REGISTERED}`]);
   });
 
   it('counts a blank run at the very start of the body', () => {
@@ -122,16 +128,16 @@ describe('body joins — text parts', () => {
     assert.deepEqual([join.above, join.block, join.below], [['Hi'], [], ['Bye']]);
   });
 
-  it('redacts caller text and an earlier block together, so a credential across them is caught', () => {
-    const stored = 'auth Bearer\nabcdefghijklmnopqrstuvwxyz\nSIG2';
-    const first = stored.indexOf('abc');
+  it('shows an inserted block, and an earlier block above a later one, as written', () => {
+    const stored = `auth\n${REGISTERED}\nSIG2`;
+    const first = stored.indexOf(REGISTERED);
     const blocks: InsertedBlock[] = [
       { token: 'signature', start: stored.indexOf('SIG2'), end: stored.length },
-      { token: 'signature', start: first, end: first + 26 },
+      { token: 'signature', start: first, end: first + REGISTERED.length },
     ];
     const joins = buildJoins('textBody', stored, blocks);
-    assert.deepEqual(joins.map((j) => j.block), [['abcdefghijklmnopqrstuvwxyz'], ['SIG2']], 'joins come back in body order');
-    assert.deepEqual(joins[1].above, ['auth Bearer [REDACTED]']);
+    assert.deepEqual(joins.map((j) => j.block), [[REGISTERED], ['SIG2']], 'joins come back in body order');
+    assert.deepEqual(joins[1].above, ['auth', REGISTERED]);
   });
 
   it('trims an echoed line', () => {
@@ -171,7 +177,7 @@ describe('body joins — html parts', () => {
     assert.equal(buildJoins('htmlBody', t2, b2)[0].markupBelow, '');
   });
 
-  it('cuts a long run on the side away from the token, and redacts it first', () => {
+  it('cuts a long run on the side away from the token, and does not redact it', () => {
     const wide = `<div style="${'a'.repeat(200)}">`;
     const { text, blocks } = expand(`<p>x</p>${wide}{{signature}}${wide}<p>y</p>`);
     const [join] = buildJoins('htmlBody', text, blocks);
@@ -180,9 +186,8 @@ describe('body joins — html parts', () => {
     assert.ok(join.markupBelow!.startsWith('<div') && join.markupBelow!.endsWith('a…'), join.markupBelow);
     assert.equal([...join.markupBelow!].length, JOIN_MARKUP_ECHO_LIMIT + 1);
 
-    const secret = '<a title="Bearer not-a-token">';
-    const { text: t2, blocks: b2 } = expand(`${secret}{{signature}}`);
-    assert.equal(buildJoins('htmlBody', t2, b2)[0].markupAbove, "<a title='Bearer [REDACTED]");
+    const { text: t2, blocks: b2 } = expand(`<a title="${REGISTERED}">{{signature}}`);
+    assert.equal(buildJoins('htmlBody', t2, b2)[0].markupAbove, `<a title='${REGISTERED}'>`);
   });
 
   it('says a block that renders no text renders none, and shows a history block by its rendered lines', () => {
@@ -299,9 +304,9 @@ describe('body joins — html parts', () => {
     assert.deepEqual(buildJoins('htmlBody', text, blocks)[0].below, []);
   });
 
-  it('redacts a history block\'s rendering together with the caller text beside it', () => {
-    const { text, blocks } = expand('<p>Hi</p>{{signature}}<p>auth Bearer</p>{{quote}}', 'SIG', '<p>abcdefghijklmnopqrstuvwxyz</p>');
-    assert.deepEqual(buildJoins('htmlBody', text, blocks)[0].below, ['auth Bearer [REDACTED]']);
+  it('shows a history block\'s rendering beside the caller text as written', () => {
+    const { text, blocks } = expand('<p>Hi</p>{{signature}}<p>auth</p>{{quote}}', 'SIG', `<p>${REGISTERED}</p>`);
+    assert.deepEqual(buildJoins('htmlBody', text, blocks)[0].below, ['auth', REGISTERED]);
   });
 
   it('shows the rest of the segment when the tag the token sits in never closes', () => {

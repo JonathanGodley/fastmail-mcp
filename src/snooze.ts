@@ -7,7 +7,7 @@
 // Measured by scripts/probes/snooze-read.probe.mjs, snooze-write.probe.mjs and
 // snooze-list.smoke.mjs.
 
-import { coerceBool, coerceUtcDate, describeUntrusted, InvalidInputError, LENIENT_BOOL_DESC, redactedJson, registerSecret } from './coerce.js';
+import { coerceBool, coerceUtcDate, describeUntrusted, InvalidInputError, LENIENT_BOOL_DESC, registerSecret, toolJson } from './coerce.js';
 import { getDefaultTimezone, simplifyEmail, toLocalIso } from './email-formatter.js';
 import { EMAIL_PROPERTIES_COMPACT, attachMailboxInfo, buildMailboxInfoMap } from './jmap-client.js';
 import { projectListEmail } from './field-projection.js';
@@ -176,7 +176,7 @@ export async function listSnoozedEmails(args: any, t: SnoozeTransport, limit: nu
   const list = result(responses, 1, 'Email/get').list ?? [];
   // calculateTotal is server-discretionary.
   const total = typeof query.total === 'number' ? { total: query.total } : {};
-  if (raw) return [{ type: 'text', text: redactedJson({ ...total, emails: list }) }];
+  if (raw) return [{ type: 'text', text: toolJson({ ...total, emails: list }) }];
   attachMailboxInfo(list, buildMailboxInfoMap([...mb.byId.values()]));
   const items = list.map((e: any) => {
     const dest = e.snoozed?.moveToMailboxId;
@@ -186,7 +186,7 @@ export async function listSnoozedEmails(args: any, t: SnoozeTransport, limit: nu
       wakeInto: dest ? (mb.byId.get(dest)?.name ?? dest) : mb.inbox.name,
     };
   });
-  return [{ type: 'text', text: redactedJson({ ...total, emails: items }) }];
+  return [{ type: 'text', text: toolJson({ ...total, emails: items }) }];
 }
 
 /**
@@ -203,7 +203,7 @@ export async function snoozeEmail(args: any, t: SnoozeTransport, now: Date = new
   const inSnoozed = email.mailboxIds?.[mb.snoozed.id] === true;
   if (inSnoozed) {
     await update(t, accountId, emailId, email.snoozed ? { 'snoozed/until': until } : { snoozed: { until, setKeywords: WAKE_KEYWORDS } });
-    return [{ type: 'text', text: redactedJson({ emailId, wakeAt: localWake(until), wakeInto: mb.inbox.name, previousWakeAt: localWake(email.snoozed?.until) }) }];
+    return [{ type: 'text', text: toolJson({ emailId, wakeAt: localWake(until), wakeInto: mb.inbox.name, previousWakeAt: localWake(email.snoozed?.until) }) }];
   }
   if (email.mailboxIds?.[mb.inbox.id] !== true) {
     throw new InvalidInputError('snooze_email snoozes a message from the Inbox only; this one is not in the Inbox. Move it to the Inbox first.');
@@ -213,7 +213,7 @@ export async function snoozeEmail(args: any, t: SnoozeTransport, now: Date = new
     [`mailboxIds/${mb.snoozed.id}`]: true,
     snoozed: { until, setKeywords: WAKE_KEYWORDS },
   });
-  return [{ type: 'text', text: redactedJson({ emailId, wakeAt: localWake(until), wakeInto: mb.inbox.name }) }];
+  return [{ type: 'text', text: toolJson({ emailId, wakeAt: localWake(until), wakeInto: mb.inbox.name }) }];
 }
 
 /** unsnooze_email: back to the Inbox now, snooze cleared. */
@@ -231,7 +231,7 @@ export async function unsnoozeEmail(args: any, t: SnoozeTransport): Promise<Tool
     [`mailboxIds/${mb.inbox.id}`]: true,
     snoozed: null,
   });
-  return [{ type: 'text', text: redactedJson({ emailId, movedTo: mb.inbox.name, wasWakeAt: localWake(email.snoozed?.until) }) }];
+  return [{ type: 'text', text: toolJson({ emailId, movedTo: mb.inbox.name, wasWakeAt: localWake(email.snoozed?.until) }) }];
 }
 
 const EXPERIMENTAL_NOTE =

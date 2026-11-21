@@ -32,37 +32,12 @@ export class InvalidInputError extends Error {
 // structured params before dispatch. These helpers coerce such values back to
 // their expected shapes so the handlers work against both strict and lenient clients.
 
-// Credential-shaped substrings scrubbed from anything reflected back to the caller.
-// Deliberately narrow: provider error messages are what the caller recovers from.
+// The exact credential values this server holds, registered where each is read. Never logged.
 //
-// Error text is redacted twice: once as each untrusted value is rendered, and again over the
-// finished message in the CallTool catch. `\S+` runs to the next whitespace, so on that second
-// pass it would take the closing quote, comma or `…` cut marker written after the value. So a
-// marker followed only by closing characters, however many, is left alone: that run can only
-// be what the server wrote. On a raw value up to BEARER_TAIL_MAX closing characters ending the
-// match are put back, never one inside a registered secret or marker, and no restored character
-// can belong to a token: of the set only `.` occurs in an RFC 6750 b64token, so a `.` comes
-// back only after a character that cannot (`").` whole; `abc...` keeps none). Three covers
-// `…",`; a raw value whose own closing run plus the server's passes three keeps only the last
-// three (`"Bearer abc…"),` loses the `…`).
-const BEARER_TAIL_CHARS = `"',;:)\\]}.\u2026`;
-const BEARER_TAIL_MAX = 3;
-const AFTER_MARKER = `\\[REDACTED\\][${BEARER_TAIL_CHARS}]*(?:\\s|$)`;
-const BEARER_PATTERN = new RegExp(`Bearer\\s+(?!${AFTER_MARKER})\\S+`, 'gi');
-const BEARER_BEFORE_MARKER = new RegExp(`Bearer\\s+(?=${AFTER_MARKER})`, 'gi');
-const KEPT_RUN = new RegExp(`\\[REDACTED\\][${BEARER_TAIL_CHARS}]*`, 'iy');
-const BEARER_TAIL = new RegExp(`[${BEARER_TAIL_CHARS}]{1,${BEARER_TAIL_MAX}}$`);
-// The CalDAV path authenticates with HTTP Basic, so a reflected header or a
-// tsdav error carries the base64 credential blob — redact that shape too.
-const BASIC_PATTERN = /Basic\s+[A-Za-z0-9+/=]+/gi;
-// Fastmail token shape. The charset is `[\w-]`, not `[A-Za-z0-9-]`: under the
-// narrower class an underscore inside the token ends the match early, and with
-// fewer than 20 characters before it the `{20,}` quantifier fails outright, so
-// the whole token would pass through in clear.
-const FASTMAIL_TOKEN_PATTERN = /fmu\d+-[\w-]{20,}/g;
-
-// Exact secret values registered at startup, for credentials the patterns above cannot
-// see (a CalDAV password, a self-hosted token with neither prefix). Never logged.
+// Redaction matches these values and nothing else. Every credential this server holds is
+// registered, so a credential-shaped pattern would add only credentials that are not this
+// server's, and the word patterns ("Bearer" or "Basic" and the next word) rewrote ordinary
+// English (#246).
 const KNOWN_SECRETS = new Set<string>();
 
 // Values under 8 characters are ignored: an over-broad match would mangle legitimate
@@ -74,115 +49,24 @@ export function registerSecret(value: string | undefined): void {
 }
 
 const MARKER = '[REDACTED]';
-const MARKER_PATTERN = /\[REDACTED\]/gi;
-const LABEL = /^(?:bearer|basic)\s+/i;
-const BASIC_AT = new RegExp(BASIC_PATTERN.source, 'iy');
 
 /**
- * Every span is found on the RAW input and the union is hidden, so no pass can cut another's
- * run short: replacing one match first would leave a marker that ends a Basic blob, a Fastmail
- * token or a Bearer value early, or would split a registered secret at a space.
- *
- * Hidden: each registered secret occurrence and existing marker (sealed: never restored), a
- * Basic blob, a Fastmail token after `fmu`, and a Bearer value less its restored tail. Each
- * maximal hidden run is written as one upper-case marker, so a lower-case marker is rewritten
- * and adjacent markers or secrets merge into one, including across a label's collapsed
- * whitespace. Where spans overlap, hidden wins: a `Bearer` or `Basic` word inside another span
- * is hidden with it. A visible `Bearer` or `Basic` label, including one before a marker left
- * alone, is written in that case with one space after it, even when the space was a secret's
- * own whitespace; a Bearer value always begins with a marker. So the output keeps the
- * `Bearer [REDACTED]` + tail, `Basic [REDACTED]` and `fmu[REDACTED]` shapes. When the
- * whitespace ending a Bearer value, or ending a kept marker's closing run, is hidden (a
- * secret's own whitespace), nothing in it is restored and hiding extends to the next visible
- * whitespace, so the output never carries a marker glued to text a later pass would take as
- * part of the value. That over-hides: a secret containing whitespace right after `Bearer`
- * takes the delimiters after it up to the next visible whitespace, or the rest of the text
- * when none follows.
+ * Hide every occurrence of a registered secret. Occurrences are found on the raw input and their
+ * union is hidden, so overlapping or adjacent secrets cannot expose part of one another; each
+ * maximal hidden run is written as one marker. Everything else, a marker already in the input
+ * included, is left as written.
  */
-export function redactBearerTokens(input: string): string {
-  const n = input.length;
-  const hidden = new Uint8Array(n);
-  const sealed = new Uint8Array(n);
-  const label: (string | undefined)[] = [];
-  const valueStarts = new Set<number>();
-  const labelSpaces = new Set<number>();
-  const hide = (from: number, to: number, seal = false): void => {
-    for (let i = from; i < to; i++) {
-      hidden[i] = 1;
-      if (seal) sealed[i] = 1;
-    }
-  };
-  const markLabel = (at: number, match: string, word: string): number => {
-    const head = LABEL.exec(match)![0];
-    for (let i = 0; i < word.length; i++) label[at + i] = word[i];
-    label[at + word.length] = ' ';
-    labelSpaces.add(at + word.length);
-    for (let i = word.length + 1; i < head.length; i++) label[at + i] = '';
-    return at + head.length;
-  };
-
+export function redactSecrets(input: string): string {
+  const hidden = new Uint8Array(input.length);
   for (const secret of KNOWN_SECRETS) {
-    let covered = 0;
     for (let at = input.indexOf(secret); at !== -1; at = input.indexOf(secret, at + 1)) {
-      hide(Math.max(at, covered), at + secret.length, true);
-      covered = at + secret.length;
+      hidden.fill(1, at, at + secret.length);
     }
   }
-  for (const m of input.matchAll(MARKER_PATTERN)) hide(m.index, m.index + m[0].length, true);
-  for (const m of input.matchAll(FASTMAIL_TOKEN_PATTERN)) hide(m.index + 3, m.index + m[0].length);
-  // Tried at every `basic`, not left to right: in `Basic Basic dXNl` the second word starts a
-  // blob of its own once the first match has taken it.
-  for (const word of input.matchAll(/basic/gi)) {
-    BASIC_AT.lastIndex = word.index;
-    const m = BASIC_AT.exec(input);
-    if (m) hide(markLabel(word.index, m[0], 'Basic'), word.index + m[0].length);
-  }
-
-  // A kept marker and its closing run count as a value here only for the glue rule below.
-  const values: Array<{ start: number; end: number; tail: number }> = [];
-  for (const m of input.matchAll(BEARER_BEFORE_MARKER)) {
-    const start = markLabel(m.index, m[0], 'Bearer');
-    KEPT_RUN.lastIndex = start;
-    values.push({ start, end: start + KEPT_RUN.exec(input)![0].length, tail: 0 });
-  }
-  for (const m of input.matchAll(BEARER_PATTERN)) {
-    const start = markLabel(m.index, m[0], 'Bearer');
-    const end = m.index + m[0].length;
-    hide(start, end);
-    valueStarts.add(start);
-    values.push({ start, end, tail: m[0].match(BEARER_TAIL)?.[0].length ?? 0 });
-  }
-  // In order of end, so an extension starts where an earlier one stopped and the whole pass
-  // stays linear. Order cannot change the result: an extension stops at visible whitespace, and
-  // a restore touches only closing characters before one.
-  values.sort((a, b) => a.end - b.end);
-  let reach = 0;
-  for (const { start, end, tail } of values) {
-    if (end < n && hidden[end]) {
-      hide(start, end);
-      let i = Math.max(end, reach);
-      while (i < n && (hidden[i] || !/\s/.test(input[i]))) hidden[i++] = 1;
-      reach = i;
-    } else {
-      let from = end;
-      while (from > end - tail && !sealed[from - 1]) from--;
-      while (from < end && input[from] === '.') from++;
-      for (let i = from; i < end; i++) hidden[i] = 0;
-    }
-  }
-
   let out = '';
-  let inRun = false;
-  for (let i = 0; i < n; i++) {
-    if (hidden[i] || (valueStarts.has(i) && !inRun)) {
-      if (!inRun) out += labelSpaces.has(i) && !hidden[i - 1] ? ` ${MARKER}` : MARKER;
-      inRun = true;
-      if (hidden[i]) continue;
-    }
-    const ch = label[i] ?? input[i];
-    if (ch === '') continue; // collapsed label whitespace does not end a hidden run
-    inRun = false;
-    out += ch;
+  for (let i = 0; i < input.length; i++) {
+    if (!hidden[i]) out += input[i];
+    else if (i === 0 || !hidden[i - 1]) out += MARKER;
   }
   return out;
 }
@@ -196,10 +80,9 @@ export function redactBearerTokens(input: string): string {
  * model is in docs/conventions.md.
  *
  * The order is the landmine (#131). `describePart` strips line breaks and bidi overrides,
- * swaps `"` for `'`, and truncates at 64 code points. `redactBearerTokens` is
- * length-sensitive (FASTMAIL_TOKEN_PATTERN needs 20+ characters, a registered secret is an
- * exact match), so truncating first lets a token prefix out verbatim. Backwards still passes
- * every line-forging test.
+ * swaps `"` for `'`, and truncates at 64 code points. `redactSecrets` matches only a whole
+ * registered secret, so truncating first lets a secret's prefix out verbatim. Backwards still
+ * passes every line-forging test.
  *
  * No second parameter on purpose: callers pass this to `.map` bare, and `map` would hand it
  * the index as a bound. A wider bound goes through `describeUntrustedAt`.
@@ -236,23 +119,21 @@ export function joinCapped(items: string[], separator = ', ', cap = LIST_ECHO_CA
  */
 export function describeUntrustedAt(value: unknown, max: number): string {
   const source = typeof value === 'string' ? value : value == null ? '' : String(value);
-  return describePart(redactBearerTokens(source), max);
+  return describePart(redactSecrets(source), max);
 }
 
 /**
  * Serialise a value to JSON with every string inside it redacted.
  *
- * The ONLY safe way to redact a structured result item. BEARER_PATTERN's `\S+` runs to the
- * next whitespace, which over a finished document can span several values, and gives back at
- * most three closing characters: `["Bearer Bonds","Inbox"]` comes out as
- * `["Bearer [REDACTED]"]`, which parses with "Inbox" silently gone, and a deeper nesting
- * stops parsing. Per value there is no trailing delimiter to swallow.
- * Prose calls redactBearerTokens directly; anything JSON.stringify touches comes here.
+ * The ONLY safe way to redact a structured result item. In a finished document a secret
+ * carrying `"`, `\` or a control character is JSON-escaped and no longer matches; per value it
+ * is still the registered text. Prose calls redactSecrets directly; anything JSON.stringify
+ * touches comes here.
  *
  * Compact like toolJson below: no indent argument.
  */
 export function redactedJson(value: any): string {
-  return JSON.stringify(value, (_key, v) => (typeof v === 'string' ? redactBearerTokens(v) : v));
+  return JSON.stringify(value, (_key, v) => (typeof v === 'string' ? redactSecrets(v) : v));
 }
 
 /**
@@ -714,7 +595,7 @@ export const PATH_ECHO_LIMIT = 200;
  */
 export function echoPath(value: unknown): string {
   const source = typeof value === 'string' ? value : value == null ? '' : String(value);
-  return echoCallerText(redactBearerTokens(source), PATH_ECHO_LIMIT);
+  return echoCallerText(redactSecrets(source), PATH_ECHO_LIMIT);
 }
 
 const zoneCanonicalizationCache = new Map<string, string>();

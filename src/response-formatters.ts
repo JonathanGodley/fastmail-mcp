@@ -124,7 +124,7 @@ const blankLines = (n: number): string => `${n} blank line${n === 1 ? '' : 's'}`
 
 /**
  * One line per inserted block: above, spacing, block, spacing, below. Every string in a
- * join is already redacted, neutralised and bounded (body-joins.ts).
+ * join is already neutralised and bounded (body-joins.ts).
  */
 export function formatJoins(joins: TokenJoin[] | undefined): string {
   if (!joins?.length) return '';
@@ -449,8 +449,8 @@ function quoteMailboxNames(names: string[]): string {
 }
 
 // Ids are CALLER-supplied and checked only as non-empty strings, so a newline in one would
-// forge extra "- …" bullet lines. Redaction runs before truncation (both token matches are
-// length-sensitive), matching the redacted JSON half of the response.
+// forge extra "- …" bullet lines. describeUntrusted redacts before it truncates, matching the
+// redacted JSON half of the response.
 function listIds(ids: string[]): string {
   const shown = ids.slice(0, ARCHIVE_ID_CAP).map(describeUntrusted).join(', ');
   const more = ids.length > ARCHIVE_ID_CAP ? `, …and ${ids.length - ARCHIVE_ID_CAP} more` : '';

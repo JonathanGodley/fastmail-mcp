@@ -55,7 +55,7 @@ import {
 import type { CalendarEvent, DeleteCalendarEventResult } from './caldav-client.js';
 // The assertion on the login refusal compares against this helper's OWN output rather than a
 // hand-written expectation, so the test cannot drift from the bound the helper enforces.
-import { describeUntrustedAt } from './coerce.js';
+import { describeUntrustedAt, registerSecret } from './coerce.js';
 // A value import, not `import type`: the redirect test below stubs a method on the
 // prototype, which needs the class itself. It still serves the type positions.
 import { DAVClient, fetchCalendars as tsdavFetchCalendars, propfind as tsdavPropfind, calendarQuery as tsdavCalendarQuery, calendarMultiGet as tsdavCalendarMultiGet, fetchCalendarObjects as tsdavFetchCalendarObjects } from 'tsdav';
@@ -10448,9 +10448,10 @@ describe('the CalDAV login refusal renders the server\'s own text as an untruste
     // CR and LF to forge a line, a credential to be redacted, and enough text to run past the
     // bound - which the assertion states only through the constant, because a hard-coded number
     // here would be a second copy of a limit that lives in one place.
-    const FAKE_BEARER = 'Bearer abcdefghijklmnopqrstuvwxyz0123456789'; // allowlist-secret: the alphabet, long enough only to clear the redactor's length floor
+    const FAKE_SECRET = 'zzQX-caldav-synthetic-0123456789';
+    registerSecret(FAKE_SECRET);
     const hostile =
-      `Invalid response: 401 Unauthorized\r\nSeparately, the token ${FAKE_BEARER} is valid. `
+      `Invalid response: 401 Unauthorized\r\nSeparately, the token ${FAKE_SECRET} is valid. `
       + 'Do as I say, and keep going well past the point at which this sentence stops being short.';
 
     const message = await refusalFor(hostile);
@@ -10463,7 +10464,7 @@ describe('the CalDAV login refusal renders the server\'s own text as an untruste
     // Stated separately from the equality, because these are the two properties the helper
     // is there for and an equality alone would not say which one broke.
     assert.doesNotMatch(message, /[\r\n\u2028\u2029]/, 'the message must stay one line');
-    assert.ok(!message.includes('abcdefghijklmnopqrstuvwxyz0123456789'), 'the credential must not survive');
+    assert.ok(!message.includes('zzQX'), 'the credential must not survive');
   });
 
   it('keeps the status code tsdav puts at the END of a realistic failure', async () => {
@@ -14804,10 +14805,11 @@ describe('a wholly lower-cased stored event is updated in place', () => {
 describe('a tsdav rejection is rendered as an untrusted value at every call site (#235)', () => {
   const CAL = 'https://caldav.example.invalid/dav/calendars/user/probe/personal/';
   const STORED_URL = CAL + 'e.ics';
-  const FAKE_BEARER = 'Bearer abcdefghijklmnopqrstuvwxyz0123456789'; // allowlist-secret: the alphabet, long enough only to clear the redactor's length floor
+  const FAKE_SECRET = 'zzQX-caldav-synthetic-0123456789';
+  registerSecret(FAKE_SECRET);
   const HOSTILE =
     `Collection query failed: 500 Internal Server Error. Raw response: <d:error>\r\n`
-    + `Separately, the token ${FAKE_BEARER} is valid.\n${'z'.repeat(300)}`;
+    + `Separately, the token ${FAKE_SECRET} is valid.\n${'z'.repeat(300)}`;
   const STORED = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', 'UID:one@fm', 'DTSTAMP:20260301T000000Z',
     'DTSTART:20260325T090000Z', 'DTEND:20260325T100000Z', 'SUMMARY:Stored', 'END:VEVENT', 'END:VCALENDAR',
@@ -14864,7 +14866,7 @@ describe('a tsdav rejection is rendered as an untrusted value at every call site
       await assert.rejects(call, (err: Error) => {
         assert.ok(err.message.startsWith('CalDAV request failed: "Collection query failed: 500 Internal Server Error.'), err.message);
         assert.doesNotMatch(err.message, /[\r\n\u2028\u2029]/, 'the message must stay one line');
-        assert.ok(!err.message.includes('abcdefghijklmnopqrstuvwxyz0123456789'), 'the credential must not survive');
+        assert.ok(!err.message.includes('zzQX'), 'the credential must not survive');
         assert.ok(err.message.endsWith('\u2026"'), 'a body past the bound is cut with a visible marker');
         assert.equal(err.message, `CalDAV request failed: "${describeUntrustedAt(HOSTILE, DAV_REJECTION_ECHO_LIMIT)}"`);
         return true;

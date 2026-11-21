@@ -1,4 +1,4 @@
-import { redactBearerTokens, toolJson } from './coerce.js';
+import { redactSecrets, toolJson } from './coerce.js';
 
 // The client surface test_bulk_operations writes through. JmapClient satisfies it structurally.
 export interface BulkTestClient {
@@ -73,7 +73,7 @@ export async function runBulkReadTest(
         executed: false,
         // Folded into result JSON rather than raised, so the top-level catch's redaction
         // never sees it.
-        error: redactBearerTokens(error instanceof Error ? error.message : String(error)),
+        error: redactSecrets(error instanceof Error ? error.message : String(error)),
         timestamp: new Date().toISOString(),
       });
     }

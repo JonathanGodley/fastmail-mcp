@@ -2,6 +2,12 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARCHIVE_REFUSING_ROLES } from './jmap-client.js';
 import { AMBIGUOUS_COPY_LIST_CAP, BROKEN_COLLECTION_PHRASE } from './caldav-client.js';
+import { registerSecret } from './coerce.js';
+
+// A registered synthetic secret, long enough that placed after 41 characters it crosses the
+// 64-code-point echo bound.
+const REGISTERED = 'zzQX-formatter-synthetic';
+registerSecret(REGISTERED);
 import { simplifyMailbox, simplifyIdentity, simplifyContact, formatQuerySummary, formatRawQueryResult, formatEmailQueryResult, formatContactQueryResult, formatDraftEmailResult, formatJoins, formatBodyEditsReceipt, formatEditDraftResult,formatSendDraftResult, formatInlineNotes, buildOmittedPartsNote, buildUnpathableMailboxNote, buildAttachmentListContent, formatArchiveResult, formatLabelRemoval, formatBulkEmailResult, buildCalendarWindowNote, buildBrokenCollectionNote, buildAmbiguousEventNote, calendarEventBody, formatCalendarEventList } from './response-formatters.js';
 
 // ---------- formatInlineNotes ----------
@@ -1638,9 +1644,9 @@ describe('formatLabelRemoval', () => {
     assert.equal(text.split('\n').length, 1);
   });
 
-  it('redacts a credential in an id', () => {
-    const text = formatLabelRemoval(['fmu1-abcdefghijklmnopqrstuvwxyz012345'], 1); // allowlist-secret (synthetic)
-    assert.doesNotMatch(text, /fmu1-\w/);
+  it('redacts a registered secret in an id', () => {
+    const text = formatLabelRemoval([REGISTERED], 1);
+    assert.ok(!text.includes('zzQX'), text);
     assert.match(text, /REDACTED/);
   });
 
@@ -1835,39 +1841,30 @@ describe('formatArchiveResult', () => {
 
   it('groups failures by reason and redacts server text', () => {
     const text = build([
-      { id: 'a', action: 'failed', mailboxes: ['Inbox'], reason: { setErrorType: 'forbidden', description: 'Bearer fmu1-abcdefghijklmnopqrstuvwxyz rejected' } }, // allowlist-secret (synthetic: the literal alphabet, never a real token)
-      { id: 'b', action: 'failed', mailboxes: ['Inbox'], reason: { setErrorType: 'forbidden', description: 'Bearer fmu1-abcdefghijklmnopqrstuvwxyz rejected' } }, // allowlist-secret (synthetic: the literal alphabet, never a real token)
+      { id: 'a', action: 'failed', mailboxes: ['Inbox'], reason: { setErrorType: 'forbidden', description: `${REGISTERED} rejected` } },
+      { id: 'b', action: 'failed', mailboxes: ['Inbox'], reason: { setErrorType: 'forbidden', description: `${REGISTERED} rejected` } },
     ]);
-    assert.match(text, /2 failed \(forbidden - Bearer \[REDACTED\] rejected\): a, b/);
-    assert.ok(!text.includes('fmu1-abcdefghijklmnopqrstuvwxyz')); // allowlist-secret (synthetic)
+    assert.match(text, /2 failed \(forbidden - \[REDACTED\] rejected\): a, b/);
+    assert.ok(!text.includes('zzQX'));
   });
 
-  it('redacts a token sitting past the truncation cap, not just a short one', () => {
-    // The sibling test above puts the token near the start, where describePart's 64
-    // code-point cap never fires — so it passes under either ordering. Both redactions are
-    // length-sensitive (the token pattern needs 20+ characters after the prefix), so
-    // truncating BEFORE redacting hands the matcher a string the token no longer fits in
-    // and a usable prefix goes out verbatim. This positions the token past the cap.
-    const secret = 'fmu1-abcdefghijklmnopqrstuvwxyz012345'; // allowlist-secret (synthetic: the literal alphabet, never a real token)
+  it('redacts a secret sitting past the truncation cap, not just a short one', () => {
+    // The sibling test above puts the secret near the start, where describePart's 64
+    // code-point cap never fires, so it passes under either ordering. Redaction matches only a
+    // whole secret, so truncating BEFORE redacting leaves a prefix that no longer matches and
+    // goes out verbatim. This positions the secret across the cap.
     const text = build([
       {
         id: 'a',
         action: 'failed',
         mailboxes: ['Inbox'],
-        // No "Bearer" prefix on purpose. BEARER_PATTERN matches on the word rather than on
-        // the token's length, so it redacts a truncated fragment too and would make this
-        // test pass under either ordering. Isolating FASTMAIL_TOKEN_PATTERN, whose 20+
-        // character minimum is what truncation defeats, is what makes it discriminate.
-        reason: { setErrorType: 'forbidden', description: `${'x'.repeat(40)} token ${secret} rejected` },
+        reason: { setErrorType: 'forbidden', description: `${'x'.repeat(40)} token ${REGISTERED} rejected` },
       },
     ]);
-    // Asserting the absence of the WHOLE token would pass under either ordering, since a
-    // truncating-first implementation cuts the token short and the full string is missing
-    // either way. What discriminates is whether any fmu-prefixed fragment survives at all:
-    // truncate-then-redact leaves "fmu1-abcdef" sitting in the output, because by then the
-    // pattern's 20-character minimum no longer matches.
-    assert.ok(!/fmu1-\w/.test(text), `a token fragment survived: ${text}`);
-    assert.match(text, /fmu\[REDACTED\]/);
+    // Asserting the absence of the WHOLE secret would pass under either ordering. What
+    // discriminates is whether any prefix of it survives.
+    assert.ok(!text.includes('zzQX'), `a secret fragment survived: ${text}`);
+    assert.match(text, /\[REDACTED\]/);
   });
 
   it('caps a long mailbox list rather than letting the summary become the response', () => {
@@ -2084,33 +2081,31 @@ describe('formatArchiveResult', () => {
     assert.ok(!text.includes('id10'), 'the 11th id is past the cap');
   });
 
-  it('redacts a credential in an id before truncating it', () => {
+  it('redacts a registered secret in an id before truncating it', () => {
     // The same ids go out again in the JSON content item, which the handler runs through
-    // redactBearerTokens — so without this the identical string is redacted in one half of the
-    // response and verbatim in the other. Redaction runs FIRST because the token pattern is
-    // length-sensitive and describePart truncates at 64 code points.
+    // redactedJson, so without this the identical string is redacted in one half of the
+    // response and verbatim in the other. The id sits across describePart's 64-code-point cut.
     const text = formatArchiveResult({
-      results: [{ id: 'fmu1-abcdefghijklmnopqrstuvwxyz012345', action: 'notFound' }], // allowlist-secret (synthetic)
+      results: [{ id: 'x'.repeat(41) + REGISTERED, action: 'notFound' }],
       counts: { movedToArchive: 0, removedFromInbox: 0, notInInbox: 0, refused: 0, notFound: 1, failed: 0 },
     });
-    assert.doesNotMatch(text, /fmu1-\w/);
+    assert.ok(!text.includes('zzQX'), text);
     assert.match(text, /REDACTED/);
   });
 
-  it('redacts a credential in a mailbox NAME before truncating it', () => {
+  it('redacts a registered secret in a mailbox NAME before truncating it', () => {
     // The sibling of the id case, and pinned separately because the two go through different
-    // helpers. A mailbox name is server-supplied text a caller can also create, and the token
-    // here sits past describePart's 64-code-point cut, so truncate-then-redact would hand the
-    // redactor a string the pattern no longer fits in and emit the surviving prefix verbatim.
+    // helpers. The secret sits across describePart's 64-code-point cut, so truncate-then-redact
+    // would emit its surviving prefix verbatim.
     const text = formatArchiveResult({
       results: [{
         id: 'e1',
         action: 'removedFromInbox',
-        mailboxes: ['x'.repeat(40) + ' fmu1-abcdefghijklmnopqrstuvwxyz012345'], // allowlist-secret (synthetic)
+        mailboxes: ['x'.repeat(40) + ' ' + REGISTERED],
       }],
       counts: { movedToArchive: 0, removedFromInbox: 1, notInInbox: 0, refused: 0, notFound: 0, failed: 0 },
     });
-    assert.doesNotMatch(text, /fmu1-\w/);
+    assert.ok(!text.includes('zzQX'), text);
     assert.match(text, /REDACTED/);
   });
 

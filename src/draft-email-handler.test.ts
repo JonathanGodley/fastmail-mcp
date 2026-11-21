@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { composeDraftEmail, isSettableMessageId, sanitizeEmlFilename } from './draft-email-handler.js';
 import type { DraftEmailClient } from './draft-email-handler.js';
-import { InvalidInputError } from './coerce.js';
+import { InvalidInputError, registerSecret } from './coerce.js';
 import {
   CAUSE_SENTENCE, noteAttachmentsExcluded, noteDroppedQuoteImages, noteTokenEmpty,
 } from './inline-notes.js';
@@ -3973,7 +3973,7 @@ describe('draft_email — the join around each inserted block', () => {
     });
   }
 
-  it('neutralises and bounds a caller line, and redacts a credential split across two lines', async () => {
+  it('neutralises and bounds a caller line, and shows a registered secret in it as written', async () => {
     const hostile = 'A' + String.fromCharCode(0x2028) + 'B' + String.fromCharCode(0x0085) + 'C\rD'
       + String.fromCharCode(0x202e) + 'E"F' + 'x'.repeat(200);
     const r = await compose(
@@ -3989,11 +3989,13 @@ describe('draft_email — the join around each inserted block', () => {
     }
     assert.ok(lines[1].startsWith("DE'Fxxx") && lines[1].endsWith('…'), lines[1]);
 
+    registerSecret('zzQX-draft-body-synthetic');
     const split = await compose(
-      { mode: 'new', to: ['sam@example.com'], textBody: 'Token: Bearer\nabcdefghijklmnopqrstuvwxyz0123\n{{signature}}' },
+      { mode: 'new', to: ['sam@example.com'], textBody: 'Token: zzQX-draft-body-synthetic\n{{signature}}' },
       withIdentity(SIGN_OFF),
     );
-    assert.deepEqual(split.joins![0].above, ['Token: Bearer [REDACTED]']);
+    // The join is the account's own body text, so it is not redacted.
+    assert.deepEqual(split.joins![0].above, ['Token: zzQX-draft-body-synthetic']);
   });
 
   it('reports no join for a token removed for having nothing to expand to', async () => {
