@@ -2,12 +2,15 @@
 // Mutation testing with Stryker. A surviving mutant is a source line no test notices changing.
 //
 //   node scripts/mutation-test.mjs <commit>   mutate only the src/ lines that commit changed
+//   node scripts/mutation-test.mjs --base <ref>
+//                                             mutate the src/ lines that changed between the
+//                                             merge base of ref and HEAD, and HEAD
 //   node scripts/mutation-test.mjs --all      mutate all of src/, incrementally (reports/)
 //   node scripts/mutation-test.mjs --all --shard <i>/<n>
 //                                             mutate shard i of n, with an html report as well
 //
 // Every mode writes a json report listing each mutant's status, the only place an errored
-// mutant is named: reports/mutation-commit.json, reports/mutation.json or
+// mutant is named: reports/mutation-commit.json (a commit or --base), reports/mutation.json or
 // reports/mutation-<i>-of-<n>.json.
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -17,7 +20,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const USAGE = 'Usage: node scripts/mutation-test.mjs <commit> | --all [--shard <i>/<n>]';
+export const USAGE = 'Usage: node scripts/mutation-test.mjs <commit> | --base <ref> | --all [--shard <i>/<n>]';
 
 // These read src/ as text or run the built dist/, so under Stryker they either fail its initial
 // run (its instrumentation reads process.env and reprints the mutated file whole) or measure
@@ -33,7 +36,7 @@ export const EXCLUDED_TESTS = ['index-env', 'readme-inventory', 'tool-schema', '
 // these fit a 16 GB runner. The cap does not reach ArrayBuffer memory.
 export const TEST_HEAP_MB = 1024;
 
-/** Returns { all: true, shard? }, { commit }, or { error } for anything else. */
+/** Returns { all: true, shard? }, { commit }, { base }, or { error } for anything else. */
 export function parseArgs(argv) {
   if (argv.length === 1 && argv[0] === '--all') return { all: true };
   if (argv.length === 3 && argv[0] === '--all' && argv[1] === '--shard') {
@@ -43,8 +46,10 @@ export function parseArgs(argv) {
     if (!m || i < 1 || i > n) return { error: `--shard takes <i>/<n> with 1 <= i <= n, got ${argv[2]}` };
     return { all: true, shard: { i, n } };
   }
-  if (argv.length === 1 && !argv[0].startsWith('-')) return { commit: argv[0] };
-  return { error: argv.length === 0 ? 'A commit or --all is required.' : `Unexpected arguments: ${argv.join(' ')}` };
+  const isRef = (arg) => arg !== '' && !arg.startsWith('-');
+  if (argv.length === 1 && isRef(argv[0])) return { commit: argv[0] };
+  if (argv.length === 2 && argv[0] === '--base' && isRef(argv[1])) return { base: argv[1] };
+  return { error: argv.length === 0 ? 'A commit, --base <ref> or --all is required.' : `Unexpected arguments: ${argv.join(' ')}` };
 }
 
 // Instrumenting src/index.ts at all breaks jmap-client.test.ts's version-sync check, and every
@@ -95,7 +100,7 @@ export function reportOutputs(args) {
   const { shard } = args;
   return {
     reporters: ['clear-text', 'progress', 'json', ...(shard ? ['html'] : [])],
-    tag: shard ? `-${shard.i}-of-${shard.n}` : args.commit ? '-commit' : '',
+    tag: shard ? `-${shard.i}-of-${shard.n}` : args.commit || args.base ? '-commit' : '',
   };
 }
 
@@ -103,8 +108,15 @@ function main() {
   const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const resolve = (rev) => {
-    try { return git('rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`).trim(); } catch { return null; }
+    try {
+      return execFileSync('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `${rev}^{commit}`],
+        { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch { return null; }
   };
+  // Fixed prefixes, no colour and no external driver, so diffToRanges parses the same output
+  // whatever the user's diff config says.
+  const diff = (from, to) => git('diff', '--src-prefix=a/', '--dst-prefix=b/', '--no-color', '--no-ext-diff',
+    from, to, '-U0', '--', 'src');
   const fail = (msg) => { console.error(msg); process.exit(2); };
 
   const args = parseArgs(process.argv.slice(2));
@@ -120,8 +132,23 @@ function main() {
     const status = git('status', '--porcelain').trim();
     if (status) fail(`The tree is not clean, so it would not describe ${args.commit}:\n${status}`);
     if (!resolve(`${sha}~1`)) fail(`${args.commit} is a root commit; there is no parent to diff against.`);
-    mutate = diffToRanges(git('diff', `${sha}~1`, sha, '-U0', '--', 'src'));
+    mutate = diffToRanges(diff(`${sha}~1`, sha));
     if (mutate.length === 0) fail(`${args.commit} changed no mutable src/ lines.`);
+  }
+  if (args.base) {
+    const sha = resolve(args.base);
+    if (!sha) fail(`${args.base} does not resolve to a commit.`);
+    let mergeBase = null;
+    try { mergeBase = git('merge-base', sha, 'HEAD').trim(); } catch { /* exits 1 on unrelated histories */ }
+    if (!mergeBase) fail(`${args.base} has no merge base with HEAD.`);
+    const status = git('status', '--porcelain').trim();
+    if (status) fail(`The tree is not clean, so it would not describe HEAD:\n${status}`);
+    const head = resolve('HEAD');
+    if (mergeBase === head && sha !== head) {
+      fail(`${args.base} is ahead of HEAD; check out the branch to measure and pass the branch it forked from.`);
+    }
+    mutate = diffToRanges(diff(mergeBase, 'HEAD'));
+    if (mutate.length === 0) fail(`HEAD changed no mutable src/ lines since its merge base with ${args.base}.`);
   }
   const { shard } = args;
   const { reporters, tag } = reportOutputs(args);

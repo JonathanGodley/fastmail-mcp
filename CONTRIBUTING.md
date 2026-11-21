@@ -129,6 +129,14 @@ model is `composeDraftEmail(args, client, attachDir)` in
 `JmapClient` satisfies structurally, so its branches are covered by `npm test`
 with no credentials or network.
 
+A test of what the CalDAV library (tsdav) makes of a server's bytes on an event
+read (a calendar-query or multiget REPORT) goes in `src/caldav-wire.test.ts`,
+which drives the real library through `makeFakeServerDAVClient` in
+`src/testing/caldav-fake-server.ts`. A test of what the calendar client makes of
+the library's output stubs it through `makeMockDAVClient`, as
+`src/caldav-client.test.ts` and `src/caldav-series-cap.test.ts` do. Writes are
+stubbed in both styles.
+
 A live run against a real account is a one-off check of externally observable
 behaviour (for example a byte-identical attachment round-trip), never the only
 test of logic that could be unit-tested. `scripts/mcp-harness.mjs` is the
@@ -140,6 +148,9 @@ its environment and matches JSON-RPC responses by id.
 Mutation testing changes a source line (a flipped condition, an emptied string)
 and checks that some test fails. `npm run mutation -- <commit>` mutates only the
 `src/` lines that commit changed; the commit must be `HEAD` and the tree clean.
+`npm run mutation -- --base <ref>` mutates the `src/` lines changed between the
+merge base of `<ref>` and `HEAD`, and `HEAD`, so a branch of several commits is
+measured without squashing it; the tree must be clean.
 `npm run mutation -- --all` mutates all of `src/`, reusing earlier results
 through Stryker's incremental file in `reports/`. A surviving mutant is a line
 no test notices changing: add or tighten a test rather than deleting the line.
