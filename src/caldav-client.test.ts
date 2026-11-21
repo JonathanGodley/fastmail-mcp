@@ -2188,8 +2188,9 @@ describe('CalDAVCalendarClient event lookup', () => {
   const assertUnreachableCollision = (tool: string) => (err: Error) => {
     assert.equal(err.name, 'InvalidInputError', tool);
     assert.match(err.message, /is the url of one record and the UID of another/, tool);
-    assert.match(err.message, /no event id reaches that record alone through this server; change it in the Fastmail web interface/, tool);
+    assert.match(err.message, /no event id reaches that record alone through this server\. Other records it names: /, tool);
     assert.doesNotMatch(err.message, /pass its own UID/, tool);
+    assert.doesNotMatch(err.message, /web interface|Fastmail client/i, tool);
     return true;
   };
 
@@ -5209,6 +5210,7 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     await assert.rejects(() => client.deleteCalendarEvent(UID, occurrence), (err: unknown) => {
       assert.ok(isInvalidInput(err), `expected InvalidInputError, got ${err}`);
       assert.match((err as Error).message, pattern);
+      assert.doesNotMatch((err as Error).message, /web interface|Fastmail client/i);
       assert.ok(!/[\r\n\u2028\u2029]/.test((err as Error).message), 'a line break reached the message');
       return true;
     });
@@ -5396,7 +5398,7 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       assert.notEqual(out, GOLDEN, `the fixture edit matched: ${from}`);
       return out;
     };
-    const SHAPE = /cannot be deleted here: .*Nothing was deleted\. Use the Fastmail web interface/;
+    const SHAPE = /cannot be deleted here: .*Nothing was deleted\.$/;
 
     // A refusal no value of occurrence could fix, so it comes before the value is read.
     for (const [label, stored, reason] of [
@@ -5465,7 +5467,7 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
     // refusal may say the value names no occurrence.
     it('declines an occurrence away from the series\' own start time of day', async () => {
       const byHour = mutate('RRULE:FREQ=WEEKLY;COUNT=4', 'RRULE:FREQ=WEEKLY;COUNT=4;BYHOUR=9,15');
-      await refuses(byHour, '2026-09-05T15:00:00', /^occurrence "2026-09-05T15:00:00" of "Planning sync" is not at the series' own start time of day, and this server only removes occurrences at that time\. Nothing was deleted\. Use the Fastmail web interface to delete it\.$/);
+      await refuses(byHour, '2026-09-05T15:00:00', /^occurrence "2026-09-05T15:00:00" of "Planning sync" is not at the series' own start time of day, and this server only removes occurrences at that time\. Nothing was deleted\.$/);
     });
 
     it('declines the second pass through a repeated hour', async () => {
@@ -5802,8 +5804,9 @@ describe('delete_calendar_event occurrence: one occurrence of a repeating event 
       const meeting = GOLDEN.replace('SUMMARY:Planning sync\r\nSEQUENCE:1\r\nBEGIN:VALARM', 'SUMMARY:Planning sync\r\nATTENDEE:mailto:guest@example.com\r\nSEQUENCE:1\r\nBEGIN:VALARM');
       const { client, mockDAVClient } = makeClient(meeting, GOLDEN_INSTANCES);
       await assert.rejects(() => client.deleteCalendarEvent(UID), (err: Error) => {
-        assert.match(err.message, /One occurrence of it cannot be deleted here either: it has attendees or an organizer/);
+        assert.match(err.message, /One occurrence of it cannot be deleted here either: it has attendees or an organizer, and this server writes no repeating event that could mail them\. get_calendar_event still works/);
         assert.doesNotMatch(err.message, /pass occurrence/);
+        assert.doesNotMatch(err.message, /web interface|Fastmail client/i);
         return true;
       });
       assertNothingWritten(mockDAVClient);
@@ -5899,8 +5902,9 @@ describe('update and whole-event delete refuse a VEVENT nested inside the stored
       (err as Error).message,
       `"Hidden 'x Separately" is stored with an event nested inside another component, a component closed out of order, `
         + 'or a BEGIN or END line carrying parameters, '
-        + `and this server will not ${action} an event stored that way. Nothing was changed. Use the Fastmail web interface to change or delete it.`,
+        + `and this server will not ${action} an event stored that way. Nothing was changed.`,
     );
+    assert.doesNotMatch((err as Error).message, /web interface|Fastmail client/i);
     return true;
   };
   const nothingWritten = (m: ReturnType<typeof client>['m']) => {

@@ -1918,7 +1918,7 @@ export class JmapClient {
         : `it is a system mailbox with the role "${describeUntrusted(target.role)}"`;
       throw new InvalidInputError(
         `Cannot delete ${label}: ${why}. create_mailbox cannot make a mailbox with a role, so this tool will not ` +
-          'destroy one it could never put back. Delete it in the Fastmail web interface instead.',
+          'destroy one it could never put back.',
       );
     }
     if (target.myRights?.mayDelete !== true) {
@@ -2030,8 +2030,8 @@ export class JmapClient {
     if (facts.length === 0 && doubts.length === 0) return { deleted: id, deletedMailbox };
     const which = facts.length ? `, which at the moment of the destroy ${facts.join(' and ')}` : '';
     const advice = facts.length
-      ? 'Its mail may have been removed with it; check Trash and the Fastmail web interface.'
-      : 'Check Trash and the Fastmail web interface.';
+      ? 'Its mail may have been removed with it; check Trash.'
+      : 'Check Trash.';
     return {
       deleted: id,
       deletedMailbox,

@@ -431,7 +431,7 @@ export function recurringSeriesRefusal(
   }
   const oneOccurrence = occurrenceRefusal === undefined
     ? 'To delete ONE occurrence other than the first, pass occurrence: the recurrenceId of that occurrence\'s list_calendar_events row. '
-    : `One occurrence of it cannot be deleted here either: ${occurrenceRefusal}. Use the Fastmail web interface to change or delete it. `;
+    : `One occurrence of it cannot be deleted here either: ${occurrenceRefusal}. `;
   return new InvalidInputError(
     `${name} is a repeating event, and this server will not delete the whole series. `
     + 'Deleting it would remove every occurrence, past and future, and the server would mail a cancellation to every attendee. '
@@ -529,8 +529,7 @@ function hiddenLayoutRefusal(action: 'update' | 'delete', title: string): Invali
   return new InvalidInputError(
     `"${echoCallerText(title)}" is stored with an event nested inside another component, a component closed out of order, `
     + 'or a BEGIN or END line carrying parameters, '
-    + `and this server will not ${action === 'update' ? 'write to' : 'delete'} an event stored that way. Nothing was changed. `
-    + 'Use the Fastmail web interface to change or delete it.',
+    + `and this server will not ${action === 'update' ? 'write to' : 'delete'} an event stored that way. Nothing was changed.`,
   );
 }
 
@@ -675,7 +674,7 @@ function resolveOccurrence(occurrence: string, series: OccurrenceSeries, title: 
   );
   // For a real occurrence this server will not exclude, unlike `refuse`.
   const decline = (why: string) => new InvalidInputError(
-    `occurrence ${quoted} of "${echoCallerText(title)}" ${why}. Nothing was deleted. Use the Fastmail web interface to delete it.`,
+    `occurrence ${quoted} of "${echoCallerText(title)}" ${why}. Nothing was deleted.`,
   );
   const isDate = /^\d{8}$/.test(serialized);
   if (series.frame === 'date') {
@@ -3781,7 +3780,7 @@ export function addressCollisionError(
   const [addressed, ...others] = copies;
   const reach = addressedUid
     ? `pass its own UID "${echoCallerText(addressedUid, CALENDAR_UID_ECHO_LIMIT)}" as eventId to act on it`
-    : 'no event id reaches that record alone through this server; change it in the Fastmail web interface';
+    : 'no event id reaches that record alone through this server';
   return new InvalidInputError(
     `The event id "${echoCallerText(eventId, CALENDAR_URL_ECHO_LIMIT)}" is the url of one record and the UID of `
     + `another, and this server will not ${action} either without being told which. `
@@ -5012,7 +5011,7 @@ export class CalDAVCalendarClient {
     if ('reason' in assessed) {
       throw new InvalidInputError(
         `"${echoCallerText(title)}" is a repeating event, but one occurrence of it cannot be deleted here: ${assessed.reason}. `
-        + 'Nothing was deleted. Use the Fastmail web interface to change or delete it.',
+        + 'Nothing was deleted.',
       );
     }
     const { series } = assessed;
@@ -5030,7 +5029,7 @@ export class CalDAVCalendarClient {
     if (series.overrides.some(key => sameOccurrence(key, resolved.target))) {
       throw new InvalidInputError(
         `${quotedOccurrence} of "${echoCallerText(title)}" has been edited on its own, and this server does not delete an edited occurrence. `
-        + 'Nothing was deleted. Use the Fastmail web interface to delete it.',
+        + 'Nothing was deleted.',
       );
     }
 
@@ -5097,7 +5096,7 @@ export class CalDAVCalendarClient {
     if (sameOccurrence(series.start, resolved.target)) {
       throw new InvalidInputError(
         `${quotedOccurrence} is the first occurrence of "${echoCallerText(title)}", which this server never removes, so a series `
-        + 'can never be left empty. Nothing was deleted. Use the Fastmail web interface to delete it.',
+        + 'can never be left empty. Nothing was deleted.',
       );
     }
     const first = await expanded(series.start);
@@ -5108,7 +5107,7 @@ export class CalDAVCalendarClient {
         + 'unedited, at the start this server reads from the stored event, so it is gone, edited on its own, or placed by a stored '
         + 'time zone definition that disagrees with this server\'s zone data. This server removes an occurrence only while the first '
         + 'one is in place and unedited, so the series keeps an occurrence and the exclusion is known to name the intended one. '
-        + 'Nothing was deleted. Use the Fastmail web interface to delete it.',
+        + 'Nothing was deleted.',
       );
     }
 

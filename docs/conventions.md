@@ -277,7 +277,7 @@ records' urls, and quotes the addressed record's own UID where that UID reaches 
 other record's url reaches that one. Where it does not (the url itself, a UID that is another
 resource's url, a UID another record also holds, or a UID whose query hands back a hit that is
 not whole (#239), each of which a refusal would then refuse in turn), the refusal offers no id
-rather than one that loops, and names the Fastmail web interface. An addressed record with no
+rather than one that loops. An addressed record with no
 UID never reaches this refusal: it is not whole, so the writes refuse it first. The url is
 therefore not an escape hatch in this one case, and saying "pass the url" would send the
 caller back to the id they passed. A url-shaped id with no resource at that address is
