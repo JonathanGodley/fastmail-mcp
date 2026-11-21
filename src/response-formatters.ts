@@ -3,8 +3,8 @@ import { projectListEmail } from './field-projection.js';
 import { describeUntrusted, describeUntrustedAt, echoCallerText, parseAddress, toolJson } from './coerce.js';
 import { nonDefaultContactKind, simplifyEntryMap } from './contact-card.js';
 import type { ArchiveEmailResult, ArchiveResult, QueryResult, SavedBodySizes, UpdateDraftResult } from './jmap-client.js';
-import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, buildMalformedStructureNote, describeEventCopies, summariseBrokenCollections } from './caldav-client.js';
-import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp } from './caldav-client.js';
+import { CALENDAR_OPEN_WINDOW_DAYS, buildEtcGmtZoneNote, buildMalformedStructureNote, buildUnreadableEventNote, describeEventCopies, describeUnusableCopies, summariseBrokenCollections } from './caldav-client.js';
+import type { CalendarEvent, CalendarEventCopy, CalendarEventQueryResult, CalendarWindowClamp, UnusableCopy } from './caldav-client.js';
 import type { SendDraftResult } from './send-draft-handler.js';
 import type { BodyEditsReceipt } from './body-edits.js';
 import type { ComposeDraftEmailResult } from './draft-email-handler.js';
@@ -47,6 +47,7 @@ export function formatCalendarEventList(result: CalendarEventQueryResult): strin
     + buildCalendarWindowNote(result.windowClamp)
     + buildEtcGmtZoneNote(events)
     + buildMalformedStructureNote(events)
+    + buildUnreadableEventNote(events)
     + buildBrokenCollectionNote(result.brokenCollections, 'read');
 }
 
@@ -344,9 +345,24 @@ export function buildAmbiguousEventNote(
 export function calendarEventBody(
   event: CalendarEvent,
   otherCopies?: CalendarEventCopy[],
-): CalendarEvent | (CalendarEvent & { otherCopies: CalendarEventCopy[] }) {
+  unreadableCopies?: UnusableCopy[],
+): CalendarEvent & { otherCopies?: CalendarEventCopy[]; unreadableCopies?: UnusableCopy[] } {
   // Presence is the signal, so an empty list is omitted.
-  return otherCopies && otherCopies.length > 0 ? { ...event, otherCopies } : event;
+  return {
+    ...event,
+    ...(otherCopies && otherCopies.length > 0 && { otherCopies }),
+    ...(unreadableCopies && unreadableCopies.length > 0 && { unreadableCopies }),
+  };
+}
+
+/** The trailing note beside `unreadableCopies` (#239); worded as `unusableMatchError` is. */
+export function buildUnusableCopiesNote(unreadableCopies?: UnusableCopy[]): string {
+  if (!unreadableCopies || unreadableCopies.length === 0) return '';
+  const one = unreadableCopies.length === 1;
+  return `\n\nNote: this event id also matched ${one ? 'a record' : `${unreadableCopies.length} records`} this server `
+    + `could not use as this event: ${describeUnusableCopies(unreadableCopies)}. The event above is a record it could use. `
+    + 'update_calendar_event and delete_calendar_event refuse this id while '
+    + `${one ? 'that record cannot' : 'those records cannot'} be used.`;
 }
 
 // Appended by the handler after the JSON, so the block stays parseable. Fail-loud signals

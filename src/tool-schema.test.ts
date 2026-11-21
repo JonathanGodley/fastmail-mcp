@@ -19,7 +19,8 @@
 // spawn and no build, and tsc does not rewrite string literals, so the source and the
 // shipped schema cannot disagree on these. The array-side guard (#98, in
 // src/built-server.test.ts) reads tools/list instead; for an on-demand check against a built
-// server, `node scripts/mcp-harness.mjs --list`.
+// server, `node scripts/mcp-harness.mjs --list`. The snooze tools are declared in
+// src/snooze.ts, which this scan does not read; src/snooze.test.ts pins their booleans.
 //
 // Recovery notes name only parameters the emitting tool has.
 //
