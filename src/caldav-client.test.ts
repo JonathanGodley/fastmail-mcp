@@ -1685,6 +1685,32 @@ describe('CalDAVCalendarClient event lookup', () => {
     }
   });
 
+  it('names a url the read could not use only where it resolves inside its calendar', async () => {
+    const path = new URL(PERSONAL_URL).pathname;
+    const outside = (calendar: string) => `"${calendar}" (at an address outside that calendar)`;
+    const cases: Array<[string, { displayName: string; url: unknown }, string, string]> = [
+      ['a relative href', { displayName: 'Personal', url: PERSONAL_URL }, `${path}solo.ics`, `"Personal" ("${path}solo.ics")`],
+      ['an href that does not parse', { displayName: 'Personal', url: PERSONAL_URL }, 'http://[', outside('Personal')],
+      ['a calendar url that is not a string', { displayName: 'Numeric url', url: 12345 }, 'solo.ics', outside('Numeric url')],
+      ['a calendar url that does not parse', { displayName: 'Unparseable url', url: 'http://[' }, 'solo.ics', outside('Unparseable url')],
+    ];
+    for (const [label, calendar, url, copy] of cases) {
+      const { client } = makeLookupClient([calendar], { [String(calendar.url)]: [{ data: eventIcal('solo@fm'), url }] });
+      await assert.rejects(() => client.getCalendarEventById('solo@fm'), { message: unusableMatchText('solo@fm', copy) }, label);
+    }
+  });
+
+  it('counts the records it could not use and lists them to the cap', async () => {
+    const copies = (n: number) => Array.from({ length: n }, (_, i) => ({ data: eventIcal('solo@fm'), url: `${PERSONAL_URL}c${i}.ics` }));
+    const listed = (n: number) => Array.from({ length: n }, (_, i) => `"Personal" ("${PERSONAL_URL}c${i}.ics")`).join(', ');
+    const text = (count: number, list: string) => `The event id "solo@fm" matched ${count} records this server could not use `
+      + `as this event: ${list}. A retry helps only if the server failed to send the record whole.`;
+    for (const [n, list] of [[2, listed(2)], [12, listed(12)], [13, `${listed(12)}, …and 1 more`]] as const) {
+      const { client } = makeLookupClient([{ displayName: 'Personal', url: PERSONAL_URL }], { [PERSONAL_URL]: copies(n) });
+      await assert.rejects(() => client.getCalendarEventById('solo@fm'), { message: text(n, list) }, String(n));
+    }
+  });
+
   // A collection can only contain a url if it HAS one that parses. Each entry below is a calendar
   // the confinement test has to skip rather than trip over — and skipping it must not turn into
   // matching everything, which is what a container with no path of its own would do.

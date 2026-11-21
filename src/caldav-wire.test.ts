@@ -88,7 +88,7 @@ describe('CalDAV reads through tsdav\'s own parse (#239)', () => {
   });
 });
 
-const UNREADABLE_ANSWER = { message: /^Calendar "Personal": the calendar server answered a read with a success status but a body that is not a complete WebDAV multistatus, or was not sent as XML, so what this calendar holds is unknown\. This call fails rather than read that answer as an empty calendar\. Nothing was changed\./ };
+const UNREADABLE_ANSWER = { name: 'UnreadableDavAnswerError', message: /^Calendar "Personal": the calendar server answered a read with a success status but a body that is not a complete WebDAV multistatus, or was not sent as XML, so what this calendar holds is unknown\. This call fails rather than read that answer as an empty calendar\. Nothing was changed\./ };
 
 const XML = 'application/xml; charset=utf-8';
 const NOT_XML: FakeOverride = { body: 'this is not xml', contentType: XML };
@@ -229,6 +229,73 @@ describe('a success answer that is not a complete multistatus is an error (#239)
       );
       const result = await listWindow(client);
       assert.deepEqual(result.events.map(e => e.title).sort(), ['Alpha', 'Beta'], JSON.stringify(body.slice(-30)));
+    }
+  });
+});
+
+describe('the end of a success answer is read whole before it is trusted (#239)', () => {
+  const STORE = {
+    [PERSONAL]: [
+      { href: `${PERSONAL}a.ics`, data: ical('a@fm', 'Alpha'), etag: '"ea"' },
+      { href: `${PERSONAL}b.ics`, data: ical('b@fm', 'Beta'), etag: '"eb"' },
+    ],
+  };
+  const answering = (answer: FakeOverride) => setup(STORE,
+    (request) => (request.url === PERSONAL && request.kind === 'query' ? answer : undefined)).client;
+  const rootWith = (before: string, attrs = '') => TWO_EVENTS.replace('<d:multistatus ', `${before}<d:multistatus ${attrs}`);
+  const ROOT_END = /<\/d:multistatus>$/;
+
+  // Every body below except the first parses in tsdav, so only the end-of-body scan decides it.
+  const rows: Array<[string, string, 'accepted' | 'rejected']> = [
+    ['non-whitespace text after the root', `${TWO_EVENTS} trailing`, 'rejected'],
+    ['a CDATA section after the root', `${TWO_EVENTS}<![CDATA[x]]>`, 'rejected'],
+    ['a second element after the root', `${TWO_EVENTS}<d:other/>`, 'rejected'],
+    ['an unterminated comment after the root', `${TWO_EVENTS}<!-- cut`, 'rejected'],
+    ['a comment cut to <!--> after the root', `${TWO_EVENTS}<!-->`, 'rejected'],
+    ['an unterminated processing instruction after the root', `${TWO_EVENTS}<?pi cut`, 'rejected'],
+    ['a processing instruction cut to <?> after the root', `${TWO_EVENTS}<?>`, 'rejected'],
+    ['a body cut inside a tag name', cutAfter('<d:resp', 2), 'rejected'],
+    ['a body cut before the root end tag\'s >', TWO_EVENTS.slice(0, -1), 'rejected'],
+    ['a root end tag with a space after </', TWO_EVENTS.replace(ROOT_END, '</ d:multistatus>'), 'rejected'],
+    // tsdav strips the trailing underscore and reads it as a multistatus.
+    ['a root named multistatus_', TWO_EVENTS.replace('<d:multistatus ', '<d:multistatus_ ').replace(ROOT_END, '</d:multistatus_>'), 'rejected'],
+    ['a markup declaration inside the root', TWO_EVENTS.replace('<d:response>', '<!foo><d:response>'), 'rejected'],
+    ['a root attribute holding /> in double quotes', rootWith('', 'x="/>" '), 'accepted'],
+    ['a root attribute holding /> in single quotes', rootWith('', 'x=\'/>\' '), 'accepted'],
+    ['a root attribute holding a double quote and /> in single quotes', rootWith('', 'x=\'"/>\' '), 'accepted'],
+    ['a root attribute holding a single quote and /> in double quotes', rootWith('', 'x="\'/>" '), 'accepted'],
+    ['a DOCTYPE before the root', rootWith('<!DOCTYPE d:multistatus>'), 'accepted'],
+    ['a DOCTYPE with an internal subset before the root', rootWith('<!DOCTYPE d:multistatus [<!ENTITY x "y">]>'), 'accepted'],
+  ];
+  for (const [label, body, outcome] of rows) {
+    it(`${outcome === 'accepted' ? 'lists' : 'fails'} a listing whose answer has ${label}`, async () => {
+      const client = answering({ body, contentType: XML });
+      if (outcome === 'rejected') {
+        await assert.rejects(listWindow(client), UNREADABLE_ANSWER);
+      } else {
+        assert.deepEqual((await listWindow(client)).events.map(e => e.title).sort(), ['Alpha', 'Beta']);
+      }
+    });
+  }
+
+  // davRequest throws, rather than returning its stand-in, when a status line is an element
+  // whose own toString is not a function.
+  it('fails a listing whose answer makes tsdav\'s own parse throw', async () => {
+    const body = multistatus('<d:response><d:href>/dav/calendars/user/probe/personal/a.ics</d:href>'
+      + '<d:status><d:toString/></d:status></d:response>');
+    await assert.rejects(listWindow(answering({ body, contentType: XML })), UNREADABLE_ANSWER);
+  });
+
+  it('checks every 2xx status and leaves the rest to tsdav', async () => {
+    assert.deepEqual((await listWindow(answering({ body: TWO_EVENTS, status: 200, contentType: XML }))).events.map(e => e.title).sort(), ['Alpha', 'Beta']);
+    for (const status of [200, 299]) {
+      await assert.rejects(listWindow(answering({ ...NOT_XML, status })), UNREADABLE_ANSWER, String(status));
+    }
+    for (const status of [404, 500]) {
+      await assert.rejects(listWindow(answering({ ...NOT_XML, status })), {
+        name: 'Error',
+        message: `CalDAV request failed: "Collection query failed: ${status} . Raw response: this is not xml"`,
+      }, String(status));
     }
   });
 });
@@ -393,6 +460,22 @@ describe('get_calendar_event names a record it matched and could not use (#239)'
   it('has no note when every match could be used', () => {
     assert.equal(buildUnusableCopiesNote(undefined), '');
     assert.equal(buildUnusableCopiesNote([]), '');
+    const event = { id: 'solo@fm', title: 'Solo' } as Parameters<typeof calendarEventBody>[0];
+    assert.deepEqual(calendarEventBody(event, undefined, []), event);
+  });
+
+  it('writes two copies as records in the note', () => {
+    assert.equal(
+      buildUnusableCopiesNote([{ calendar: 'Personal', url: `${PERSONAL}solo.ics` }, { calendar: 'Work' }]),
+      `\n\nNote: this event id also matched 2 records this server could not use as this event: "Personal" ("${PERSONAL}solo.ics"), `
+      + '"Work" (at an address outside that calendar). The event above is a record it could use. update_calendar_event and '
+      + 'delete_calendar_event refuse this id while those records cannot be used.',
+    );
+  });
+
+  it('names a copy matched by an id that came with surrounding whitespace', async () => {
+    const { client } = setup({ [WORK]: [{ href: `${WORK}solo.ics`, data: ical('solo@fm'), etag: '"e2"', query: 'noetag' }] });
+    await assert.rejects(client.getCalendarEventById('  solo@fm  '), { message: unusable('solo@fm', `"Work" ("${WORK}solo.ics")`) });
   });
 });
 
