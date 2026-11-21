@@ -249,8 +249,8 @@ one reaches a readable record: a readable copy's url where nothing came back for
 form, since passing a url makes the UID query ask for that url instead; or, where the caller's
 url addressed a record read whole, that record's own UID if it reaches it alone. Where the
 record at the caller's url is itself the unreadable one, no other record is a way to it, and
-the refusal offers nothing. A hit at its calendar's own url is tsdav's stand-in for an answer it
-could not parse, so the refusal names that calendar's answer, not a record. The lookup reports
+the refusal offers nothing. A hit at its calendar's own url names the collection, not a record,
+so the refusal names that calendar's answer. The lookup reports
 rather than throws because `get_calendar_event` shares it and applies its own rule: it skips a
 hit missing its data, a VEVENT, its url or its etag.
 
@@ -2503,6 +2503,22 @@ the position-aware test this path uses (`isRecurringSeriesResource` serves only 
 update/delete refusal), answers false for both, and false on this
 path is a positive claim about the calendar rather than the fail-closed refusal it is on the
 write path.
+
+**A success answer that is not a complete multistatus is an error** (#239), on this follow-up
+read and on every other calendar-object read: the listing, the lookup's UID query and url fetch,
+and the occurrence delete's expansion. tsdav hands back one stand-in entry for a 2xx body it
+cannot parse, and the query leg filters that entry out, so the calendar reads as empty; xml-js
+also recovers a body cut after a complete `response` as if it were whole. RFC 4791 §7.8 and §7.9
+require a multistatus. So every such read passes `checkedReadFetch`, which re-reads a 2xx body
+through tsdav's own `davRequest` (the stand-in means it did not parse, had no `multistatus`, was
+empty, or was not sent as XML) and then checks that the root `multistatus` closes, with only
+whitespace, comments and processing instructions after it; either failing throws
+`UnreadableDavAnswerError`. An empty multistatus, self-closed or not, is the valid empty window
+(RFC 4918 §13). A non-2xx answer passes untouched, so tsdav's own throw and the url fetch's
+not-found classification see it as before. The check lives in the fetch, not in what tsdav
+returns, because the stand-in never reaches the caller of a query. The only read after a write,
+the occurrence delete's confirmation, already catches every throw as NOT CONFIRMED, so the
+error's "Nothing was changed" holds.
 
 One row that carries no recurrence claim in either direction is the placeholder a resource
 with no parseable VEVENT produces (`{ id, url, title: 'Untitled' }`). It is not set to

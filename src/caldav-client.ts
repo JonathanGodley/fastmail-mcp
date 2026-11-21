@@ -2955,6 +2955,7 @@ function isAddressedResourceMissing(err: unknown): boolean {
  */
 function renderDavRejection(err: unknown): unknown {
   if (err instanceof InvalidInputError || err instanceof PathAccessError || err instanceof McpError) return err;
+  if (err instanceof UnreadableDavAnswerError) return err;
   const text = err instanceof Error ? err.message : String(err);
   return new Error(`CalDAV request failed: "${describeUntrustedAt(text, DAV_REJECTION_ECHO_LIMIT)}"`);
 }
@@ -2972,6 +2973,151 @@ async function davCall<T>(call: () => Promise<T>): Promise<T> {
 function calendarLabel(calendar: DAVCalendar): string {
   return unwrapDisplayName(calendar.displayName)
     ?? (typeof calendar.url === 'string' ? calendar.url.trim() : '');
+}
+
+/**
+ * A calendar-object read answered 2xx with a body that is not a complete multistatus (#239).
+ * Its text must never match `isAddressedResourceMissing`, or the url fetch would swallow it.
+ */
+class UnreadableDavAnswerError extends Error {
+  constructor(calendar: DAVCalendar) {
+    super(
+      `Calendar "${echoCallerText(calendarLabel(calendar))}": the calendar server answered a read with a success `
+      + 'status but a body that is not a complete WebDAV multistatus, or was not sent as XML, so what this '
+      + 'calendar holds is unknown. This call fails rather than read that answer as an empty calendar. '
+      + 'Nothing was changed. Retry the call; a failure that persists is the calendar server, not this request.',
+    );
+    this.name = 'UnreadableDavAnswerError';
+  }
+}
+
+/**
+ * The `fetch` EVERY calendar-object read passes (#239): tsdav reads a 2xx answer it cannot parse,
+ * or one cut short, as an empty calendar, so this throws `UnreadableDavAnswerError` on one. RFC
+ * 4791 sections 7.8 and 7.9 require a multistatus, so an empty body fails too. A non-2xx answer
+ * passes untouched, for tsdav's own throw and `isAddressedResourceMissing`. Always a function: an
+ * explicit `undefined` would override the client's `fetchOverride`.
+ */
+function checkedReadFetch(client: DAVClient, calendar: DAVCalendar): typeof globalThis.fetch {
+  const baseFetch = client.fetchOverride ?? globalThis.fetch;
+  return async (input, init) => {
+    const response = await baseFetch(input, init);
+    if (response.status < 200 || response.status > 299) return response;
+    // The original goes back to tsdav: a clone loses a `url` defined on it (see discovery).
+    const body = await response.clone().text();
+    if (!await parsesAsMultistatus(body, response.status, response.headers.get('content-type'), calendar.url)
+      || !multistatusClosesWhole(body)) {
+      throw new UnreadableDavAnswerError(calendar);
+    }
+    return response;
+  };
+}
+
+/**
+ * Whether tsdav's own `davRequest` reads these bytes as a multistatus: it returns one stand-in
+ * entry, with `raw` and no `props`, for a parse that throws, no `multistatus`, an empty body or a
+ * content type without "xml". An empty multistatus gives an entry with neither, and passes.
+ */
+async function parsesAsMultistatus(body: string, status: number, contentType: string | null, url: string): Promise<boolean> {
+  let entries: DAVResponse[];
+  try {
+    entries = await davRequest({
+      url,
+      init: { method: 'REPORT', body: undefined },
+      convertIncoming: false,
+      // The `Response` constructor throws on a body for a null-body status.
+      fetch: async () => new Response(status === 204 || status === 205 ? null : body, {
+        status,
+        headers: contentType === null ? {} : { 'content-type': contentType },
+      }),
+    });
+  } catch {
+    return false;
+  }
+  return !entries.some(entry => 'raw' in entry && !('props' in entry));
+}
+
+/**
+ * Whether the root element is a `multistatus` that closes, followed only by whitespace, comments
+ * and processing instructions. xml-js recovers a body cut short as if it were whole, which the
+ * parse cannot show. A depth-tracking scan, not a suffix match: CDATA (event text is
+ * outside-authored), comments, processing instructions and quoted attribute values are skipped,
+ * so nothing inside them passes for the root's end tag.
+ */
+function multistatusClosesWhole(body: string): boolean {
+  let i = 0;
+  let depth = 0;
+  let root: string | undefined;
+  let closed = false;
+  const skipPast = (marker: string, from: number): boolean => {
+    const at = body.indexOf(marker, from);
+    if (at === -1) return false;
+    i = at + marker.length;
+    return true;
+  };
+  while (i < body.length) {
+    if (body[i] !== '<') {
+      if (closed && !/\s/.test(body[i])) return false;
+      i++;
+      continue;
+    }
+    if (body.startsWith('<!--', i)) {
+      if (!skipPast('-->', i + 4)) return false;
+      continue;
+    }
+    if (body.startsWith('<?', i)) {
+      if (!skipPast('?>', i + 2)) return false;
+      continue;
+    }
+    if (closed) return false;
+    if (body.startsWith('<![CDATA[', i)) {
+      if (!skipPast(']]>', i + 9)) return false;
+      continue;
+    }
+    const isEnd = body.startsWith('</', i);
+    let j = i + (isEnd ? 2 : 1);
+    const nameStart = j;
+    while (j < body.length && !/[\s/>]/.test(body[j])) j++;
+    const name = body.slice(nameStart, j);
+    let quote: string | undefined;
+    for (; j < body.length; j++) {
+      const c = body[j];
+      if (quote !== undefined) {
+        if (c === quote) quote = undefined;
+      } else if (c === '"' || c === '\'') {
+        quote = c;
+      } else if (c === '>') {
+        break;
+      }
+    }
+    if (j >= body.length) return false;
+    const selfClosed = !isEnd && body[j - 1] === '/';
+    i = j + 1;
+    // A DOCTYPE before the root has no end tag and nests nothing.
+    if (name.startsWith('!')) {
+      if (root !== undefined) return false;
+      continue;
+    }
+    if (isEnd) {
+      depth--;
+      if (depth < 0) return false;
+      if (depth === 0) {
+        if (name !== root) return false;
+        closed = true;
+      }
+      continue;
+    }
+    if (root === undefined) {
+      if (name.slice(name.indexOf(':') + 1) !== 'multistatus') return false;
+      root = name;
+    }
+    if (selfClosed) {
+      if (depth === 0) closed = true;
+    } else {
+      depth++;
+    }
+  }
+  return closed;
 }
 
 /** One undecided resource: the href to ASK about, and the rows that resolving it would label. */
@@ -3002,6 +3148,7 @@ async function settleAmbiguousRecurrence(
     props: { 'd:getetag': {}, 'c:calendar-data': {} },
     objectUrls: [...undecided.values()].map(entry => entry.requestHref),
     depth: '1',
+    fetch: checkedReadFetch(client, calendar),
   }));
 
   const answered = new Set<string>();
@@ -3113,10 +3260,7 @@ function isReadableHit(obj: DAVCalendarObject): boolean {
 interface UnreadableHit extends CalendarEventCopy {
   /** The url the caller passed, fetched and not returned whole. */
   addressed: boolean;
-  /**
-   * The hit sits at its calendar's own url: tsdav's stand-in for an answer it could not parse,
-   * so it is not a record.
-   */
+  /** The hit sits at its calendar's own url, which names the collection, so it is not a record. */
   wholeAnswer: boolean;
 }
 
@@ -4064,6 +4208,7 @@ export class CalDAVCalendarClient {
         calendar: cal,
         ...fetchOptions,
         urlFilter: calendarResourceUrlFilter(cal.url),
+        fetch: checkedReadFetch(client, cal),
       }));
       // Settled in one request per calendar; see `settleAmbiguousRecurrence` (#155).
       const undecided = new Map<string, UndecidedResource>();
@@ -4184,6 +4329,7 @@ export class CalDAVCalendarClient {
           calendar,
           filters: uidEqualsFilter(uid),
           urlFilter: calendarResourceUrlFilter(calendar.url),
+          fetch: checkedReadFetch(client, calendar),
         }));
         for (const obj of objects) {
           if (!isReadableHit(obj)) unreadableHolders.push({ calendar, obj });
@@ -4207,6 +4353,7 @@ export class CalDAVCalendarClient {
           calendar,
           objectUrls: [objectUrl],
           urlFilter: calendarResourceUrlFilter(calendar.url),
+          fetch: checkedReadFetch(client, calendar),
         });
       } catch (err) {
         // NOT-FOUND ONLY IS SWALLOWED. Any other failure is about the collection, and swallowing
@@ -4823,6 +4970,7 @@ export class CalDAVCalendarClient {
         timeRange: occurrenceWindow(target),
         expand: true,
         urlFilter: calendarResourceUrlFilter(match.calendar.url),
+        fetch: checkedReadFetch(client, match.calendar),
       }));
       const wanted = resolveResponseHref(obj.url, match.calendar.url);
       const own = objects.find(o => typeof o.url === 'string' && resolveResponseHref(o.url, match.calendar.url) === wanted);
