@@ -2991,7 +2991,8 @@ function calendarLabel(calendar: DAVCalendar): string {
 class UnreadableDavAnswerError extends Error {
   constructor(calendar: DAVCalendar) {
     super(
-      `Calendar "${echoCallerText(calendarLabel(calendar))}": the calendar server answered a read with a success `
+      // At the url bound: a nameless calendar is labelled by its url (see describeEventCopies).
+      `Calendar "${echoCallerText(calendarLabel(calendar), AMBIGUOUS_COPY_URL_ECHO_LIMIT)}": the calendar server answered a read with a success `
       + 'status but a body that is not a complete WebDAV multistatus, or was not sent as XML, so what this '
       + 'calendar holds is unknown. This call fails rather than read that answer as an empty calendar. '
       + 'Nothing was changed. Retry the call; a failure that persists is the calendar server, not this request.',

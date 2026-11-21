@@ -33,9 +33,10 @@ function ical(uid: string, summary = 'Meeting', extra: string[] = []): string {
 function setup(
   store: Record<string, FakeResource[]>,
   override?: (request: FakeRequest, n: number) => FakeOverride | undefined,
+  calendars: Array<{ displayName?: string; url: string }> = CALENDARS,
 ) {
   const server = makeFakeCalDAVServer(store, override);
-  const dav = makeFakeServerDAVClient(CALENDARS, server, {
+  const dav = makeFakeServerDAVClient(calendars, server, {
     updateCalendarObject: mock.fn(async (_p: unknown) => ({ ok: true, status: 204, headers: new Headers() })),
     deleteCalendarObject: mock.fn(async (_p: unknown) => ({ ok: true, status: 204, headers: new Headers() })),
   });
@@ -201,6 +202,19 @@ describe('a success answer that is not a complete multistatus is an error (#239)
       );
       await assert.rejects(client.getCalendarEventById(`${PERSONAL}deleted.ics`), { message: /^Calendar event not found: / }, String(status));
     }
+  });
+
+  // A nameless calendar is labelled by its url, and these two differ only past 60 characters.
+  it('names a nameless calendar by its whole url', async () => {
+    const base = `${ORIGIN}/dav/calendars/user/probe/a-long-collection-name-shared-by-both-calendars-`;
+    const first = `${base}first/`;
+    const second = `${base}second/`;
+    const { client } = setup(
+      {},
+      (request) => (request.url === second ? NOT_XML : undefined),
+      [{ url: first }, { url: second }],
+    );
+    await assert.rejects(listWindow(client), { message: new RegExp(`^Calendar "${second.replace(/[.]/g, '\\.')}": the calendar server`) });
   });
 
   it('accepts trailing whitespace, comments and processing instructions after the root', async () => {
