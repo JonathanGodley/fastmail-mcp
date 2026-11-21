@@ -3994,7 +3994,6 @@ describe('draft_email — the join around each inserted block', () => {
       { mode: 'new', to: ['sam@example.com'], textBody: 'Token: zzQX-draft-body-synthetic\n{{signature}}' },
       withIdentity(SIGN_OFF),
     );
-    // The join is the account's own body text, so it is not redacted.
     assert.deepEqual(split.joins![0].above, ['Token: zzQX-draft-body-synthetic']);
   });
 

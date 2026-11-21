@@ -5,8 +5,7 @@ import type { InsertedBlock } from './body-joins.js';
 import { expandBodyTokens } from './body-tokens.js';
 import { registerSecret } from './coerce.js';
 
-// A join shows the account's own body text, so even a registered secret in it is shown as
-// written. Each test below that carries this value would go red if a join path redacted.
+// Registered, so each test carrying it goes red if a join path redacts.
 const REGISTERED = 'zzQX-body-text-synthetic';
 registerSecret(REGISTERED);
 

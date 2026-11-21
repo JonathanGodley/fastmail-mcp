@@ -1849,10 +1849,8 @@ describe('formatArchiveResult', () => {
   });
 
   it('redacts a secret sitting past the truncation cap, not just a short one', () => {
-    // The sibling test above puts the secret near the start, where describePart's 64
-    // code-point cap never fires, so it passes under either ordering. Redaction matches only a
-    // whole secret, so truncating BEFORE redacting leaves a prefix that no longer matches and
-    // goes out verbatim. This positions the secret across the cap.
+    // Across describePart's 64-code-point cap, so truncating BEFORE redacting would leave a
+    // prefix out verbatim; the sibling above sits where the cap never fires.
     const text = build([
       {
         id: 'a',
@@ -1861,8 +1859,7 @@ describe('formatArchiveResult', () => {
         reason: { setErrorType: 'forbidden', description: `${'x'.repeat(40)} token ${REGISTERED} rejected` },
       },
     ]);
-    // Asserting the absence of the WHOLE secret would pass under either ordering. What
-    // discriminates is whether any prefix of it survives.
+    // Any prefix, not the whole secret: the whole one is absent under either ordering.
     assert.ok(!text.includes('zzQX'), `a secret fragment survived: ${text}`);
     assert.match(text, /\[REDACTED\]/);
   });

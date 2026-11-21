@@ -806,8 +806,6 @@ describe('redactSecrets', () => {
   });
 
   it('property: text holding no registered value comes back unchanged', () => {
-    // Every value registered anywhere in this file is a string literal (the second assertion
-    // checks it), so each generated input is checked against all of them before it is used.
     const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
     const calls = [...source.matchAll(/\bregisterSecret\(\s*('(?:[^'\\]|\\.)*'|[^)]*)\s*\)/g)].map((m) => m[1]);
     const registered = calls.filter((arg) => arg.startsWith("'")).map((arg) => arg.slice(1, -1).replace(/\\(.)/g, '$1'));

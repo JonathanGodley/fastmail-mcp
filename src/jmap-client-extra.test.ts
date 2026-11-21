@@ -1812,7 +1812,6 @@ describe('bulk set-error formatting', () => {
   });
 
   it('redacts a registered secret in an id before truncating it', async () => {
-    // Long enough that describing first would cut the secret short, leaving its prefix in clear.
     const hostile = 'i'.repeat(40) + REGISTERED;
     stubBulkMoveFailure({ [hostile]: { type: 'notFound' }, e2: { type: 'notFound' } });
 
@@ -4807,8 +4806,6 @@ describe('resolver error prose neutralises untrusted values (#131)', () => {
   });
 
   it('a registered secret in a mailbox name is redacted before it is truncated', () => {
-    // Long enough that describing it first would cut the secret short, and its prefix would
-    // go out clear.
     const name = 'N'.repeat(40) + REGISTERED;
     assert.throws(
       () => resolveMailbox([{ id: 'mb-tok', name }], 'nope'),

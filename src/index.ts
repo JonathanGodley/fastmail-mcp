@@ -188,9 +188,7 @@ function initializeCalDAVClient(): CalDAVCalendarClient | null {
   // more to register.
   try {
     registerSecret(getBasicAuthHeaders({ username, password }).authorization?.replace(/^Basic /, ''));
-  } catch {
-    // Nothing tsdav can send.
-  }
+  } catch {}
 
   // The ORGANIZER display name is resolved here, not read from process.env inside the
   // CalDAV client, so every env-derived setting goes through the one four-name lookup
