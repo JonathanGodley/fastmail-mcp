@@ -889,11 +889,10 @@ describe('describeUntrusted', () => {
   // The ORDER half. Redaction matches only a whole secret, so a value long enough to be
   // truncated can carry a credential across the 64-code-point cut. Describing first leaves
   // the surviving prefix in clear; redacting first does not.
-  it('is exactly redact-then-describe, and NOT describe-then-redact', () => {
+  it('redacts a secret crossing the cut before truncating, where truncating first would not', () => {
     registerSecret('zzQX-order-synthetic-value');
     const value = 'x'.repeat(50) + 'zzQX-order-synthetic-value';
-    assert.equal(describeUntrusted(value), describePart(redactSecrets(value)));
-    assert.notEqual(describeUntrusted(value), redactSecrets(describePart(value)));
+    assert.equal(describeUntrusted(value), 'x'.repeat(50) + '[REDACTED]');
     // Spelled out: the wrong order really does emit the prefix in clear, which is why this
     // pair lives behind one name instead of being respelled at each call site.
     assert.ok(redactSecrets(describePart(value)).includes('zzQX-order'));

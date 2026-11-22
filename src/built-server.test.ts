@@ -8,7 +8,8 @@
 //      an error message becomes text the MCP caller reads, and it has no exported
 //      seam, so the only proof a given error path is redacted is to drive the real
 //      server over JSON-RPC.
-//   2. stderr. tsdav logs the HTTP Basic credential whenever DEBUG is set. That
+//   2. stderr. With DEBUG set, tsdav 2.3.1 logs the account name (earlier versions the
+//      whole Basic credential; docs/security-model.md has the account). That
 //      write never passes through index.ts's redaction boundary, so the only control
 //      is suppressing the logger, proved by loading the real built module and
 //      calling the real tsdav function.

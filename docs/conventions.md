@@ -1234,8 +1234,8 @@ they neutralise a value, so a secret their neutralising would reassemble is hidd
 passes is a secret cut short before this server sees it (tsdav cuts a failed response's body
 at 4,096 characters), one in remote text rendered through `echoCallerText` alone, which
 truncates without redacting (the DAV status text, and server-supplied calendar urls and
-names), and one with a character inside it anywhere the text is not neutralised. This
-residual is accepted.
+names), and one with a character inside it, unless that character is one the helper's
+neutralising removes. This residual is accepted.
 
 **A payload inside a prose frame is still a payload.** A list result is a summary line, a
 newline, then the JSON array; the bulk-operations diagnostic wraps its JSON in a heading and a
