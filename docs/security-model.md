@@ -414,8 +414,8 @@ around each inserted block shows its first and last lines, and the lines either 
 signature can be the original's. That puts a few lines of the sender's text in front of the
 agent, accepted because a caller composing a reply or forward has nearly always just read the
 original, and the attribution line ("On <date>, <name> wrote:") is the server's own. They are
-display text like every join line: redacted, neutralised, and cut at 120 code points (a markup
-run at 80).
+display text like every join line: neutralised and cut at 120 code points (a markup run at
+80). They are not redacted, being the account's own text, which a read returns as written.
 
 Transmission also **writes two keyword flags** (`$answered`+`$seen`, or
 `$forwarded`+`$seen`) after a send succeeds (#52/#54, #30, #60). The compose surface is
@@ -561,7 +561,7 @@ default with a hidden-count note. The accepted residuals:
   path and role) is rendered through `describeUntrusted`, so a mailbox name carrying a line
   break cannot forge what reads as a further sentence of server output, and a name long enough
   to swamp the message is truncated with a visible ellipsis (#131). `InvalidInputError`
-  messages are also run through `redactBearerTokens` as defense-in-depth (a token can't
+  messages are also run through `redactSecrets` as defense-in-depth (a token can't
   actually appear in them), but that is **not** what makes the oracle acceptable.
 - **`get_mailbox_stats` and the label tools reject a real id that is absent from the fetched
   list.** Reading stats off the shared `getMailboxes()` list (and resolving label `mailboxes`
@@ -700,7 +700,7 @@ and the account identity is itself worth not printing.
 
 Those writes go straight to stderr from inside the library. They never pass through the
 CallTool boundary in `src/index.ts`, so the redaction that covers every error egress
-(`redactBearerTokens`, see `src/coerce.ts`) cannot reach them. Nothing downstream can
+(`redactSecrets`, see `src/coerce.ts`) cannot reach them. Nothing downstream can
 scrub them either, because the operator's own terminal or log collector is the
 destination. Suppressing the logger at the source is the only control.
 

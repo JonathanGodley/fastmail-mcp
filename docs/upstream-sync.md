@@ -64,7 +64,7 @@ re-run the gate, and integrate from there.
 |---|---|---|
 | `src/index.ts` | `--ours` + port | Tool surface is fork-shaped (draft-first, consolidated search); upstream's security edits ported in |
 | `src/jmap-client.ts` | `--ours` + port | Simplification, path confinement, the fork's own query helpers |
-| `src/coerce.ts` | `--ours` + splice | Fork-dominant; upstream's redaction additions spliced in |
+| `src/coerce.ts` | `--ours` + splice | Fork-dominant; upstream's credential shape patterns are declined, since the fork redacts exact registered values only (#246) |
 | `src/caldav-client.ts` | `--theirs` + surgery | Upstream is ahead here; the fork's `coerce.js` import and error-class discipline are restored after |
 | `src/contacts-calendar.ts` | `--theirs` + surgery | Same, plus the fork's account-routing and `properties` deletions restored |
 | `src/url-validation.ts` | `--theirs` + delete | Upstream already carries the fork's regional-host fix; `validateHttpsUrl` dies with the WebDAV client |

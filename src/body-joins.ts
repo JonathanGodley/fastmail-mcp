@@ -4,13 +4,11 @@
  * signature's own, doubled spacing, history above the sign-off) is visible in the write
  * result. It reports; it never edits the body.
  *
- * Every string a join carries is display text, already redacted, neutralised and bounded.
- * Redaction runs over the whole text before the block, the block, and the whole text after
- * it, each in one piece, before any line is cut out: a credential can span two lines.
+ * Every string a join carries is display text, neutralised and bounded. It is not redacted:
+ * it is the account's own body text, which the read tools return as written.
  */
 import type { BodyTokenName, ExpandedTokenSite } from './body-tokens.js';
 import { htmlToText } from './body-format.js';
-import { redactBearerTokens } from './coerce.js';
 import { describePart } from './inline-images.js';
 
 export type JoinPart = 'textBody' | 'htmlBody';
@@ -55,7 +53,7 @@ export function insertedBlocks(sites: readonly ExpandedTokenSite[], shift = 0): 
     .map((s) => ({ token: s.name, start: s.output!.start + shift, end: s.output!.end + shift }));
 }
 
-/** One line for display: neutralised, bounded, trimmed. Redact before calling. */
+/** One line for display: neutralised, bounded, trimmed. */
 export function echoJoinLine(line: string): string {
   return describePart(line, JOIN_LINE_ECHO_LIMIT).trim();
 }
@@ -103,9 +101,9 @@ function touches(line: Range, r: Range): boolean {
 }
 
 function textJoin(pieces: Piece[], at: number): TokenJoin {
-  const joined = (list: Piece[]) => redactBearerTokens(list.map((p) => p.text).join(''));
+  const joined = (list: Piece[]) => list.map((p) => p.text).join('');
   const before = joined(pieces.slice(0, at));
-  const inserted = redactBearerTokens(pieces[at].text);
+  const inserted = pieces[at].text;
   const text = before + inserted + joined(pieces.slice(at + 1));
   const block: Range = { start: before.length, end: before.length + inserted.length };
 
@@ -168,9 +166,9 @@ const render = (html: string): string => htmlToText(html, 'unconditional');
 const shownLines = (rendered: string): string[] =>
   rendered.split(/\r\n|\n|\r/).map(echoJoinLine).filter((l) => l !== '');
 
-/** The lines of a run of pieces, each rendered on its own and redacted together. */
+/** The lines of a run of pieces, each rendered on its own. */
 function htmlLines(pieces: Piece[]): string[] {
-  return shownLines(redactBearerTokens(pieces.map((p) => render(p.text)).join('\n')));
+  return shownLines(pieces.map((p) => render(p.text)).join('\n'));
 }
 
 function htmlJoin(pieces: Piece[], at: number): TokenJoin {
@@ -338,9 +336,9 @@ function markupAfter(seg: string, p: number): string {
   return seg.slice(0, p);
 }
 
-/** Redacted whole, cut on the side away from the token (`keepEnd` above it), then neutralised. */
+/** Cut on the side away from the token (`keepEnd` above it), then neutralised. */
 function echoMarkup(run: string, keepEnd: boolean): string {
-  const points = [...redactBearerTokens(run)];
+  const points = [...run];
   if (points.length <= JOIN_MARKUP_ECHO_LIMIT) return describePart(points.join(''), JOIN_MARKUP_ECHO_LIMIT);
   const kept = describePart(
     (keepEnd ? points.slice(-JOIN_MARKUP_ECHO_LIMIT) : points.slice(0, JOIN_MARKUP_ECHO_LIMIT)).join(''),

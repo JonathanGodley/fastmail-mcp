@@ -3,13 +3,18 @@ import assert from 'node:assert/strict';
 import { JmapClient, EMAIL_PROPERTIES_COMPACT, EMAIL_PROPERTIES_VERBOSE, EMAIL_BODY_PROPERTIES, EMAIL_SORT_VALUES, buildMailboxInfoMap, attachMailboxInfo, findMailboxExact, resolveMailbox, buildMailboxPathMap, filterMailboxesByParent, filterTopLevelMailboxes, computeExclusion, readSourceReferences, fillUrlTemplate, decideArchiveBranch } from './jmap-client.js';
 import type { JmapRequest } from './jmap-client.js';
 import { callArguments } from './testing/mock-calls.js';
-import { InvalidInputError } from './coerce.js';
+import { InvalidInputError, registerSecret } from './coerce.js';
 import { validateFastmailUrl } from './url-validation.js';
 import { buildExclusionNote, simplifyMailbox, formatSavedAttachment, excludedCountPhrase, UNCONFIRMED_COUNT_PHRASE, NOT_EXCLUDED_PHRASE } from './response-formatters.js';
 import { FastmailAuth } from './auth.js';
 import { mkdtemp, writeFile as fsWriteFile, readFile, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+
+// A registered synthetic secret, long enough that placed after 40 characters it crosses the
+// 64-code-point echo bound.
+const REGISTERED = 'zzQX-jmap-synthetic-value';
+registerSecret(REGISTERED);
 
 // ---------- helpers ----------
 
@@ -1806,17 +1811,15 @@ describe('bulk set-error formatting', () => {
     );
   });
 
-  it('redacts a token-shaped id before truncating it', async () => {
-    // Synthetic shape only. Long enough that describing first would cut the token short of
-    // the 20 characters its pattern needs, leaving the prefix in clear.
-    const hostile = 'i'.repeat(40) + 'fmu7-aaaaaaaaaabbbbbbbbbbcccccccccc'; // allowlist-secret (synthetic)
+  it('redacts a registered secret in an id before truncating it', async () => {
+    const hostile = 'i'.repeat(40) + REGISTERED;
     stubBulkMoveFailure({ [hostile]: { type: 'notFound' }, e2: { type: 'notFound' } });
 
     await assert.rejects(
       () => client.bulkMove([hostile, 'e2'], 'mb-archive'),
       (err: Error) => {
-        assert.ok(err.message.includes('fmu[REDACTED]'));
-        assert.ok(!err.message.includes('fmu7-'));
+        assert.ok(err.message.includes('[REDACTED]'));
+        assert.ok(!err.message.includes('zzQX'));
         return true;
       },
     );
@@ -1927,9 +1930,8 @@ describe('server-authored set-error text is neutralised (#134)', () => {
     );
   });
 
-  it('a token-shaped server description is redacted before it is truncated', async () => {
-    // Synthetic shape only.
-    const description = 'd'.repeat(40) + 'fmu7-aaaaaaaaaabbbbbbbbbbcccccccccc'; // allowlist-secret (synthetic)
+  it('a registered secret in a server description is redacted before it is truncated', async () => {
+    const description = 'd'.repeat(40) + REGISTERED;
     stubMakeRequest(client, {
       methodResponses: [
         ['Email/set', { notUpdated: { e1: { type: 'serverFail', description } } }, 'updateEmail'],
@@ -1939,8 +1941,8 @@ describe('server-authored set-error text is neutralised (#134)', () => {
     await assert.rejects(
       () => client.markEmailRead('e1'),
       (err: Error) => {
-        assert.ok(err.message.includes('fmu[REDACTED]'));
-        assert.ok(!err.message.includes('fmu7-'));
+        assert.ok(err.message.includes('[REDACTED]'));
+        assert.ok(!err.message.includes('zzQX'));
         return true;
       },
     );
@@ -4803,15 +4805,13 @@ describe('resolver error prose neutralises untrusted values (#131)', () => {
     );
   });
 
-  it('a token-shaped mailbox name is redacted before it is truncated', () => {
-    // Synthetic shape only. The name is long enough that describing it first would cut the
-    // token short of the 20 characters its pattern needs, and the prefix would go out clear.
-    const name = 'N'.repeat(40) + 'fmu7-aaaaaaaaaabbbbbbbbbbcccccccccc'; // allowlist-secret (synthetic)
+  it('a registered secret in a mailbox name is redacted before it is truncated', () => {
+    const name = 'N'.repeat(40) + REGISTERED;
     assert.throws(
       () => resolveMailbox([{ id: 'mb-tok', name }], 'nope'),
       (err: Error) => {
-        assert.ok(err.message.includes('fmu[REDACTED]'));
-        assert.ok(!err.message.includes('fmu7-'));
+        assert.ok(err.message.includes('[REDACTED]'));
+        assert.ok(!err.message.includes('zzQX'));
         return true;
       },
     );
