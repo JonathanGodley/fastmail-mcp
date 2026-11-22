@@ -57,7 +57,11 @@ function fakeAccount(emails: Record<string, any>, opts: { refuse?: any } = {}) {
   return { t, calls, sets };
 }
 
-const out = (content: any) => JSON.parse(content[0].text);
+const out = (content: any) => {
+  assert.equal(content.length, 1);
+  assert.equal(content[0].type, 'text');
+  return JSON.parse(content[0].text);
+};
 
 // Wake times are reported in the configured zone; pin one so the expected values hold on any host.
 before(() => setDefaultTimezone('Australia/Sydney'));
@@ -140,6 +144,14 @@ describe('unsnooze_email', () => {
     assert.deepEqual(sets(), [{ e1: { 'mailboxIds/mb-snoozed': null, 'mailboxIds/mb-inbox': true, snoozed: null } }]);
     assert.deepEqual(emails.e1.mailboxIds, { 'mb-label': true, 'mb-inbox': true });
     assert.deepEqual(result, { emailId: 'e1', movedTo: 'Inbox', wasWakeAt: '2026-12-01T11:00:00+11:00' });
+  });
+
+  it('returns a Snoozed message with no snoozed property to the Inbox, reporting a null wasWakeAt', async () => {
+    const emails: Record<string, any> = { e1: { mailboxIds: { 'mb-snoozed': true } } };
+    const { t, sets } = fakeAccount(emails);
+    const result = out(await unsnoozeEmail({ emailId: 'e1' }, t));
+    assert.deepEqual(sets(), [{ e1: { 'mailboxIds/mb-snoozed': null, 'mailboxIds/mb-inbox': true, snoozed: null } }]);
+    assert.deepEqual(result, { emailId: 'e1', movedTo: 'Inbox', wasWakeAt: null });
   });
 
   it('refuses a message that is not snoozed and writes nothing', async () => {
