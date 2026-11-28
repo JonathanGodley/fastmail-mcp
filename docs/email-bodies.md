@@ -466,9 +466,11 @@ that looks too large for a short message, and re-read that message without the f
 
 **Thread bodies (#74)** ride on the same function. `getThread`'s `includeBodies` switches
 the `Email/get` property set to the defined `EMAIL_PROPERTIES_VERBOSE` superset (not a third
-ad-hoc list) and fetches **text values only** — a thread multiplies body size by the message
+ad-hoc list) and fetches **`textBody` values only** — a thread multiplies body size by the message
 count and the HTML alternative is the expensive half, so a message with no plain-text part
-is flagged `bodyTextUnavailable` rather than served HTML. The combined bodies are capped
+is flagged `bodyTextUnavailable` rather than served HTML. `textBody` can still hold HTML: on
+a message with no plain-text alternative it is the HTML part, so that HTML is fetched, and
+`raw: true` returns it (#249). The combined bodies are capped
 (`THREAD_BODY_BYTE_CAP`, `src/thread-handler.ts`) and the cap **errors** rather than
 truncates, for the reason #59 exists: a silently shortened body is indistinguishable from a
 short message. The cap is measured on what would actually be returned, which is what makes

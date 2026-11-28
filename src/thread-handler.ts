@@ -106,7 +106,7 @@ export async function readThread(args: any, client: ThreadClient): Promise<strin
   const simplified: SimplifiedEmail[] = emails.map((e: any) => simplifyEmail(e, { stripQuoted, htmlFallback: false }));
 
   if (includeBodies) {
-    // An HTML-only message yields no bodyText (thread reads never carry HTML), so flag it
+    // An HTML-only message yields no bodyText (the simplified thread read returns no HTML), so flag it
     // rather than let the field go missing. Set before projection so the flag rides along
     // with a projected bodyText.
     for (const msg of simplified) {
