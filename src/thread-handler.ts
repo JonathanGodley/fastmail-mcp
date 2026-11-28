@@ -61,8 +61,8 @@ export function assertThreadBodiesWithinCap(
   );
 }
 
-// Raw-path body size: everything Email/get returned in bodyValues. includeBodies fetches
-// only the text values, so this is the same quantity the simplified path measures.
+// Raw-path body size: everything Email/get returned in bodyValues. On an HTML-only message
+// that includes the HTML value, which the simplified path never returns (#249).
 function rawBodyBytes(emails: any[]): Array<{ id: string; bytes: number }> {
   return emails.map((e: any) => ({
     id: e?.id ?? '(unknown id)',

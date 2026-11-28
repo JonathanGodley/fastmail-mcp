@@ -4950,8 +4950,10 @@ export class JmapClient {
       '#ids': { resultOf: 'getThread', name: 'Thread/get', path: '/list/*/emailIds' },
     };
 
-    // includeBodies (#74) reuses VERBOSE rather than a third property list. HTML values are
-    // deliberately NOT fetched: a thread multiplies body size by the message count.
+    // includeBodies (#74) reuses VERBOSE rather than a third property list. Only textBody
+    // values are fetched, since a thread multiplies body size by the message count; on a
+    // message with no text/plain part, textBody holds the HTML part, so its HTML is fetched
+    // (#249).
     if (includeBodies) {
       emailGetParams.properties = [...EMAIL_PROPERTIES_VERBOSE];
       emailGetParams.bodyProperties = [...EMAIL_BODY_PROPERTIES];
