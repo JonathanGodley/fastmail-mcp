@@ -31,6 +31,9 @@ export async function getEmailTool(args: any, client: EmailGetClient): Promise<T
   assertStripQuotedNotRaw(strip, raw);
   const email = await client.getEmailById(emailId);
   const simplified = simplifyEmail(email, { includeHtml: verbose || wantsHtmlBody(fields), stripQuoted: strip });
+  // Set before projection so it rides along with a projected bodyText, which would
+  // otherwise come back as {} on an HTML-only message (#248).
+  if (typeof simplified.bodyText !== 'string') simplified.bodyTextUnavailable = true;
   // The draft body hash, attached HERE rather than inside simplifyEmail: whether one
   // can be issued honestly depends on what THIS READ returns, not on the message.
   // The rules are in attachDraftBodyHash; this is the only tool that calls it.

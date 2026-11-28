@@ -50,8 +50,8 @@ export interface SimplifiedEmail {
   //   quotedStripSkipped     -> stripping did not run; the string says why.
   quotedBytesStripped?: number;
   quotedStripSkipped?: string;
-  // Set by get_thread's includeBodies path for an HTML-only message (thread reads never
-  // carry HTML).
+  // The message has no plain-text body. Set by get_email and by get_thread's includeBodies
+  // path, not by simplifyEmail: list reads fetch no bodies.
   bodyTextUnavailable?: true;
   // The lost-update token edit_draft requires before it will write or clear this draft's
   // body. On a get_email read of a draft, exactly one of bodyHash / bodyHashWithheld is

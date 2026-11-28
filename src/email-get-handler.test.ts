@@ -92,6 +92,28 @@ describe('getEmailTool', () => {
     assert.deepEqual(result, { bodyHtml: '<p>Thanks, that works.</p>' });
   });
 
+  // RFC 8621 puts the text/html part in textBody when there is no text/plain alternative.
+  const htmlOnly = () => message({
+    textBody: [{ partId: 'h1', type: 'text/html' }],
+    bodyValues: { h1: { value: '<p>Thanks, that works.</p>' } },
+  });
+
+  it('flags an HTML-only message bodyTextUnavailable when fields names only bodyText (#248)', async () => {
+    const result = await read({ emailId: 'M1', fields: ['bodyText'] }, htmlOnly());
+    assert.deepEqual(result, { bodyTextUnavailable: true });
+  });
+
+  it('flags an HTML-only message bodyTextUnavailable beside its HTML fallback on a default read', async () => {
+    const result = await read({ emailId: 'M1' }, htmlOnly());
+    assert.equal(result.bodyHtml, '<p>Thanks, that works.</p>');
+    assert.equal(result.bodyTextUnavailable, true);
+  });
+
+  it('does not flag bodyTextUnavailable on a message with a plain-text body', async () => {
+    const result = await read({ emailId: 'M1' });
+    assert.equal(result.bodyTextUnavailable, undefined);
+  });
+
   it('refuses fields with raw before the fetch', async () => {
     await assertRefusedBeforeFetch({ emailId: 'M1', raw: true, fields: ['subject'] }, /^fields cannot be combined with raw:true/);
   });
